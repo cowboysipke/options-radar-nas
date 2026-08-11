@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "discord-options-radar"
+version = "0.1.0"
+description = "Discord unusual-options consensus, Futu enrichment, and paper trading"
+requires-python = ">=3.8"
+dependencies = [
+  "PyYAML>=5.4",
+  "Pillow>=8.4",
+  "pywin32>=303; platform_system == 'Windows'",
+  "pywinauto>=0.6.8; platform_system == 'Windows'",
+  "pystray>=0.19; platform_system == 'Windows'",
+  "rapidocr-onnxruntime>=1.4,<2",
+  "pydantic>=1.10,<2",
+]
+
+[project.optional-dependencies]
+bot = ["discord.py>=2.4,<3"]
+futu = ["futu-api>=9,<11"]
+dev = ["pytest>=7,<9"]
+nas = ["APScheduler>=3.10,<4", "playwright>=1.49,<2", "lark-oapi>=1.4,<2", "futu-api>=10,<11"]
+
+[project.scripts]
+options-radar = "options_radar.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["options_radar*"]
+
+[tool.setuptools.package-data]
+options_radar = ["opend_release_manifest.json"]

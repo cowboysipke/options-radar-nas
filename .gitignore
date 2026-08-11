@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.env
+.venv/
+*.egg-info/
+config.yaml
+data/*.db
+data/*.db-*
+evidence/
+reports/*.md
+logs/
+nas-data/
+secrets/
+.env.nas

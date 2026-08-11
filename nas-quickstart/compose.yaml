@@ -1,0 +1,32 @@
+name: options-radar
+
+services:
+  options-radar:
+    image: ghcr.io/cowboysipke/options-radar-nas:stable
+    pull_policy: always
+    container_name: options-radar
+    restart: unless-stopped
+    init: true
+    shm_size: "1gb"
+    environment:
+      TZ: Asia/Shanghai
+      DATA_DIR: /data
+      CONFIG_PATH: /data/config.yaml
+      SETUP_HOST: 0.0.0.0
+      SETUP_PORT: "8787"
+      CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium
+    ports:
+      - "8787:8787"
+    volumes:
+      - options-radar-data:/data
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  options-radar-data:
+    name: options-radar-data

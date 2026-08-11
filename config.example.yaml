@@ -1,0 +1,57 @@
+timezone: Asia/Shanghai
+database_path: data/options_radar.db
+evidence_dir: evidence
+
+discord:
+  source_server: ""
+  source_channels:
+    使用指南: guide
+    分析师订阅面板: subscriptions
+    异常期权: flow
+    pa分析师: pa
+    mr分析师: mr
+    qmr分析师: qmr
+    fqd分析师: fqd
+
+futu:
+  enabled: true
+  host: 127.0.0.1
+  port: 11111
+  security_firm: NONE
+  auto_hold_quote_right: true
+  watchlist_group: Options Radar
+  max_quote_age_seconds: 300
+
+ai:
+  provider: deepseek
+  base_url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}
+  flash_model: ${DEEPSEEK_FLASH_MODEL:deepseek-v4-flash}
+  pro_model: ${DEEPSEEK_PRO_MODEL:deepseek-v4-pro}
+
+scoring:
+  recommendation_threshold: 65
+  alert_threshold: 80
+  disagreement_threshold: 0.25
+  min_dte: 14
+  max_dte: 60
+  min_abs_delta: 0.30
+  max_abs_delta: 0.65
+  max_spread_pct: 0.12
+  min_open_interest: 100
+  max_snapshot_age_seconds: 60
+
+analyst_families:
+  pa: price_action
+  mr: momentum_reversal
+  qmr: momentum_reversal
+  fpd: flow_positioning
+  fqd: flow_positioning
+
+paper:
+  starting_cash: 100000
+  risk_per_trade: 0.01
+  max_open_positions: 5
+  take_profit_pct: 0.35
+  stop_loss_pct: 0.25
+  max_holding_business_days: 5
+  exit_before_expiry_days: 3
