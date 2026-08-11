@@ -8,7 +8,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
     CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium \
     DATA_DIR=/data \
-    CONFIG_PATH=/data/config.yaml
+    CONFIG_PATH=/data/config.yaml \
+    SETUP_HOST=0.0.0.0 \
+    SETUP_PORT=8787
 
 # Debian publishes Chromium for both amd64 and arm64. Using the distribution
 # browser avoids architecture-specific Playwright browser bundles.

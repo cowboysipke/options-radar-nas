@@ -379,7 +379,9 @@ class NasRuntime:
                 except OSError:
                     pass
         print(f"SETUP CODE: {token}", flush=True)
-        host = os.getenv("SETUP_HOST", "127.0.0.1")
+        # This process is the web entrypoint of the Docker image. Binding to
+        # container loopback leaves a published host port unreachable.
+        host = os.getenv("SETUP_HOST", "0.0.0.0")
         port = int(os.getenv("SETUP_PORT", "8787"))
         self.setup_server = create_setup_server(
             host, port, self.store, token, self.health, callbacks=self.dashboard_callbacks()
