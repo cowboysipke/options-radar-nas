@@ -119,6 +119,22 @@ class DashboardHttpTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["synced"], 4)
         self.assertIn(("futu_sync", {"symbols": ["SAP"]}), self.calls)
 
+    def test_browser_futu_action_returns_setup_page_with_feedback(self):
+        body = urlencode({"csrf": self.csrf})
+        status, headers, page = self.request(
+            "POST", "/futu/send-code", body,
+            {
+                "Cookie": self.cookie,
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Content-Length": str(len(body)),
+            },
+        )
+        self.assertEqual(status, 200)
+        self.assertIn("charset=utf-8", headers["Content-Type"])
+        self.assertIn("一次性配置", page)
+        self.assertIn("操作已完成", page)
+        self.assertIn(("futu_send_verification", {}), self.calls)
+
 
 if __name__ == "__main__":
     unittest.main()

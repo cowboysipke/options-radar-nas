@@ -434,6 +434,17 @@ POST_APIS = {
     "/api/actions/backup": "backup",
 }
 
+# Browser-facing action URLs deliberately avoid API-looking navigation. Some
+# privacy extensions block form navigation to paths containing words such as
+# ``send-verification`` and show ERR_BLOCKED_BY_CLIENT before rendering the
+# valid server response.
+FORM_ACTIONS = {
+    "/futu/send-code": "futu_send_verification",
+    "/futu/submit-code": "futu_submit_verification",
+    "/futu/relogin": "futu_relogin",
+    "/futu/sync": "futu_sync",
+}
+
 
 class SetupRequestHandler(BaseHTTPRequestHandler):
     server_version = "OptionsRadarDashboard/2"
@@ -597,6 +608,19 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
             self.app.logout(session_id)
             self._redirect("/", {"Set-Cookie": f"{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"})
             return
+        if path in FORM_ACTIONS:
+            callback_payload = {key: value for key, value in values.items() if key != "csrf"}
+            result = self._callback(FORM_ACTIONS[path], callback_payload)
+            if isinstance(result, Mapping):
+                message = str(result.get("message", "")).strip()
+                if not message:
+                    state = str(result.get("status", "ok"))
+                    message = "操作已完成。" if state != "error" else "操作出错，请查看系统页。"
+            else:
+                message = "操作已完成。"
+            status = HTTPStatus.INTERNAL_SERVER_ERROR if isinstance(result, Mapping) and result.get("status") == "error" else HTTPStatus.OK
+            self._send(status, self._setup_page(csrf, message))
+            return
         if path in POST_APIS:
             callback_payload = {key: value for key, value in values.items() if key != "csrf"}
             result = self._callback(POST_APIS[path], callback_payload)
@@ -677,7 +701,7 @@ label{{display:block;margin:13px 0 5px;font-weight:650}}input{{width:100%;paddin
             f'<span>{html.escape(label)}</span><strong>{"已保存" if present else "待配置"}</strong>'
             for label, present in statuses.items()
         )
-        notice = f'<p class="{"ok" if message.startswith("配置已保存") else "error"}">{html.escape(message)}</p>' if message else ""
+        notice = f'<p class="{"error" if ("出错" in message or "失败" in message) else "ok"}">{html.escape(message)}</p>' if message else ""
         qr_path = Path(os.getenv("DATA_DIR", "/data")) / "evidence" / "discord-login.png"
         qr_html = '<h2>Discord扫码登录</h2><img src="/discord-login.png" alt="Discord登录二维码" style="max-width:360px;width:100%">' if qr_path.is_file() else ""
         captcha_path = Path(os.getenv("DATA_DIR", "/data")) / "opend-profile" / ".com.futunn.FutuOpenD" / "F3CNN" / "PicVerifyCode.png"
@@ -688,9 +712,9 @@ label{{display:block;margin:13px 0 5px;font-weight:650}}input{{width:100%;paddin
             '<form method="post" action="/save"><input type="hidden" name="csrf" value="' + html.escape(csrf) + '">'
             '<div class="grid"><section class="card"><h2>基本信息</h2>' + "".join(inputs) + '</section>'
             '<section class="card"><h2>密钥与登录</h2>' + "".join(secret_inputs) + '</section></div><button>保存并启用</button></form>'
-            '<section class="card"><h2>富途维护</h2><p>验证码、重新登录和同步由OpenD运行时回调处理。</p>'
-            + self._action_forms(csrf, (("/api/futu/send-verification", "发送验证码"), ("/api/futu/relogin", "重新登录"), ("/api/futu/sync", "立即同步")))
-            + f'<form method="post" action="/api/futu/submit-verification"><input type="hidden" name="csrf" value="{html.escape(csrf)}">'
+            '<section class="card"><h2>富途维护</h2><p>首次启动会在后台安装约467MB的OpenD；已显示“就绪”时无需再发送验证码。</p>'
+            + self._action_forms(csrf, (("/futu/send-code", "发送验证码"), ("/futu/relogin", "重新登录"), ("/futu/sync", "立即同步")))
+            + f'<form method="post" action="/futu/submit-code"><input type="hidden" name="csrf" value="{html.escape(csrf)}">'
               '<label>手机验证码</label><input name="verification_code" inputmode="numeric" autocomplete="one-time-code">'
               '<label>图形验证码（出现时填写）</label><input name="captcha_code" autocomplete="off"><button>提交验证码</button></form>'
             + captcha_html + qr_html + '</section>'

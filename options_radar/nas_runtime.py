@@ -159,11 +159,22 @@ class NasRuntime:
         release = load_opend_release()
         return OpenDManager(self.paths["root"], release)
 
-    def _ensure_opend(self) -> None:
-        """Install/configure/start OpenD once setup has supplied its credentials."""
+    def _ensure_opend(self, *, wait: bool = True) -> bool:
+        """Install/configure/start OpenD once setup has supplied its credentials.
 
-        with self._opend_lock:
+        The initial official OpenD archive is large. Dashboard requests use the
+        non-blocking mode so a click immediately reports ``installing`` while the
+        scheduler-owned installation continues in the background.
+        """
+
+        acquired = self._opend_lock.acquire(blocking=wait)
+        if not acquired:
+            return False
+        try:
             self._ensure_opend_locked()
+            return True
+        finally:
+            self._opend_lock.release()
 
     def _ensure_opend_locked(self) -> None:
 
@@ -254,7 +265,12 @@ class NasRuntime:
                 self.last_error = f"core:{type(exc).__name__}"
 
     def _opend_status_callback(self, _payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        self._ensure_opend()
+        if not self._ensure_opend(wait=False):
+            return {
+                "state": "installing",
+                "running": False,
+                "message": "首次安装OpenD约467MB，正在后台下载并校验，请稍后刷新。",
+            }
         if self.opend_manager is None:
             return {"state": OpenDState.NOT_INSTALLED.value, "running": False}
         result = self.opend_manager.status().to_dict()
@@ -264,14 +280,31 @@ class NasRuntime:
                 if isinstance(core, Mapping):
                     result["api"] = core.get("opend", {})
                     result["quote_rights"] = core.get("quote_rights", {})
+                    api = result["api"]
+                    if isinstance(api, Mapping) and (api.get("ready") or api.get("qot_logged_in")):
+                        # OpenD stdout wording varies by release; the API login
+                        # state is the authoritative readiness signal.
+                        result["state"] = OpenDState.READY.value
             except Exception as exc:
                 result["api"] = {"status": "degraded", "error": type(exc).__name__}
         return result
 
     def _opend_send_verification(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
-        self._ensure_opend()
+        if not self._ensure_opend(wait=False):
+            return {
+                "status": "installing",
+                "message": "首次安装OpenD约467MB，正在后台下载并校验，请稍后再点。",
+            }
         if self.opend_manager is None:
             return {"status": "pending", "message": "OpenD is waiting for setup credentials"}
+        if self.component is not None and hasattr(self.component, "health"):
+            try:
+                core = self.component.health()
+                api = core.get("opend", {}) if isinstance(core, Mapping) else {}
+                if isinstance(api, Mapping) and (api.get("ready") or api.get("qot_logged_in")):
+                    return {"status": "ready", "message": "富途已连接，当前无需验证码。"}
+            except Exception:
+                pass
         kind = str(payload.get("type", payload.get("verification_type", "phone"))).lower()
         if kind in ("captcha", "picture", "pic"):
             captcha = self.opend_manager.request_captcha()
