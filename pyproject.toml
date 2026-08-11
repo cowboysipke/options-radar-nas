@@ -20,7 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 bot = ["discord.py>=2.4,<3"]
 futu = ["futu-api>=9,<11"]
-dev = ["pytest>=7,<9"]
+dev = ["pytest>=7,<10"]
 nas = ["APScheduler>=3.10,<4", "playwright>=1.49,<2", "lark-oapi>=1.4,<2", "futu-api>=10,<11"]
 
 [project.scripts]
