@@ -4,6 +4,6 @@ pywin32>=303; platform_system == "Windows"
 pywinauto>=0.6.8; platform_system == "Windows"
 pystray>=0.19; platform_system == "Windows"
 rapidocr-onnxruntime>=1.4,<2
-pydantic>=1.10,<2
+pydantic>=1.10,<3
 discord.py>=2.4,<3
 futu-api>=9,<11
