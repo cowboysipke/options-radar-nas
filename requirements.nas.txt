@@ -1,5 +1,5 @@
 PyYAML>=5.4
-pydantic>=1.10,<2
+pydantic>=1.10,<3
 Pillow>=10,<12
 rapidocr-onnxruntime>=1.4,<2
 APScheduler>=3.10,<4
