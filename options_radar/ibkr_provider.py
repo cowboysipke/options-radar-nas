@@ -365,16 +365,31 @@ class IBKRProvider:
         """TWS API has no portable user-watchlist read endpoint."""
         return []
 
+    @staticmethod
+    def _plain_symbol(symbol: str) -> str:
+        """Strip the internal market prefix (US.QQQ -> QQQ) for TWS/IB Gateway.
+
+        TWS expects bare tickers; BRK.B must stay intact (no known market
+        prefix), while US.BRK.B is normalized to BRK.B.
+        """
+        text = str(symbol or "").strip().upper()
+        if "." in text:
+            head, _, tail = text.partition(".")
+            if head in {"US", "HK", "CN", "SG", "JP", "AU", "CA"} and tail:
+                return tail
+        return text
+
     def _make_stock(self, symbol: str) -> Any:
         backend = self._ensure()
         maker = getattr(backend, "makeStock", None)
+        plain = self._plain_symbol(symbol)
         if callable(maker):
-            return maker(symbol.upper(), "SMART", "USD")
+            return maker(plain, "SMART", "USD")
         try:
             from ib_insync import Stock  # type: ignore
-            return Stock(symbol.upper(), "SMART", "USD")
+            return Stock(plain, "SMART", "USD")
         except ImportError:
-            return {"symbol": symbol.upper(), "secType": "STK", "exchange": "SMART", "currency": "USD"}
+            return {"symbol": plain, "secType": "STK", "exchange": "SMART", "currency": "USD"}
 
     def _make_option(self, item: IBKROptionContract) -> Any:
         backend = self._ensure()
@@ -405,13 +420,22 @@ class IBKRProvider:
         expiry_to: Optional[date] = None, option_type: Optional[str] = None,
     ) -> List[IBKROptionContract]:
         backend = self._ensure()
-        stock = self._make_stock(symbol)
+        plain_symbol = self._plain_symbol(symbol)
+        stock = self._make_stock(plain_symbol)
         qualified = list(backend.qualifyContracts(stock)) if hasattr(backend, "qualifyContracts") else [stock]
         underlying = qualified[0] if qualified else stock
         con_id = int(_attr(underlying, "conId", 0) or 0)
         self._request_count += 1
-        chains = list(backend.reqSecDefOptParams(symbol.upper(), "", "STK", con_id))
-        selected = next((c for c in chains if str(_attr(c, "exchange", "")).upper() == "SMART"), chains[0] if chains else None)
+        chains = list(backend.reqSecDefOptParams(plain_symbol, "", "STK", con_id))
+        # SMART routing often exposes a single near expiration while the real
+        # listings (AMEX/NASDAQOM/...) carry the full chain.  Pick the richest
+        # chain instead of blindly preferring SMART.
+        def _chain_score(chain: Any) -> int:
+            expirations = len(_attr(chain, "expirations", []) or [])
+            strikes = len(_attr(chain, "strikes", []) or [])
+            return expirations * 1000 + strikes
+
+        selected = max(chains, key=_chain_score) if chains else None
         if selected is None:
             return []
         right_filter = str(option_type or "").upper()[:1]
@@ -423,9 +447,9 @@ class IBKRProvider:
                 continue
             for strike in sorted(float(v) for v in (_attr(selected, "strikes", []) or [])):
                 for right in rights:
-                    key = f"US.{symbol.upper()}|{expiry.isoformat()}|{strike:g}|{right}"
+                    key = f"US.{plain_symbol}|{expiry.isoformat()}|{strike:g}|{right}"
                     item = IBKROptionContract(
-                        code=key, contract_key=key, symbol=symbol.upper(), expiry=expiry,
+                        code=key, contract_key=key, symbol=plain_symbol, expiry=expiry,
                         strike=strike, option_type=right, provider="ibkr",
                         exchange=str(_attr(selected, "exchange", "SMART") or "SMART"),
                         multiplier=int(_number(_attr(selected, "multiplier", 100)) or 100),
