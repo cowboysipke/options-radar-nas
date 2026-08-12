@@ -488,6 +488,7 @@ PAGE_INFO = {
     "/": ("今日推荐", "recommendations", "IBKR实时验证后的0–3张合约"),
     "/signals": ("信号明细", "signals", "Discord原文、分析师意见和融合过程"),
     "/portfolio": ("自选与持仓", "portfolio", "IBKR组合与富途一次性导入自选"),
+    "/backtest": ("回测", "backtest", "模拟盘、回测结算与策略优化"),
     "/system": ("系统诊断", "status", "IB Gateway、Discord、Massive、DeepSeek和飞书"),
     "/setup": ("设置", "status", "首次配置和连接测试"),
     "/providers": ("数据源诊断", "providers", "IBKR主源与Massive历史复核"),
