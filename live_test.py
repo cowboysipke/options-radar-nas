@@ -124,6 +124,17 @@ def render_summary(results: Dict[str, Any]) -> str:
         dd=round((backtest.get("max_drawdown") or 0) * 100, 2),
     ))
 
+    real = results.get("backtest_real") or []
+    if real:
+        lines.append("**真实K线回放**（Massive EOD，昨日top3合约）:")
+        for item in real:
+            pnl = item.get("pnl_pct")
+            lines.append("- {contract} bars={bars} 最新收盘={last_close} {status} pnl={pnl}%".format(
+                contract=item["contract"], bars=item.get("bars", 0),
+                last_close=item.get("last_close"), status=item.get("status"),
+                pnl="--" if pnl is None else round(pnl * 100, 2),
+            ))
+
     feishu = results.get("feishu") or {}
     lines.append("**飞书发送**: {status}".format(status=feishu.get("status", "?")))
     if results.get("errors"):
@@ -264,6 +275,47 @@ def main() -> None:
                 "sample_outcomes": summary["outcomes"][-12:],
             }
         print(json.dumps(results["backtest"], ensure_ascii=False, indent=2), flush=True)
+
+        # ---- Real bars replay for yesterday's top contracts (Massive EOD) ----
+        section("BACKTEST: real option bars replay (Massive EOD)")
+        real_replay: List[Dict[str, Any]] = []
+        for item in recommendations[:3]:
+            contract_key = item["contract"]
+            try:
+                bars = service.massive.aggregate_bars(
+                    service.massive.occ_ticker(contract_key),
+                    target - timedelta(days=12), target, 1, "day",
+                )
+            except Exception as exc:
+                results["errors"].append(f"massive_bars:{contract_key}:{type(exc).__name__}")
+                continue
+            if not bars:
+                continue
+            from options_radar.optimizer import OptionBar, simulate_long_option
+
+            parsed = []
+            for bar in bars:
+                stamp = datetime.fromtimestamp(float(bar["t"]) / 1000.0)
+                if None in (bar.get("o"), bar.get("h"), bar.get("l"), bar.get("c")):
+                    continue
+                parsed.append(OptionBar(
+                    observed_at=stamp, open=float(bar["o"]), high=float(bar["h"]),
+                    low=float(bar["l"]), close=float(bar["c"]), complete=True,
+                ))
+            outcome = simulate_long_option(
+                parsed, quantity=1,
+                take_profit_pct=0.35, stop_loss_pct=0.25,
+            )
+            real_replay.append({
+                "contract": contract_key,
+                "bars": len(parsed),
+                "last_close": parsed[-1].close if parsed else None,
+                "status": outcome.status,
+                "pnl_pct": round(outcome.pnl_pct, 4) if outcome.pnl_pct is not None else None,
+                "exit_reason": outcome.exit_reason,
+            })
+        results["backtest_real"] = real_replay
+        print(json.dumps(real_replay, ensure_ascii=False, indent=2), flush=True)
 
         # ---- Send summary to Feishu ----
         section("SEND: Feishu webhook")
