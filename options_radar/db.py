@@ -339,6 +339,21 @@ class Database:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(recommendations)").fetchall()}
             if "session_date" not in columns:
                 connection.execute("ALTER TABLE recommendations ADD COLUMN session_date TEXT")
+            # Provider retries can return the same field and exchange timestamp.
+            # Keep one canonical point before enforcing idempotent cache writes.
+            connection.execute(
+                """DELETE FROM market_data_points WHERE id NOT IN (
+                    SELECT MAX(id) FROM market_data_points
+                    GROUP BY instrument_key, field_name, source, quality, COALESCE(market_timestamp, received_at)
+                )"""
+            )
+            connection.execute(
+                """CREATE UNIQUE INDEX IF NOT EXISTS uq_market_point_identity
+                ON market_data_points(
+                    instrument_key, field_name, source, quality,
+                    COALESCE(market_timestamp, received_at)
+                )"""
+            )
 
     @staticmethod
     def message_hash(channel: str, analyst: str, content: str, source_timestamp: Optional[datetime]) -> str:
@@ -1127,13 +1142,25 @@ class Database:
         if not rows:
             return 0
         with self.connect() as connection:
+            before = connection.total_changes
             connection.executemany(
-                """INSERT INTO market_data_points
+                """INSERT OR IGNORE INTO market_data_points
                 (instrument_key, field_name, value, source, quality, market_timestamp, received_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 rows,
             )
-        return len(rows)
+            return connection.total_changes - before
+
+    def market_provenance(self, instrument_key: str, limit: int = 250) -> List[Dict[str, object]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT instrument_key, field_name, value, source, quality,
+                          market_timestamp, received_at
+                   FROM market_data_points WHERE instrument_key=?
+                   ORDER BY received_at DESC, id DESC LIMIT ?""",
+                (instrument_key, max(1, min(int(limit), 2000))),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     @staticmethod
     def _signal_from_row(row: sqlite3.Row) -> ParsedSignal:

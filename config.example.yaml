@@ -22,6 +22,29 @@ futu:
   watchlist_group: Options Radar
   max_quote_age_seconds: 300
 
+ibkr:
+  enabled: true
+  host: 127.0.0.1
+  port: 0
+  client_id: 71
+  readonly: true
+
+providers:
+  market_priority: [futu, ibkr, tradier, alpaca, massive, marketdata_app]
+  enabled:
+    futu: true
+    ibkr: true
+    tradier: false
+    alpaca: false
+    massive: true
+    marketdata_app: false
+  portfolio:
+    aggregate_enabled_accounts: true
+  execution:
+    accepted_quality: [realtime]
+    max_quote_age_seconds: 60
+    conflict_threshold_pct: 15
+
 ai:
   provider: deepseek
   base_url: ${DEEPSEEK_BASE_URL:https://api.deepseek.com}

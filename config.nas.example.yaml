@@ -27,6 +27,19 @@ futu:
   watchlist_group: Options Radar
   max_quote_age_seconds: 300
 
+ibkr:
+  enabled: false
+  host: 127.0.0.1
+  port: 4001
+  client_id: 71
+  readonly: true
+
+providers:
+  market_priority: [futu, ibkr, tradier, alpaca, massive, marketdata_app]
+  enabled: {futu: true, ibkr: false, tradier: false, alpaca: false, massive: true, marketdata_app: false}
+  portfolio: {aggregate_enabled_accounts: true}
+  execution: {accepted_quality: [realtime], max_quote_age_seconds: 60, conflict_threshold_pct: 15}
+
 ai:
   provider: deepseek
   base_url: https://api.deepseek.com
@@ -63,5 +76,11 @@ secret_refs:
   deepseek_api_key: /data/secrets/deepseek_api_key
   feishu_app_secret: /data/secrets/feishu_app_secret
   futu_login_password_md5: /data/secrets/futu_login_password_md5
+  ibkr_flex_token: /data/secrets/ibkr_flex_token
+  massive_api_key: /data/secrets/massive_api_key
+  alpaca_api_key: /data/secrets/alpaca_api_key
+  alpaca_api_secret: /data/secrets/alpaca_api_secret
+  marketdata_api_key: /data/secrets/marketdata_api_key
+  tradier_token: /data/secrets/tradier_token
 
 setup_completed: false

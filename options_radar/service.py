@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 from .ai_provider import DeepSeekProvider
 from .analytics import update_analyst_weights_from_outcomes
 from .backtest_service import BacktestCoordinator
+from .backup_providers import AlpacaProvider, MarketDataAppProvider, TradierProvider
 from .config import AppConfig, load_config
 from .db import Database
 from .discord_source import DiscordBrowserSource
@@ -27,12 +28,17 @@ from .futu_provider import (
     FutuOptionContract,
     FutuProvider,
 )
+from .ibkr_flex import IBKRFlexClient
+from .ibkr_provider import IBKRProvider
+from .massive_client import MassiveClient
 from .models import BrokerSnapshot, FlowEvent, MarketSnapshot, PortfolioContext, RawMessage, SourceCursor
 from .paper import build_candidate
 from .parser import parse_analyst_message, parse_flow_message
 from .reports import daily_report, portfolio_markdown
 from .rulebook import RulebookCompiler
 from .scoring import evaluate_consensus
+from .provider_adapters import FutuUnifiedProvider, MassiveUnifiedProvider
+from .provider_registry import ProviderRegistry, market_snapshot_from_composite
 from .timeutil import us_session_date_from_china_time
 
 
@@ -73,6 +79,12 @@ def _secret_environment(config: AppConfig) -> None:
     mapping = {
         "deepseek_api_key": "DEEPSEEK_API_KEY_FILE",
         "feishu_app_secret": "FEISHU_APP_SECRET_FILE",
+        "ibkr_flex_token": "IBKR_FLEX_TOKEN_FILE",
+        "massive_api_key": "MASSIVE_API_KEY_FILE",
+        "alpaca_api_key": "ALPACA_API_KEY_FILE",
+        "alpaca_api_secret": "ALPACA_API_SECRET_FILE",
+        "marketdata_api_key": "MARKETDATA_API_KEY_FILE",
+        "tradier_token": "TRADIER_TOKEN_FILE",
     }
     for name, environment in mapping.items():
         value = str(config.section("secret_refs").get(name, "")).strip()
@@ -158,6 +170,51 @@ class OptionsRadarService:
             host=str(futu.get("host", "127.0.0.1")),
             port=int(futu.get("port", 11111)),
             security_firm=str(futu.get("security_firm", "NONE")),
+        )
+        provider_config = self.config.section("providers")
+        ibkr_config = self.config.section("ibkr")
+        self.ibkr = IBKRProvider(
+            host=str(ibkr_config.get("host", "127.0.0.1")),
+            port=int(ibkr_config.get("port", 0)) or None,
+            client_id=int(ibkr_config.get("client_id", 71)),
+        )
+        self.ibkr_flex = IBKRFlexClient()
+        self.massive = MassiveClient()
+        def secret_value(direct: str, file_var: str) -> str:
+            value = os.getenv(direct, "").strip()
+            path = os.getenv(file_var, "").strip()
+            if not value and path and Path(path).is_file():
+                value = Path(path).read_text(encoding="utf-8").strip()
+            return value
+
+        self.alpaca = AlpacaProvider(
+            secret_value("ALPACA_API_KEY", "ALPACA_API_KEY_FILE"),
+            secret_value("ALPACA_API_SECRET", "ALPACA_API_SECRET_FILE"),
+        )
+        self.marketdata_app = MarketDataAppProvider(
+            secret_value("MARKETDATA_API_KEY", "MARKETDATA_API_KEY_FILE")
+        )
+        self.tradier = TradierProvider(
+            secret_value("TRADIER_TOKEN", "TRADIER_TOKEN_FILE"),
+            sandbox=str(os.getenv("TRADIER_MODE", "sandbox")).lower() != "live",
+        )
+        execution_config = dict(provider_config.get("execution", {}))
+        enabled_config = dict(provider_config.get("enabled", {}))
+        self.providers = ProviderRegistry(
+            {
+                "futu": FutuUnifiedProvider(self.futu),
+                "ibkr": self.ibkr,
+                "tradier": self.tradier,
+                "alpaca": self.alpaca,
+                "massive": MassiveUnifiedProvider(self.massive),
+                "marketdata_app": self.marketdata_app,
+            },
+            priority=provider_config.get("market_priority", [
+                "futu", "ibkr", "tradier", "alpaca", "massive", "marketdata_app",
+            ]),
+            enabled=enabled_config,
+            max_quote_age_seconds=int(execution_config.get("max_quote_age_seconds", 60)),
+            conflict_threshold_pct=float(execution_config.get("conflict_threshold_pct", 15)),
         )
         self.history_market = FutuHistoryAdapter(self.futu)
         self.backtests = BacktestCoordinator(self.database, self.history_market, self.config.section("paper"))
@@ -362,41 +419,23 @@ class OptionsRadarService:
         }
 
     def _market_for_event(self, event: FlowEvent, target_date: date) -> MarketSnapshot:
-        contract = self._resolve_contract(event)
-        if contract is None:
-            return MarketSnapshot(event.contract_key, datetime.utcnow(), provider="futu_opend", data_status="missing")
-        subscription = self.futu.subscribe_candidates([contract.code])
-        raw = self.futu.get_snapshots([contract.code]).get(contract.code)
-        if raw is None:
-            return MarketSnapshot(
-                event.contract_key, datetime.utcnow(), futu_code=contract.code,
-                provider="futu_opend", data_status="missing",
-                field_quality={"subscription": subscription.status},
-            )
-        now = datetime.utcnow()
-        market_time = _naive_utc(raw.market_timestamp)
-        maximum_age = int(self.config.section("futu").get("max_quote_age_seconds", 300))
-        fresh = market_time is None or (now - market_time).total_seconds() <= maximum_age
-        delayed = "DELAY" in str(raw.data_type or "").upper()
-        status = "ok" if raw.bid is not None and raw.ask is not None and fresh and not delayed else (
-            "eod" if raw.last is not None else "missing"
-        )
+        composite = self.providers.composite_snapshot(event.contract_key)
+        snapshot = market_snapshot_from_composite(composite)
         features = self._underlying_features(event.symbol, target_date)
-        snapshot = MarketSnapshot(
-            contract_key=event.contract_key, observed_at=_naive_utc(raw.observed_at) or now,
-            futu_code=contract.code, bid=raw.bid, ask=raw.ask, last=raw.last,
-            volume=raw.volume, open_interest=raw.open_interest,
-            implied_volatility=raw.implied_volatility, delta=raw.delta,
-            underlying_price=raw.underlying_price, trend_alignment=features["trend"],
-            data_status=status, provider="futu_opend", field_quality=dict(raw.field_quality),
-            underlying_previous_high=features["high"], underlying_previous_low=features["low"],
-            underlying_atr14=features["atr"],
+        snapshot.trend_alignment = features["trend"]
+        snapshot.underlying_previous_high = features["high"]
+        snapshot.underlying_previous_low = features["low"]
+        snapshot.underlying_atr14 = features["atr"]
+        futu_candidate = composite.candidates.get("futu")
+        if futu_candidate:
+            snapshot.futu_code = futu_candidate.instrument_code
+        self.database.save_market_data_points(
+            event.contract_key,
+            {name: {
+                "value": point.value, "source": point.provider, "quality": point.quality,
+                "market_timestamp": point.market_timestamp.isoformat() if point.market_timestamp else None,
+            } for name, point in composite.fields.items()},
         )
-        snapshot.field_quality.update({
-            "subscription": subscription.status,
-            "market_timestamp": market_time.isoformat() if market_time else "missing",
-            "freshness": "native" if fresh else "stale",
-        })
         return snapshot
 
     def _evaluate(self, target_date: date) -> List[Dict[str, Any]]:
@@ -441,6 +480,10 @@ class OptionsRadarService:
                 hard_filter = "买卖价差缺失或超过默认上限"
             elif market.open_interest is None or market.open_interest < float(scoring.get("min_open_interest", 100)):
                 hard_filter = "Open Interest 缺失或低于默认下限"
+            elif market.data_status != "ok":
+                hard_filter = "缺少新鲜实时bid/ask，仅进入观察榜"
+            elif market.data_conflicts:
+                hard_filter = "多供应商实时行情冲突，暂停生成入场限价"
             if hard_filter:
                 evaluation.score = min(evaluation.score, 64.0)
                 evaluation.grade = "C" if evaluation.score >= 50 else "D"
@@ -627,7 +670,66 @@ class OptionsRadarService:
     def dashboard_contracts(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         return self.dashboard_recommendations({})
 
+    def dashboard_providers(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
+        result = self.providers.statuses()
+        result["ibkr_flex"] = {
+            "configured": self.ibkr_flex.configured, "connected": False,
+            "status": "configured" if self.ibkr_flex.configured else "not_configured",
+            "quality": "eod",
+        }
+        return result
+
+    def provider_status(self, provider: str = "", **_kwargs: Any) -> Any:
+        return self.providers.status(str(provider))
+
+    def test_provider(self, provider: str = "", **_kwargs: Any) -> Any:
+        return self.providers.test(str(provider))
+
+    def enable_provider(self, provider: str = "", **_kwargs: Any) -> Any:
+        return self.providers.set_enabled(str(provider), True)
+
+    def disable_provider(self, provider: str = "", **_kwargs: Any) -> Any:
+        return self.providers.set_enabled(str(provider), False)
+
+    def set_provider_priority(self, provider: str = "", priority: int = 0, **_kwargs: Any) -> Any:
+        return {"market_priority": self.providers.set_priority(str(provider), int(priority))}
+
+    def market_provenance(self, contract_key: str = "", **_kwargs: Any) -> Any:
+        live = self.providers.provenance(str(contract_key))
+        live["stored_points"] = self.database.market_provenance(str(contract_key))
+        return live
+
+    def market_compare(self, contract_key: str = "", **_kwargs: Any) -> Any:
+        return self.providers.compare(str(contract_key))
+
+    def discover_ibkr(self, **_kwargs: Any) -> Any:
+        return {"endpoints": [item.__dict__ for item in self.ibkr.discover()]}
+
+    def sync_ibkr(self, **_kwargs: Any) -> Any:
+        snapshots = self.ibkr.sync_accounts()
+        for item in snapshots:
+            self.database.save_broker_snapshot(BrokerSnapshot(
+                as_of=_naive_utc(item.observed_at) or datetime.utcnow(), nav=item.nav, cash=item.cash,
+                positions=item.positions, source="ibkr", quality=item.quality,
+            ))
+        return {
+            "status": "ok", "accounts": len(snapshots),
+            "positions": sum(len(item.positions) for item in snapshots),
+            "nav_present": any(item.nav is not None for item in snapshots),
+        }
+
     def dashboard_callbacks(self) -> Dict[str, Any]:
+        def provider_action(payload: Mapping[str, Any]) -> Any:
+            action = str(payload.get("action", "test"))
+            methods = {
+                "test": self.test_provider, "enable": self.enable_provider,
+                "disable": self.disable_provider, "priority": self.set_provider_priority,
+            }
+            method = methods.get(action)
+            if method is None:
+                raise ValueError(f"unknown provider action: {action}")
+            return method(**{key: value for key, value in payload.items() if key != "action"})
+
         return {
             "recommendations": self.dashboard_recommendations,
             "portfolio": self.dashboard_portfolio,
@@ -635,6 +737,17 @@ class OptionsRadarService:
             "analysts": self.dashboard_analysts,
             "backtest": self.dashboard_backtest,
             "contracts": self.dashboard_contracts,
+            "providers": self.dashboard_providers,
+            "provider_status": lambda payload: self.provider_status(**payload),
+            "provider_test": lambda payload: self.test_provider(**payload),
+            "provider_enable": lambda payload: self.enable_provider(**payload),
+            "provider_disable": lambda payload: self.disable_provider(**payload),
+            "provider_priority": lambda payload: self.set_provider_priority(**payload),
+            "provider_action": provider_action,
+            "market_provenance": lambda payload: self.market_provenance(**payload),
+            "market_compare": lambda payload: self.market_compare(**payload),
+            "ibkr_discover": lambda payload: self.discover_ibkr(**payload),
+            "ibkr_sync": lambda payload: self.sync_ibkr(**payload),
             "collect": lambda payload: self.collect(bool(payload.get("backfill", False))),
             "report": lambda _payload: {"queue_id": self.publish_daily()},
             "futu_sync": lambda _payload: _as_jsonable(self.sync_broker(force=True)),
@@ -678,6 +791,7 @@ class OptionsRadarService:
             self._feishu_closed = True
         self.source.close()
         self.futu.close()
+        self.ibkr.close()
         self._started = False
 
     def health(self) -> Dict[str, Any]:
@@ -696,6 +810,7 @@ class OptionsRadarService:
                 "positions": len(broker.positions) if broker else 0,
             },
             "watchlist_count": len(self._watch_symbols()),
+            "providers": self.providers.statuses(),
             "last_backtest": self._last_backtest, "last_optimization": self._last_optimization,
         }
 
