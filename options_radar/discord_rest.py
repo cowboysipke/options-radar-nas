@@ -325,7 +325,7 @@ class DiscordRestSource(DiscordSource):
             return output
 
     def health(self) -> Dict[str, object]:
-        return {
+        result: Dict[str, object] = {
             "status": self._state,
             "collector": "discord_rest",
             "token_configured": bool(self.token),
@@ -337,6 +337,23 @@ class DiscordRestSource(DiscordSource):
             "last_error": self._last_error,
             "messages_seen": self._messages_seen,
         }
+        # Probe token validity with a lightweight read-only call.
+        if self.token and self._state != "stopped":
+            try:
+                self._request("GET", "/users/@me")
+                result["token_valid"] = True
+            except Exception as exc:
+                text = str(exc)
+                if "http_401" in text:
+                    result["token_valid"] = False
+                    result["token_error"] = "expired_or_revoked"
+                    result["status"] = "token_invalid"
+                elif "http_403" in text:
+                    result["token_valid"] = False
+                    result["token_error"] = "forbidden"
+                else:
+                    result["token_valid"] = None
+        return result
 
     def close(self) -> None:
         return None

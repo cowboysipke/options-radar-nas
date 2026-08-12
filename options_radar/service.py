@@ -799,13 +799,16 @@ class OptionsRadarService:
         return today
 
     def dashboard_recommendations(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
-        return [json.loads(str(row["payload_json"])) for row in self.database.recommendations_for_date(self._dashboard_date())]
+        date_str = str((_payload or {}).get("date", "")).strip()
+        session = date.fromisoformat(date_str) if date_str else self._dashboard_date()
+        return [json.loads(str(row["payload_json"])) for row in self.database.recommendations_for_date(session)]
 
     def dashboard_portfolio(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         return {symbol: _as_jsonable(context) for symbol, context in self._portfolio.items()}
 
     def dashboard_signals(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
-        session = self._dashboard_date()
+        date_str = str((_payload or {}).get("date", "")).strip()
+        session = date.fromisoformat(date_str) if date_str else self._dashboard_date()
         rows = []
         for event in self.database.flow_events_for_date(session):
             rows.append({
@@ -822,6 +825,17 @@ class OptionsRadarService:
 
     def dashboard_analysts(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         return self.database.analyst_rows()
+
+    def dashboard_dates(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
+        """Return all distinct session dates with stored recommendations, newest first."""
+        try:
+            with self.database.connect() as connection:
+                rows = connection.execute(
+                    "SELECT DISTINCT session_date FROM recommendations WHERE session_date IS NOT NULL ORDER BY session_date DESC LIMIT 60"
+                ).fetchall()
+            return [str(row["session_date"]) for row in rows]
+        except Exception:
+            return []
 
     def dashboard_backtest(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         return {"paper": self.database.paper_stats(), "last_run": self._last_backtest, "optimization": self._last_optimization}
@@ -895,6 +909,7 @@ class OptionsRadarService:
             "signals": self.dashboard_signals,
             "rules": self.dashboard_rules,
             "analysts": self.dashboard_analysts,
+            "dashboard_dates": self.dashboard_dates,
             "backtest": self.dashboard_backtest,
             "backtest_replay": lambda payload: self.replay_backtest(**{k: v for k, v in payload.items() if k in ("start", "end")}),
             "contracts": self.dashboard_contracts,

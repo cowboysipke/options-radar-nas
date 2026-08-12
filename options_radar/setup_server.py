@@ -22,7 +22,7 @@ from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import yaml
@@ -31,6 +31,7 @@ import yaml
 SESSION_COOKIE = "radar_setup_session"
 BUILD_VERSION = os.getenv("OPTIONS_RADAR_BUILD_VERSION", "v2-local")
 BUILD_SHA = os.getenv("OPTIONS_RADAR_GIT_SHA", "working-tree")
+_dashboard_date_cache: List[str] = []
 SYMBOLIC_NAME = re.compile(r"^[A-Za-z0-9_.:/ @\-\u4e00-\u9fff]{0,160}$")
 MODEL_NAME = re.compile(r"^[A-Za-z0-9._:/-]{1,100}$")
 DashboardCallback = Callable[[Mapping[str, Any]], Any]
@@ -682,7 +683,7 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
             if path == "/setup":
                 self._send(HTTPStatus.OK, self._setup_page(csrf))
             else:
-                self._send(HTTPStatus.OK, self._dashboard_page(path, csrf))
+                self._send(HTTPStatus.OK, self._dashboard_page(path, csrf, query))
             return
         self._send(HTTPStatus.NOT_FOUND, "Not found", "text/plain; charset=utf-8")
 
@@ -820,9 +821,18 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
         )
         return self._shell("Options Radar 登录", content)
 
-    def _dashboard_page(self, path: str, csrf: str) -> str:
+    def _dashboard_page(self, path: str, csrf: str, query: Optional[Mapping[str, str]] = None) -> str:
+        params = dict(query or {})
         title, callback, description = PAGE_INFO[path]
-        data = self._callback(callback, {}) if callback != "status" or callback in self.app.callbacks else dict(self.app.health())
+        use_default = callback == "status" and callback not in self.app.callbacks
+        data = dict(self.app.health()) if use_default else self._callback(callback, params)
+        # Populate the date-selector cache from live data.
+        if path in {"/", "/signals"}:
+            dates = self.app.invoke("dashboard_dates", {})
+            if isinstance(dates, list) and dates:
+                _dashboard_date_cache.clear()
+                _dashboard_date_cache.extend(dates)
+        encoded = html.escape(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         encoded = html.escape(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         action_cards = ""
         if path == "/":
@@ -839,8 +849,27 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
             ))
         elif path == "/providers":
             action_cards = self._provider_actions(csrf)
-        content = f'<h1>{html.escape(title)}</h1><p class="sub">{html.escape(description)}</p><div id="action-result"></div>{action_cards}{self._visual_summary(path, data)}<details class="card"><summary>查看原始数据</summary><pre>{encoded}</pre></details>'
+        content = f'<h1>{html.escape(title)}</h1><p class="sub">{html.escape(description)}</p>{self._date_selector(path, params)}<div id="action-result"></div>{action_cards}{self._visual_summary(path, data)}<details class="card"><summary>查看原始数据</summary><pre>{encoded}</pre></details>'
         return self._shell(f"{title} - Options Radar", content, path)
+
+    @staticmethod
+    def _date_selector(path: str, params: Mapping[str, str]) -> str:
+        if path not in {"/", "/signals"}:
+            return ""
+        if not _dashboard_date_cache:
+            return ""
+        selected = str(params.get("date", "")).strip()
+        options = [f'<option value="">最近（自动选择）</option>']
+        for d in _dashboard_date_cache:
+            sel = ' selected' if d == selected else ''
+            options.append(f'<option value="{html.escape(d)}"{sel}>{html.escape(d)}</option>')
+        return (
+            '<form method="get" class="card" style="display:flex;align-items:center;gap:8px">'
+            f'<label style="white-space:nowrap">交易日</label>'
+            f'<select name="date" onchange="this.form.submit()">{"".join(options)}</select>'
+            '<noscript><button>查看</button></noscript>'
+            '</form>'
+        )
 
     @staticmethod
     def _visual_summary(path: str, data: Any) -> str:
