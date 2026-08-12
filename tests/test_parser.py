@@ -42,7 +42,7 @@ class ParserTests(unittest.TestCase):
         signal = parse_analyst_message(message)
         self.assertEqual(signal.direction, "BEAR")
         self.assertEqual(signal.direction_source, "inferred_from_contract")
-        self.assertEqual(signal.analyst_family, "mean_reversion")
+        self.assertEqual(signal.analyst_family, "momentum_reversal")
 
     def test_qmr_categorical_confidence(self):
         message = RawMessage(

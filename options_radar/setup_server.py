@@ -1,4 +1,4 @@
-"""Lightweight authenticated Chinese dashboard for the NAS container.
+﻿"""Lightweight authenticated Chinese dashboard for the NAS container.
 
 The module intentionally uses only the Python standard library.  Runtime
 services are connected through named callbacks so the HTTP layer has no broker,
@@ -46,7 +46,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "pa": "pa分析师",
             "mr": "mr分析师",
             "qmr": "qmr分析师",
-            "fpd": "fqd分析师",
+            "fqd": "fqd分析师",
             "guide": "使用指南",
             "subscriptions": "分析师订阅面板",
         },
@@ -208,7 +208,7 @@ FIELDS = (
     Field("pa_channel", "discord.channel_names.pa", "PA频道", _plain),
     Field("mr_channel", "discord.channel_names.mr", "MR频道", _plain),
     Field("qmr_channel", "discord.channel_names.qmr", "QMR频道", _plain),
-    Field("fpd_channel", "discord.channel_names.fpd", "FQD频道", _plain),
+    Field("fqd_channel", "discord.channel_names.fqd", "FQD频道", _plain),
     Field("guide_channel", "discord.channel_names.guide", "使用指南频道", _plain),
     Field("subscriptions_channel", "discord.channel_names.subscriptions", "分析师订阅面板频道", _plain),
     Field("feishu_app_id", "notifications.feishu_app_id", "飞书 App ID", _plain),
@@ -239,7 +239,7 @@ class SetupConfigStore:
                 if isinstance(source_channels, dict):
                     discord["channel_names"] = {
                         analyst: channel for channel, analyst in source_channels.items()
-                        if analyst in {"flow", "pa", "mr", "qmr", "fpd", "guide", "subscriptions"}
+                        if analyst in {"flow", "pa", "mr", "qmr", "fpd", "fqd", "guide", "subscriptions"}
                     }
             return _deep_merge(DEFAULT_CONFIG, data)
 
@@ -302,7 +302,8 @@ class SetupConfigStore:
                 raise ValueError("Discord频道名称不可重复")
             data["discord"]["source_channels"] = {
                 channel_names[source]: source
-                for source in ("flow", "pa", "mr", "qmr", "fpd", "guide", "subscriptions")
+                for source in ("flow", "pa", "mr", "qmr", "fqd", "fpd", "guide", "subscriptions")
+                if source in channel_names
             }
             data["market"]["provider"] = "ibkr"
             data["ibkr"]["enabled"] = True
@@ -925,7 +926,7 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
         return '<div class="card"><b>快捷操作</b><div>' + "".join(f'<form data-ajax="1" style="display:inline" method="post" action="{path}"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button>{html.escape(labels.get(path, label))}</button></form>' for path, label in actions) + "</div></div>"
 
     def _setup_page(self, csrf: str, message: str = "") -> str:
-        display_labels = {"timezone":"\u65f6\u533a","discord_server":"Discord\u670d\u52a1\u5668","flow_channel":"\u5f02\u5e38\u671f\u6743\u9891\u9053","pa_channel":"PA\u5206\u6790\u5e08\u9891\u9053","mr_channel":"MR\u5206\u6790\u5e08\u9891\u9053","qmr_channel":"QMR\u5206\u6790\u5e08\u9891\u9053","fpd_channel":"FQD\u5206\u6790\u5e08\u9891\u9053","guide_channel":"\u4f7f\u7528\u6307\u5357\u9891\u9053","subscriptions_channel":"\u5206\u6790\u5e08\u8ba2\u9605\u9762\u677f\u9891\u9053","feishu_app_id":"\u98de\u4e66 App ID","flash_model":"DeepSeek\u65e5\u5e38\u6a21\u578b","pro_model":"DeepSeek\u590d\u6838\u6a21\u578b","report_delay":"\u6536\u76d8\u540e\u65e5\u62a5\u5ef6\u8fdf\uff08\u5206\u949f\uff09"}
+        display_labels = {"timezone":"\u65f6\u533a","discord_server":"Discord\u670d\u52a1\u5668","flow_channel":"\u5f02\u5e38\u671f\u6743\u9891\u9053","pa_channel":"PA\u5206\u6790\u5e08\u9891\u9053","mr_channel":"MR\u5206\u6790\u5e08\u9891\u9053","qmr_channel":"QMR\u5206\u6790\u5e08\u9891\u9053","fqd_channel":"FQD\u5206\u6790\u5e08\u9891\u9053","guide_channel":"\u4f7f\u7528\u6307\u5357\u9891\u9053","subscriptions_channel":"\u5206\u6790\u5e08\u8ba2\u9605\u9762\u677f\u9891\u9053","feishu_app_id":"\u98de\u4e66 App ID","flash_model":"DeepSeek\u65e5\u5e38\u6a21\u578b","pro_model":"DeepSeek\u590d\u6838\u6a21\u578b","report_delay":"\u6536\u76d8\u540e\u65e5\u62a5\u5ef6\u8fdf\uff08\u5206\u949f\uff09"}
         data = self.app.store.load()
         inputs = []
         for field in FIELDS:

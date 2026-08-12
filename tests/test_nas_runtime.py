@@ -1,4 +1,4 @@
-import http.client
+﻿import http.client
 import hashlib
 import os
 import sqlite3
@@ -42,7 +42,7 @@ class SetupConfigTests(unittest.TestCase):
                 "pa_channel": "pa-room",
                 "mr_channel": "mr-room",
                 "qmr_channel": "qmr-room",
-                "fpd_channel": "fpd-room",
+                "fqd_channel": "fqd-room",
                 "guide_channel": "guide-room",
                 "subscriptions_channel": "subscriptions-room",
                 "feishu_app_id": "cli_123",
@@ -73,7 +73,7 @@ class SetupConfigTests(unittest.TestCase):
             form = {
                 "timezone": "Asia/Shanghai", "discord_server": "Alpha",
                 "flow_channel": "flow", "pa_channel": "pa", "mr_channel": "mr",
-                "qmr_channel": "qmr", "fpd_channel": "fpd", "guide_channel": "guide",
+                "qmr_channel": "qmr", "fqd_channel": "fqd", "guide_channel": "guide",
                 "subscriptions_channel": "subscriptions", "feishu_app_id": "cli_123",
                 "futu_user_id": "10001", "flash_model": "deepseek-chat",
                 "pro_model": "deepseek-reasoner", "report_delay": "75",
@@ -90,7 +90,7 @@ class SetupConfigTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SetupConfigStore(Path(directory) / "config.yaml")
             values = {field: "same" for field in (
-                "discord_server", "flow_channel", "pa_channel", "mr_channel", "qmr_channel", "fpd_channel",
+                "discord_server", "flow_channel", "pa_channel", "mr_channel", "qmr_channel", "fqd_channel",
                 "guide_channel", "subscriptions_channel",
                 "feishu_app_id", "ibkr_query_id",
             )}

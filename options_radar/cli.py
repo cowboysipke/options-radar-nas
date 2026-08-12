@@ -108,6 +108,57 @@ def command_backtest(args) -> None:
         service.stop()
 
 
+def command_e2e(args) -> None:
+    """End-to-end self check: fixture ingest -> consensus -> replay -> verify."""
+    from datetime import timedelta
+
+    from .e2e_fixture import build_fixture_messages
+    from .service import OptionsRadarService
+
+    config_path = str(Path(args.config).resolve())
+    target = date.fromisoformat(args.date) if args.date else us_session_date_from_china_time(datetime.now())
+    service = OptionsRadarService(config_path, str(Path(config_path).parent))
+    try:
+        service._ingest(build_fixture_messages(target))
+        results = service._evaluate(target)
+        end = target + timedelta(days=9)
+        settlement = service.backtests.replay(target, end)
+        summary = service.backtests.replay_summary(target, end)
+
+        def table_count(name: str) -> int:
+            with service.database.connect() as connection:
+                return int(connection.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0])
+
+        checks = {
+            "raw_messages": table_count("raw_messages"),
+            "parsed_signals": table_count("parsed_signals"),
+            "flow_events": table_count("flow_events"),
+            "recommendations": len(results),
+            "signal_outcomes": len(service.database.signal_outcomes()),
+            "backtest_bars": table_count("backtest_bars"),
+        }
+        ok = all(value > 0 for value in checks.values())
+        report = {
+            "ok": ok,
+            "session_date": target.isoformat(),
+            "checks": checks,
+            "top_scores": [
+                {"contract_key": item["contract_key"], "score": item["score"], "eligible": item["eligible"]}
+                for item in results[:3]
+            ],
+            "settlement": settlement,
+            "backtest": {
+                "filled": summary["filled"],
+                "no_fill": summary["no_fill"],
+                "avg_net_return": summary["avg_net_return"],
+            },
+        }
+        print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
+        raise SystemExit(0 if ok else 1)
+    finally:
+        service.stop()
+
+
 def command_doctor(args) -> None:
     pipeline = build_pipeline(args.config)
     checks = {}
@@ -191,6 +242,10 @@ def parser() -> argparse.ArgumentParser:
     backtest.add_argument("--start", help="YYYY-MM-DD")
     backtest.add_argument("--end", help="YYYY-MM-DD")
     backtest.set_defaults(func=command_backtest)
+
+    e2e = commands.add_parser("e2e", help="run the offline end-to-end self check")
+    e2e.add_argument("--date", help="session date YYYY-MM-DD (default: today)")
+    e2e.set_defaults(func=command_e2e)
 
     doctor = commands.add_parser("doctor", help="check runtime dependencies")
     doctor.set_defaults(func=command_doctor)

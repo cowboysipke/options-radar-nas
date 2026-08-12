@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -28,9 +28,10 @@ MONEY = re.compile(r"Premium\s*\$([\d,.]+)\s*([KMB])?", re.IGNORECASE)
 
 ANALYST_FAMILIES = {
     "pa": "price_action",
-    "mr": "mean_reversion",
-    "qmr": "mean_reversion",
-    "fpd": "flow_divergence",
+    "mr": "momentum_reversal",
+    "qmr": "momentum_reversal",
+    "fpd": "flow_positioning",
+    "fqd": "flow_positioning",
 }
 
 
@@ -158,7 +159,7 @@ def _confidence(text: str) -> (Optional[float], Optional[str]):
 
 def _analyst_from(message: RawMessage) -> str:
     value = (message.analyst or message.channel).lower()
-    for name in ("qmr", "fpd", "mr", "pa"):
+    for name in ("qmr", "fqd", "fpd", "mr", "pa"):
         if name in value:
             return name
     return value.strip("#@ ") or "unknown"
@@ -214,7 +215,7 @@ def parse_analyst_message(message: RawMessage, refiner: Optional[TextRefiner] = 
     }
     needs_refinement = bool(
         decision == "WATCH" or direction == "UNKNOWN" or confidence is None or not rationale
-        or (analyst in {"pa", "fpd"} and any(value is None for value in (entry, target, stop)))
+        or (analyst in {"pa", "fpd", "fqd"} and any(value is None for value in (entry, target, stop)))
     )
     if refiner and needs_refinement:
         try:
@@ -242,7 +243,7 @@ def parse_analyst_message(message: RawMessage, refiner: Optional[TextRefiner] = 
             risk_notes.append(f"LLM refinement skipped: {type(exc).__name__}")
 
     known = [decision != "WATCH", direction != "UNKNOWN", confidence is not None, bool(rationale)]
-    if analyst in {"pa", "fpd"}:
+    if analyst in {"pa", "fpd", "fqd"}:
         known.extend([entry is not None, target is not None, stop is not None])
     completeness = sum(1 for item in known if item) / len(known)
 
