@@ -723,8 +723,14 @@ label{{display:block;margin:13px 0 5px;font-weight:650}}input{{width:100%;paddin
 
     def _login_page(self, message: str = "") -> str:
         notice = f'<p class="error">{html.escape(message)}</p>' if message else ""
+        local = os.getenv("OPTIONS_RADAR_LOCAL") == "1"
+        hint = (
+            "管理口令显示在启动窗口，也保存在 <code>data-local/setup-token</code>。"
+            if local else
+            "输入容器日志中的 <code>SETUP CODE</code>，也可在 <code>/data/setup-token</code> 查看。"
+        )
         content = (
-            "<h1>异常期权助手</h1><p class=\"sub\">输入容器日志中的 <code>SETUP CODE</code>，也可在 <code>/data/setup-token</code> 查看。</p>"
+            f"<h1>异常期权助手</h1><p class=\"sub\">{hint}</p>"
             f'{notice}<div class="card"><form method="post" action="/login"><label>管理口令</label>'
             '<input name="token" type="password" required autofocus><button>进入管理面板</button></form></div>'
         )
@@ -812,8 +818,10 @@ label{{display:block;margin:13px 0 5px;font-weight:650}}input{{width:100%;paddin
         qr_html = '<h2>Discord扫码登录</h2><img src="/discord-login.png" alt="Discord登录二维码" style="max-width:360px;width:100%">' if qr_path.is_file() else ""
         captcha_path = Path(os.getenv("DATA_DIR", "/data")) / "opend-profile" / ".com.futunn.FutuOpenD" / "F3CNN" / "PicVerifyCode.png"
         captcha_html = '<h3>富途图形验证码</h3><img src="/futu-captcha.png" alt="富途图形验证码" style="max-width:360px;width:100%">' if captcha_path.is_file() else ""
+        local = os.getenv("OPTIONS_RADAR_LOCAL") == "1"
+        location = "本机的 <code>data-local/secrets</code>" if local else "NAS的 <code>/data/secrets</code>"
         content = (
-            '<h1>一次性配置</h1><p class="sub">密钥只保存在NAS的 <code>/data/secrets</code>；交易解锁保持关闭。</p>'
+            f'<h1>一次性配置</h1><p class="sub">密钥只保存在{location}；交易解锁保持关闭。</p>'
             f'{notice}<div class="card"><div class="status">{status_html}</div></div>'
             '<form method="post" action="/save"><input type="hidden" name="csrf" value="' + html.escape(csrf) + '">'
             '<div class="grid"><section class="card"><h2>基本信息</h2>' + "".join(inputs) + '</section>'
@@ -826,7 +834,7 @@ label{{display:block;margin:13px 0 5px;font-weight:650}}input{{width:100%;paddin
             + captcha_html + qr_html + '</section>'
             f'<form method="post" action="/logout"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button class="secondary">退出登录</button></form>'
         )
-        return self._shell("NAS 配置", content, "/setup")
+        return self._shell("本地配置" if local else "NAS 配置", content, "/setup")
 
 
 def create_setup_server(
