@@ -668,7 +668,9 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 self._send(HTTPStatus.BAD_REQUEST, self._setup_page(csrf, str(exc)))
                 return
-            self._send(HTTPStatus.OK, self._setup_page(csrf, "配置已保存，后台服务将自动重新加载。"))
+            reload_result = self._callback("reload_service", {})
+            message = str(reload_result.get("message", "配置已保存。")) if isinstance(reload_result, Mapping) else "配置已保存。"
+            self._send(HTTPStatus.OK, self._setup_page(csrf, message))
             return
         if path == "/logout":
             self.app.logout(session_id)

@@ -34,7 +34,14 @@ class LocalRuntime:
         callbacks: Dict[str, Any] = dict(self.service.dashboard_callbacks())
         callbacks.setdefault("status", lambda _payload: self.service.health())
         callbacks.setdefault("futu_status", lambda _payload: self.service.health().get("opend", {}))
+        callbacks["reload_service"] = self.reload_service
         return callbacks
+
+    def reload_service(self, _payload: Mapping[str, Any]) -> Dict[str, Any]:
+        self.service.stop()
+        self.service = OptionsRadarService(str(self.store.path), str(self.data_dir))
+        self.service.start()
+        return {"status": "ready", "message": "配置已保存，后台任务已启动"}
 
     def run(self, port: int = 8787, open_browser: bool = True) -> None:
         token_path = self.data_dir / "setup-token"
