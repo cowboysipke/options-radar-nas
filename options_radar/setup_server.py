@@ -23,7 +23,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import yaml
 
@@ -59,8 +59,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_quote_age_seconds": 300,
         "auto_hold_quote_right": 1,
     },
-    # Kept for backwards-compatible loading while Futu is the primary provider.
-    "ibkr": {"flex_query_id": ""},
+    "ibkr": {"enabled": True, "host": "127.0.0.1", "port": 0, "client_id": 71,
+             "readonly": True, "flex_query_id": ""},
+    "providers": {
+        "market_priority": ["futu", "ibkr", "tradier", "alpaca", "massive", "marketdata_app"],
+        "enabled": {"futu": True, "ibkr": True, "tradier": False, "alpaca": False,
+                    "massive": True, "marketdata_app": False},
+        "portfolio": {"aggregate_enabled_accounts": True},
+        "execution": {"accepted_quality": ["realtime"], "max_quote_age_seconds": 60,
+                      "conflict_threshold_pct": 15},
+    },
     "market": {"provider": "futu"},
     "ai": {
         "provider": "deepseek",
@@ -95,6 +103,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "futu_login_password_md5": "/data/secrets/futu_login_password_md5",
         "ibkr_flex_token": "/data/secrets/ibkr_flex_token",
         "massive_api_key": "/data/secrets/massive_api_key",
+        "alpaca_api_key": "/data/secrets/alpaca_api_key",
+        "alpaca_api_secret": "/data/secrets/alpaca_api_secret",
+        "marketdata_api_key": "/data/secrets/marketdata_api_key",
+        "tradier_token": "/data/secrets/tradier_token",
     },
     "setup_completed": False,
 }
@@ -103,11 +115,21 @@ SECRET_ENV_FILES = {
     "DeepSeek API Key": "DEEPSEEK_API_KEY_FILE",
     "飞书 App Secret": "FEISHU_APP_SECRET_FILE",
     "富途登录凭据": "FUTU_LOGIN_PASSWORD_MD5_FILE",
+    "Massive API Key": "MASSIVE_API_KEY_FILE",
+    "Alpaca API Key": "ALPACA_API_KEY_FILE",
+    "Alpaca API Secret": "ALPACA_API_SECRET_FILE",
+    "MarketData.app API Key": "MARKETDATA_API_KEY_FILE",
+    "Tradier Token": "TRADIER_TOKEN_FILE",
 }
 
 SECRET_FORM_FIELDS = {
     "deepseek_api_key": ("DeepSeek API Key", "deepseek_api_key"),
     "feishu_app_secret": ("飞书 App Secret", "feishu_app_secret"),
+    "massive_api_key": ("Massive API Key", "massive_api_key"),
+    "alpaca_api_key": ("Alpaca API Key", "alpaca_api_key"),
+    "alpaca_api_secret": ("Alpaca API Secret", "alpaca_api_secret"),
+    "marketdata_api_key": ("MarketData.app API Key", "marketdata_api_key"),
+    "tradier_token": ("Tradier Token", "tradier_token"),
 }
 
 
@@ -230,6 +252,11 @@ class SetupConfigStore:
             "DeepSeek API Key": "deepseek_api_key",
             "飞书 App Secret": "feishu_app_secret",
             "富途登录凭据": "futu_login_password_md5",
+            "Massive API Key": "massive_api_key",
+            "Alpaca API Key": "alpaca_api_key",
+            "Alpaca API Secret": "alpaca_api_secret",
+            "MarketData.app API Key": "marketdata_api_key",
+            "Tradier Token": "tradier_token",
         }
         result: Dict[str, bool] = {}
         for label, env_name in SECRET_ENV_FILES.items():
@@ -393,6 +420,11 @@ def secret_presence() -> Dict[str, bool]:
         "DeepSeek API Key": "deepseek_api_key",
         "飞书 App Secret": "feishu_app_secret",
         "富途登录凭据": "futu_login_password_md5",
+        "Massive API Key": "massive_api_key",
+        "Alpaca API Key": "alpaca_api_key",
+        "Alpaca API Secret": "alpaca_api_secret",
+        "MarketData.app API Key": "marketdata_api_key",
+        "Tradier Token": "tradier_token",
     }
     return {
         label: bool(_read_secret(env_name) or (
@@ -410,6 +442,7 @@ PAGE_INFO = {
     "/portfolio": ("富途组合", "portfolio", "持仓、自选与风险集中度"),
     "/analysts": ("分析师", "analysts", "分析师表现与权重"),
     "/backtest": ("回测", "backtest", "模拟净值与策略版本"),
+    "/providers": ("数据源", "providers", "连接状态、行情权限、延迟、额度与字段来源"),
     "/system": ("系统", "status", "服务状态、日志与备份"),
 }
 
@@ -422,6 +455,7 @@ GET_APIS = {
     "/api/rules": "rules",
     "/api/analysts": "analysts",
     "/api/backtest": "backtest",
+    "/api/providers": "providers",
 }
 
 POST_APIS = {
@@ -432,7 +466,14 @@ POST_APIS = {
     "/api/actions/collect": "collect",
     "/api/actions/report": "report",
     "/api/actions/backup": "backup",
+    "/api/ibkr/discover": "ibkr_discover",
+    "/api/ibkr/sync": "ibkr_sync",
 }
+
+PROVIDER_STATUS_ROUTE = re.compile(r"^/api/providers/([a-z0-9_-]+)/status$")
+PROVIDER_ACTION_ROUTE = re.compile(r"^/api/providers/([a-z0-9_-]+)/(test|enable|disable|priority)$")
+MARKET_PROVENANCE_PREFIX = "/api/market/provenance/"
+MARKET_COMPARE_PREFIX = "/api/market/compare/"
 
 # Browser-facing action URLs deliberately avoid API-looking navigation. Some
 # privacy extensions block form navigation to paths containing words such as
@@ -511,6 +552,18 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
         except Exception as exc:  # boundary: runtime errors become stable HTTP responses
             return {"status": "error", "message": str(exc)}
 
+    @staticmethod
+    def _contract_key(path: str, prefix: str) -> Optional[str]:
+        """Return one decoded contract identifier without accepting sub-paths."""
+        if not path.startswith(prefix):
+            return None
+        value = unquote(path[len(prefix):]).strip()
+        if not value or len(value) > 160 or "/" in value or "\\" in value:
+            return None
+        if any(ord(character) < 32 for character in value):
+            return None
+        return value
+
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
         path = parsed.path
@@ -541,11 +594,20 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
             self._headers(HTTPStatus.OK, "image/png", len(payload))
             self.wfile.write(payload)
             return
-        if path in GET_APIS:
+        provider_match = PROVIDER_STATUS_ROUTE.fullmatch(path)
+        contract_key = self._contract_key(path, MARKET_PROVENANCE_PREFIX)
+        if path in GET_APIS or provider_match or contract_key is not None:
             if not session:
                 self._json(HTTPStatus.UNAUTHORIZED, {"status": "unauthorized"})
                 return
-            name = GET_APIS[path]
+            if provider_match:
+                name = "provider_status"
+                query["provider"] = provider_match.group(1)
+            elif contract_key is not None:
+                name = "market_provenance"
+                query["contract_key"] = contract_key
+            else:
+                name = GET_APIS[path]
             if name == "status" and name not in self.app.callbacks:
                 result = dict(self.app.health())
             else:
@@ -621,9 +683,20 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
             status = HTTPStatus.INTERNAL_SERVER_ERROR if isinstance(result, Mapping) and result.get("status") == "error" else HTTPStatus.OK
             self._send(status, self._setup_page(csrf, message))
             return
-        if path in POST_APIS:
+        provider_match = PROVIDER_ACTION_ROUTE.fullmatch(path)
+        contract_key = self._contract_key(path, MARKET_COMPARE_PREFIX)
+        if path in POST_APIS or provider_match or contract_key is not None:
             callback_payload = {key: value for key, value in values.items() if key != "csrf"}
-            result = self._callback(POST_APIS[path], callback_payload)
+            if provider_match:
+                callback_name = "provider_action"
+                callback_payload["provider"] = provider_match.group(1)
+                callback_payload["action"] = provider_match.group(2)
+            elif contract_key is not None:
+                callback_name = "market_compare"
+                callback_payload["contract_key"] = contract_key
+            else:
+                callback_name = POST_APIS[path]
+            result = self._callback(callback_name, callback_payload)
             status = HTTPStatus.INTERNAL_SERVER_ERROR if isinstance(result, Mapping) and result.get("status") == "error" else HTTPStatus.OK
             self._json(status, result)
             return
@@ -632,8 +705,9 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _shell(title: str, content: str, active: str = "") -> str:
         links = (("/", "首页"), ("/contracts", "合约"), ("/rules", "规则库"),
-                 ("/portfolio", "富途组合"), ("/analysts", "分析师"),
-                 ("/backtest", "回测"), ("/system", "系统"), ("/setup", "设置"))
+                  ("/portfolio", "富途组合"), ("/analysts", "分析师"),
+                  ("/backtest", "回测"), ("/providers", "数据源"),
+                  ("/system", "系统"), ("/setup", "设置"))
         nav = "".join(
             f'<a class="{"active" if path == active else ""}" href="{path}">{label}</a>' for path, label in links
         )
@@ -665,8 +739,40 @@ label{{display:block;margin:13px 0 5px;font-weight:650}}input{{width:100%;paddin
             action_cards = self._action_forms(csrf, (("/api/actions/collect", "立即采集"), ("/api/actions/report", "生成日报"), ("/api/futu/sync", "同步富途")))
         elif path == "/system":
             action_cards = self._action_forms(csrf, (("/api/futu/relogin", "重新登录OpenD"), ("/api/futu/sync", "同步富途"), ("/api/actions/backup", "创建备份")))
+        elif path == "/providers":
+            action_cards = self._provider_actions(csrf)
         content = f'<h1>{title}</h1><p class="sub">{description}</p>{action_cards}<section class="card"><h2>当前数据</h2><pre>{encoded}</pre></section>'
         return self._shell(f"{title} - Options Radar", content, path)
+
+    @staticmethod
+    def _provider_actions(csrf: str) -> str:
+        labels = (
+            ("futu", "富途 OpenD"),
+            ("ibkr", "IBKR TWS/Gateway"),
+            ("ibkr_flex", "IBKR Flex"),
+            ("massive", "Massive"),
+            ("alpaca", "Alpaca"),
+            ("marketdata_app", "MarketData.app"),
+            ("tradier", "Tradier"),
+        )
+        cards = []
+        for provider, label in labels:
+            base = f"/api/providers/{provider}"
+            actions = SetupRequestHandler._action_forms(
+                csrf,
+                ((f"{base}/test", "一键检测"), (f"{base}/enable", "启用"), (f"{base}/disable", "停用")),
+            )
+            priority = (
+                f'<form method="post" action="{base}/priority">'
+                f'<input type="hidden" name="csrf" value="{html.escape(csrf)}">'
+                '<label>优先级</label><input type="number" min="1" max="99" name="priority" required>'
+                '<button class="secondary">调整优先级</button></form>'
+            )
+            cards.append(f'<section class="card"><h2>{html.escape(label)}</h2>{actions}{priority}</section>')
+        ibkr = SetupRequestHandler._action_forms(
+            csrf, (("/api/ibkr/discover", "扫描本机 TWS/Gateway"), ("/api/ibkr/sync", "同步 IBKR")),
+        )
+        return '<div class="card"><b>自动选择主数据源，或逐个调整优先级</b></div><div class="grid">' + "".join(cards) + "</div>" + ibkr
 
     @staticmethod
     def _action_forms(csrf: str, actions: Tuple[Tuple[str, str], ...]) -> str:

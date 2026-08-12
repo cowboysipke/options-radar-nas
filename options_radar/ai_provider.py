@@ -8,9 +8,10 @@ import sqlite3
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, Iterator, List, Optional, Type
 
 from pydantic import BaseModel, Field, ValidationError, validator
 
@@ -118,10 +119,15 @@ class AICacheStore:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(str(self.database_path), timeout=30)
         connection.row_factory = sqlite3.Row
-        return connection
+        try:
+            yield connection
+            connection.commit()
+        finally:
+            connection.close()
 
     def _initialize(self) -> None:
         with self._connect() as connection:

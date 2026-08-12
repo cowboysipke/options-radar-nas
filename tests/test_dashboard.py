@@ -34,6 +34,13 @@ class DashboardHttpTests(unittest.TestCase):
             "portfolio": callback("portfolio", {"watchlist": ["SAP"]}),
             "analysts": callback("analysts", {"pa": {"weight": 1.0}}),
             "backtest": callback("backtest", {"win_rate": 0.61}),
+            "providers": callback("providers", {"items": [{"provider": "ibkr", "connected": True}]}),
+            "provider_status": callback("provider_status", {"provider": "ibkr", "quality": "realtime"}),
+            "provider_action": callback("provider_action", {"status": "ok"}),
+            "market_provenance": callback("market_provenance", {"provider": "ibkr"}),
+            "market_compare": callback("market_compare", {"conflict": False}),
+            "ibkr_discover": callback("ibkr_discover", {"ports": [7497]}),
+            "ibkr_sync": callback("ibkr_sync", {"status": "ok", "positions": 2}),
             "futu_sync": callback("futu_sync", {"status": "ok", "synced": 4}),
             "futu_send_verification": callback("futu_send_verification", {"status": "sent"}),
         }
@@ -83,6 +90,7 @@ class DashboardHttpTests(unittest.TestCase):
             "/portfolio": "富途组合",
             "/analysts": "分析师",
             "/backtest": "回测",
+            "/providers": "数据源",
             "/system": "系统",
         }
         for path, text in pages.items():
@@ -134,6 +142,63 @@ class DashboardHttpTests(unittest.TestCase):
         self.assertIn("一次性配置", page)
         self.assertIn("操作已完成", page)
         self.assertIn(("futu_send_verification", {}), self.calls)
+
+    def test_provider_page_has_chinese_navigation_and_one_click_actions(self):
+        status, _, page = self.request("GET", "/providers", headers={"Cookie": self.cookie})
+        self.assertEqual(status, 200)
+        self.assertIn("数据源", page)
+        self.assertIn("一键检测", page)
+        self.assertIn("扫描本机 TWS/Gateway", page)
+        self.assertIn('/api/providers/ibkr/test', page)
+        self.assertIn(("providers", {}), self.calls)
+
+    def test_dynamic_provider_status_and_provenance_routes(self):
+        status, _, body = self.request(
+            "GET", "/api/providers/ibkr/status?detail=1", headers={"Cookie": self.cookie},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["quality"], "realtime")
+        self.assertIn(("provider_status", {"detail": "1", "provider": "ibkr"}), self.calls)
+
+        status, _, body = self.request(
+            "GET", "/api/market/provenance/AAPL%2020260116C00200000", headers={"Cookie": self.cookie},
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["provider"], "ibkr")
+        self.assertIn(
+            ("market_provenance", {"contract_key": "AAPL 20260116C00200000"}), self.calls,
+        )
+
+    def test_provider_and_market_post_routes_keep_csrf_and_route_payload(self):
+        payload = json.dumps({"priority": 2}).encode("utf-8")
+        headers = {
+            "Cookie": self.cookie,
+            "Content-Type": "application/json",
+            "Content-Length": str(len(payload)),
+            "X-CSRF-Token": self.csrf,
+        }
+        status, _, _ = self.request("POST", "/api/providers/ibkr/priority", payload, headers)
+        self.assertEqual(status, 200)
+        self.assertIn(
+            ("provider_action", {"priority": 2, "provider": "ibkr", "action": "priority"}), self.calls,
+        )
+
+        status, _, _ = self.request(
+            "POST", "/api/market/compare/SPY%2020260116P00500000", payload, headers,
+        )
+        self.assertEqual(status, 200)
+        self.assertIn(
+            ("market_compare", {"priority": 2, "contract_key": "SPY 20260116P00500000"}), self.calls,
+        )
+
+        no_csrf = dict(headers)
+        no_csrf.pop("X-CSRF-Token")
+        status, _, body = self.request("POST", "/api/ibkr/discover", payload, no_csrf)
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body)["status"], "forbidden")
+        status, _, body = self.request("POST", "/api/ibkr/sync", payload, headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["positions"], 2)
 
 
 if __name__ == "__main__":

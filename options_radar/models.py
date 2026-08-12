@@ -127,6 +127,8 @@ class MarketSnapshot:
     underlying_previous_high: Optional[float] = None
     underlying_previous_low: Optional[float] = None
     underlying_atr14: Optional[float] = None
+    provenance: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    data_conflicts: List[str] = field(default_factory=list)
 
     @property
     def midpoint(self) -> Optional[float]:

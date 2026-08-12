@@ -351,6 +351,16 @@ class NasRuntime:
             "analysts": ("dashboard_analysts", "analysts", "analyst_performance"),
             "backtest": ("dashboard_backtest", "backtest_summary", "run_backtests"),
             "system": ("system_status", "health"),
+            "providers": ("dashboard_providers", "providers", "provider_statuses"),
+            "provider_status": ("provider_status", "get_provider_status"),
+            "provider_test": ("test_provider", "provider_test"),
+            "provider_enable": ("enable_provider", "provider_enable"),
+            "provider_disable": ("disable_provider", "provider_disable"),
+            "provider_priority": ("set_provider_priority", "provider_priority"),
+            "market_provenance": ("market_provenance", "get_market_provenance"),
+            "market_compare": ("compare_market", "market_compare"),
+            "ibkr_discover": ("discover_ibkr", "ibkr_discover"),
+            "ibkr_sync": ("sync_ibkr", "ibkr_sync"),
         }.get(callback_name, (callback_name,))
         method = next((getattr(component, name) for name in method_names if callable(getattr(component, name, None))), None)
         if method is None:
@@ -372,6 +382,13 @@ class NasRuntime:
         # Query parameters irrelevant to a read-only page are not forwarded.
         return method()
 
+    def _provider_action(self, payload: Mapping[str, Any]) -> Any:
+        action = str(payload.get("action", "")).strip().lower()
+        if action not in {"test", "enable", "disable", "priority"}:
+            raise ValueError("unknown provider action")
+        forwarded = {key: value for key, value in payload.items() if key != "action"}
+        return self._component_action(f"provider_{action}", forwarded)
+
     def dashboard_callbacks(self) -> Mapping[str, Any]:
         callbacks: Dict[str, Any] = {
             "status": lambda _payload: self.health(),
@@ -381,10 +398,13 @@ class NasRuntime:
             "futu_relogin": self._opend_relogin,
             "backup": self._backup_callback,
             "system": lambda _payload: self.health(),
+            "provider_action": self._provider_action,
         }
         for name in (
             "futu_sync", "collect", "report", "recommendations", "portfolio",
-            "contracts", "rules", "analysts", "backtest",
+            "contracts", "rules", "analysts", "backtest", "providers",
+            "provider_status", "market_provenance", "market_compare",
+            "ibkr_discover", "ibkr_sync",
         ):
             callbacks[name] = lambda payload, callback_name=name: self._component_action(callback_name, payload)
         return callbacks
