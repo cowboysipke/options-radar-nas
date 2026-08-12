@@ -627,6 +627,24 @@ class OptionsRadarService:
         output.sort(key=lambda item: float(item["score"]), reverse=True)
         return output
 
+    def publish_top5(self) -> Optional[str]:
+        """Send the top-5 scored recommendations to Feishu as a regular update."""
+        results = self._last_results
+        if not results:
+            results = [json.loads(str(row["payload_json"])) for row in self.database.recommendations_for_date(self._trade_date())]
+        top = sorted(
+            [r for r in results if float(r.get("score", 0)) > 0],
+            key=lambda x: float(x.get("score", 0)), reverse=True,
+        )[:5]
+        if not top:
+            return None
+        body = "\n".join(
+            f"**#{i+1} {item['contract_key']}**｜{item['score']:.1f}分｜{item['grade']}｜{item['direction']}｜行情:{item.get('market_status','-')}"
+            for i, item in enumerate(top)
+        )
+        source = "top5-" + datetime.utcnow().strftime("%Y%m%d%H%M")
+        return self.feishu.enqueue_card(build_card("今日推荐 TOP5", body, "blue"), source_message_id=source)
+
     def collect(self, backfill: bool = False) -> List[Dict[str, Any]]:
         with self._lock:
             try:
@@ -636,14 +654,7 @@ class OptionsRadarService:
                 self._last_results = results
                 self._last_collection = datetime.utcnow().isoformat()
                 self._last_error = None
-                strong = [item for item in results if item["grade"] == "A" and item["eligible"]]
-                if strong:
-                    body = "\n".join(
-                        f"**{item['contract_key']}**｜{item['score']:.1f}｜{item['direction']}｜"
-                        f"触发 {item.get('underlying_entry') or '--'}｜限价 {item.get('max_entry_price') or '--'}"
-                        for item in strong[:3]
-                    )
-                    self.feishu.enqueue_card(build_card("A级异常期权提醒", body, "red"), source_message_id="strong-" + self._last_collection)
+                self.publish_top5()
                 source_health = self.source.health()
                 if source_health.get("status") == "login_required":
                     self.feishu.enqueue_card(
@@ -1025,6 +1036,7 @@ class OptionsRadarService:
             executors={"default": ThreadPoolExecutor(1)},
         )
         self._scheduler.add_job(self.collect, "interval", seconds=60, id="discord-poll", max_instances=1, coalesce=True)
+        self._scheduler.add_job(self.publish_top5, "interval", minutes=5, id="feishu-top5", max_instances=1, coalesce=True)
         self._scheduler.add_job(self.backfill, "interval", minutes=10, id="discord-rescan", max_instances=1, coalesce=True)
         self._scheduler.add_job(self.backfill, CronTrigger(hour=16, minute=30, timezone="America/New_York"), id="discord-close-backfill")
         self._scheduler.add_job(self.sync_broker, "interval", minutes=5, id="ibkr-sync", max_instances=1, coalesce=True)

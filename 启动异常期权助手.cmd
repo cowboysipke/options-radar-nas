@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 setlocal
 cd /d "%~dp0"
 title Options Radar 本地面板
