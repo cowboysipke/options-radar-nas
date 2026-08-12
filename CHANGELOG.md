@@ -80,4 +80,27 @@
 ### 测试统计
 
 - 基线：111 passed
-- 当前：**132 passed**（+21 测试：discord_rest 8、backtest_replay 4、feishu webhook 4、e2e 1、channel resolution 1、已有的其他测试修复）
+- 当前：**132 passed**
+
+### 2026-08-12 第二阶段修复
+
+11. **面板日期选择器**（`service.py`、`setup_server.py`）
+    - `?date=YYYY-MM-DD` 参数 + 交易日下拉框，`_dashboard_date()` 自动回退
+    - `PAGE_INFO` 补充 `/backtest` 路由
+
+12. **Discord Token 有效性探测**（`discord_rest.py`）
+    - `health()` 内调 `GET /users/@me`，401 标记 `token_invalid`
+
+13. **持仓页公司名称**（`service.py`、`setup_server.py`）
+    - IBKR `reqContractDetails` 获取 `longName`，懒加载缓存
+    - 持仓表格增加"公司名称""最新价""涨跌"列
+
+14. **回测页历史回放**（`service.py`、`setup_server.py`）
+    - `dashboard_backtest()` 自动对 DB 中已有交易日结算 `replay`
+    - 回测页展示成交/收益/回撤 + 逐笔明细
+
+15. **推荐页评价标准说明**（`setup_server.py`）
+    - `/` 页面底部加可展开的评分维度表（共识/历史/信号质量/行情/组合适配）
+
+16. **CMD 启动脚本修复**（`启动异常期权助手.cmd`）
+    - 删 `chcp 65001`（解决中文乱码）、加 `title` + `pause`（+21 测试：discord_rest 8、backtest_replay 4、feishu webhook 4、e2e 1、channel resolution 1、已有的其他测试修复）

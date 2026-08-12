@@ -888,7 +888,7 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                     html.escape(str(item.get("take_profit", "-"))), html.escape(str(item.get("stop_loss", "-"))),
                     html.escape(str(item.get("invalidation", ""))),
                 ))
-            return '<div class="grid">' + "".join(cards) + '</div>'
+            return '<div class="grid">' + "".join(cards) + '</div><details class="card" style="margin-top:16px"><summary>评价标准说明</summary><table><tr><th>维度</th><th>权重</th><th>说明</th></tr><tr><td>共识</td><td>40%</td><td>各分析家族（价格行为/动量反转/资金流向）方向一致性，跨家族冲突扣分封顶64</td></tr><tr><td>历史</td><td>20%</td><td>分析师过去推荐的盈亏表现（基于回测结果动态调整）</td></tr><tr><td>信号质量</td><td>15%</td><td>信号完整性×置信度×时效性</td></tr><tr><td>行情质量</td><td>15%</td><td>实时bid/ask、价差、Open Interest验证</td></tr><tr><td>组合适配</td><td>10%</td><td>标的是否在持仓/自选中、仓位集中度</td></tr></table><p>A级≥80分（飞书提醒）｜B级65-79（合格）｜C级50-64（观察榜）｜D级&lt;50（过滤）</p></details>'
         if path == "/signals" and isinstance(data, list):
             rows = []
             for item in data:
