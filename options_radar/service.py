@@ -29,6 +29,7 @@ from .futu_provider import (
     FutuOptionContract,
     FutuProvider,
 )
+from .history_adapters import CompositeHistoryAdapter
 from .ibkr_flex import IBKRFlexClient
 from .ibkr_provider import IBKRProvider
 from .massive_client import MassiveClient
@@ -114,6 +115,33 @@ class IBKRHistoryAdapter:
     @staticmethod
     def occ_ticker(contract_key: str) -> str:
         return contract_key
+
+    def underlying_features(self, symbol: str, end: date, lookback_days: int = 45) -> Dict[str, Optional[float]]:
+        try:
+            bars = self.provider.get_underlying_bars(symbol, end - timedelta(days=lookback_days), end, "1 day")
+        except Exception:
+            bars = []
+        complete = [bar for bar in bars if None not in (bar.high, bar.low, bar.close)]
+        if not complete:
+            return {"high": None, "low": None, "atr": None, "trend": None}
+        previous = complete[-1]
+        ranges: List[float] = []
+        prior_close: Optional[float] = None
+        for bar in complete[-15:]:
+            values = [float(bar.high) - float(bar.low)]
+            if prior_close is not None:
+                values += [abs(float(bar.high) - prior_close), abs(float(bar.low) - prior_close)]
+            ranges.append(max(values))
+            prior_close = float(bar.close)
+        closes = [float(bar.close) for bar in complete[-20:]]
+        trend = 0.0
+        if closes:
+            mean = sum(closes) / len(closes)
+            trend = 1.0 if closes[-1] > mean else -1.0 if closes[-1] < mean else 0.0
+        return {
+            "high": float(previous.high), "low": float(previous.low),
+            "atr": sum(ranges[-14:]) / min(14, len(ranges)), "trend": trend,
+        }
 
     def resolve(self, contract_key: str) -> Optional[Any]:
         if contract_key in self._codes:
@@ -260,7 +288,7 @@ class OptionsRadarService:
             max_quote_age_seconds=int(execution_config.get("max_quote_age_seconds", 60)),
             conflict_threshold_pct=float(execution_config.get("conflict_threshold_pct", 15)),
         )
-        self.history_market = IBKRHistoryAdapter(self.ibkr)
+        self.history_market = CompositeHistoryAdapter(self.massive, IBKRHistoryAdapter(self.ibkr))
         self.backtests = BacktestCoordinator(self.database, self.history_market, self.config.section("paper"))
         self.rulebook = RulebookCompiler(self.database, self.config.section("analyst_families"))
         self._last_backtest: Optional[Dict[str, Any]] = None
@@ -475,31 +503,7 @@ class OptionsRadarService:
         return None
 
     def _underlying_features(self, symbol: str, target_date: date) -> Dict[str, Optional[float]]:
-        try:
-            bars = self.ibkr.get_underlying_bars(symbol, target_date - timedelta(days=45), target_date, "1 day")
-        except Exception:
-            bars = []
-        complete = [bar for bar in bars if None not in (bar.high, bar.low, bar.close)]
-        if not complete:
-            return {"high": None, "low": None, "atr": None, "trend": None}
-        previous = complete[-1]
-        ranges: List[float] = []
-        prior_close: Optional[float] = None
-        for bar in complete[-15:]:
-            values = [float(bar.high) - float(bar.low)]
-            if prior_close is not None:
-                values += [abs(float(bar.high) - prior_close), abs(float(bar.low) - prior_close)]
-            ranges.append(max(values))
-            prior_close = float(bar.close)
-        closes = [float(bar.close) for bar in complete[-20:]]
-        trend = 0.0
-        if closes:
-            mean = sum(closes) / len(closes)
-            trend = 1.0 if closes[-1] > mean else -1.0 if closes[-1] < mean else 0.0
-        return {
-            "high": float(previous.high), "low": float(previous.low),
-            "atr": sum(ranges[-14:]) / min(14, len(ranges)), "trend": trend,
-        }
+        return self.history_market.underlying_features(symbol, target_date, lookback_days=45)
 
     def _market_for_event(self, event: FlowEvent, target_date: date) -> MarketSnapshot:
         composite = self.providers.composite_snapshot(event.contract_key)

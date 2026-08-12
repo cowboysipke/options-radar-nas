@@ -109,6 +109,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "alpaca_api_secret": "/data/secrets/alpaca_api_secret",
         "marketdata_api_key": "/data/secrets/marketdata_api_key",
         "tradier_token": "/data/secrets/tradier_token",
+        "discord_user_token": "/data/secrets/discord_user_token",
     },
     "setup_completed": False,
 }
@@ -121,6 +122,7 @@ SECRET_ENV_FILES = {
     "Alpaca API Secret": "ALPACA_API_SECRET_FILE",
     "MarketData.app API Key": "MARKETDATA_API_KEY_FILE",
     "Tradier Token": "TRADIER_TOKEN_FILE",
+    "Discord 用户 Token": "DISCORD_USER_TOKEN_FILE",
 }
 
 SECRET_FORM_FIELDS = {
@@ -131,6 +133,7 @@ SECRET_FORM_FIELDS = {
     "alpaca_api_secret": ("Alpaca API Secret", "alpaca_api_secret"),
     "marketdata_api_key": ("MarketData.app API Key", "marketdata_api_key"),
     "tradier_token": ("Tradier Token", "tradier_token"),
+    "discord_user_token": ("Discord 用户 Token", "discord_user_token"),
 }
 
 
@@ -268,6 +271,7 @@ class SetupConfigStore:
             "Alpaca API Secret": "alpaca_api_secret",
             "MarketData.app API Key": "marketdata_api_key",
             "Tradier Token": "tradier_token",
+            "Discord 用户 Token": "discord_user_token",
         }
         result: Dict[str, bool] = {}
         for label, env_name in SECRET_ENV_FILES.items():

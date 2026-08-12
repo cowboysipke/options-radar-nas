@@ -14,6 +14,19 @@ discord:
     qmr分析师: qmr
     fqd分析师: fqd
 
+# 备用采集方式：把 Discord 用户 token 写入 secret_refs 指向的文件（或设置
+# DISCORD_USER_TOKEN 环境变量）后，将优先使用官方 REST API 读取频道历史，
+# 不再依赖浏览器 DOM 抓取。
+secret_refs:
+  deepseek_api_key: data-local/secrets/deepseek_api_key
+  feishu_app_secret: data-local/secrets/feishu_app_secret
+  discord_user_token: data-local/secrets/discord_user_token
+  massive_api_key: data-local/secrets/massive_api_key
+
+notifications:
+  provider: feishu
+  feishu_app_id: ""
+
 futu:
   enabled: false
   host: 127.0.0.1

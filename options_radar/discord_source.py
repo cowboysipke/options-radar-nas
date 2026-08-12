@@ -84,7 +84,11 @@ class DiscordBrowserSource(DiscordSource):
     authorization header is inspected.
     """
 
-    MESSAGE_SELECTOR = "li[id^='chat-messages'], [data-list-item-id^='chat-messages']"
+    MESSAGE_SELECTOR = (
+        "ol[data-list-id='chat-messages'] > li, "
+        "li[data-list-item-id^='chat-messages-'], "
+        "[data-list-item-id^='chat-messages']"
+    )
 
     def __init__(
         self,
@@ -220,6 +224,26 @@ class DiscordBrowserSource(DiscordSource):
         except Exception:
             return ""
 
+    def _wait_messages(self) -> None:
+        """Wait until Discord hydrates the message list before extracting DOM.
+
+        The client virtualizes and lazy-renders the channel.  A fixed sleep can
+        easily elapse before any message node exists, which produced the empty
+        collections seen in the field.
+        """
+        if self._page is None:
+            return
+        try:
+            self._page.wait_for_selector(
+                "ol[data-list-id='chat-messages'] li[data-list-item-id], "
+                "li[data-list-item-id^='chat-messages-']",
+                timeout=self.timeout_ms,
+            )
+        except Exception:
+            # Fall back to a short settle; the DOM extraction still runs so a
+            # still-hydrating page contributes whatever is visible.
+            self._page.wait_for_timeout(1500)
+
     def _extract_dom(self, channel_id: str) -> List[SourceMessage]:
         if self._page is None:
             return []
@@ -325,8 +349,8 @@ class DiscordBrowserSource(DiscordSource):
                 channel_url = self._resolve_channel_url(channel_id)
                 if not channel_url:
                     return []
-                self._page.goto(channel_url, wait_until="commit")
-                self._page.wait_for_timeout(5000)
+                self._page.goto(channel_url, wait_until="domcontentloaded")
+                self._wait_messages()
                 if self._logged_out():
                     self._capture_login()
                     return []
