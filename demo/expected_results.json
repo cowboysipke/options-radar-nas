@@ -1,0 +1,16 @@
+{
+  "sample_date": "2026-08-05",
+  "source": "sanitized_discord_fixture",
+  "top_results": [
+    {"contract_key": "US.AVGO|2026-08-14|425|P", "grade": "C", "score": 64.0, "direction": "BEAR"},
+    {"contract_key": "US.SKHY|2026-09-25|150|C", "grade": "C", "score": 64.0, "direction": "BULL"},
+    {"contract_key": "US.CBRS|2026-09-18|320|C", "grade": "D", "score": 49.7, "direction": "BULL"},
+    {"contract_key": "US.META|2026-08-12|602.5|P", "grade": "D", "score": 34.8, "direction": "BEAR"}
+  ],
+  "invariants": [
+    "same contract key is merged across analysts",
+    "different expiry or strike is kept separate",
+    "scores are deterministic",
+    "no realtime market data means observation-only execution status"
+  ]
+}
