@@ -36,6 +36,31 @@ def _parse_timestamp(value: object) -> datetime:
         return _utcnow()
 
 
+def source_message_as_raw(message: SourceMessage) -> RawMessage:
+    """Shared conversion for browser and REST collectors.
+
+    Discord card text often lives in embeds while the message body is just the
+    card footer.  Keep every readable line so the deterministic parser can
+    recover the contract fields without the LLM.
+    """
+    content = message.raw_text
+    if message.embeds:
+        embed_text = "\n".join(
+            str(value.get("text", "")).strip()
+            for value in message.embeds
+            if value.get("text")
+        )
+        if embed_text and embed_text not in content:
+            content = f"{content}\n{embed_text}".strip()
+    return RawMessage(
+        channel=message.channel_id, analyst=message.analyst,
+        observed_at=message.created_at,
+        source_timestamp=message.edited_at or message.created_at,
+        content=content, screenshot_path=message.evidence_uri,
+        content_hash=message.content_hash,
+    )
+
+
 class DiscordSource(ABC):
     @abstractmethod
     def fetch_since(
@@ -112,19 +137,7 @@ class DiscordBrowserSource(DiscordSource):
 
     @staticmethod
     def as_raw_message(message: SourceMessage) -> RawMessage:
-        content = message.raw_text
-        if message.embeds:
-            embed_text = "\n".join(
-                str(value.get("text", "")) for value in message.embeds if value.get("text")
-            )
-            if embed_text and embed_text not in content:
-                content = f"{content}\n{embed_text}".strip()
-        return RawMessage(
-            channel=message.channel_id, analyst=message.analyst,
-            observed_at=message.created_at, source_timestamp=message.edited_at or message.created_at,
-            content=content, screenshot_path=message.evidence_uri,
-            content_hash=message.content_hash,
-        )
+        return source_message_as_raw(message)
 
     def start(self) -> None:
         with self._lock:

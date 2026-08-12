@@ -20,6 +20,7 @@ from .backtest_service import BacktestCoordinator
 from .backup_providers import AlpacaProvider, MarketDataAppProvider, TradierProvider
 from .config import AppConfig, load_config
 from .db import Database
+from .discord_rest import DiscordRestSource, read_token
 from .discord_source import DiscordBrowserSource
 from .feishu import FeishuBot, FeishuCallbacks, build_card
 from .futu_provider import (
@@ -79,6 +80,7 @@ def _secret_environment(config: AppConfig) -> None:
     mapping = {
         "deepseek_api_key": "DEEPSEEK_API_KEY_FILE",
         "feishu_app_secret": "FEISHU_APP_SECRET_FILE",
+        "discord_user_token": "DISCORD_USER_TOKEN_FILE",
         "ibkr_flex_token": "IBKR_FLEX_TOKEN_FILE",
         "massive_api_key": "MASSIVE_API_KEY_FILE",
         "alpaca_api_key": "ALPACA_API_KEY_FILE",
@@ -272,13 +274,24 @@ class OptionsRadarService:
         if isinstance(source_channels, dict):
             channels = {str(role): str(name) for name, role in source_channels.items()}
         self.channel_roles = {str(role): str(role) for role in channels}
-        self.source = discord_source or DiscordBrowserSource(
-            profile_dir=self.data_dir / "browser-profile",
-            evidence_dir=self.data_dir / "evidence",
-            channel_urls=channels,
-            server_name=str(discord.get("source_server", "")),
-            headless=(False if os.getenv("OPTIONS_RADAR_LOCAL") == "1" else bool(discord.get("headless", True))),
-        )
+        discord_token = read_token()
+        if discord_source is not None:
+            self.source = discord_source
+        elif discord_token:
+            # Official API pagination is the reliable default; the Playwright
+            # scraper remains the fallback when no token is supplied.
+            self.source = DiscordRestSource(
+                channel_targets=channels, token=discord_token,
+                timeout_ms=int(discord.get("timeout_ms", 30000)),
+            )
+        else:
+            self.source = DiscordBrowserSource(
+                profile_dir=self.data_dir / "browser-profile",
+                evidence_dir=self.data_dir / "evidence",
+                channel_urls=channels,
+                server_name=str(discord.get("source_server", "")),
+                headless=(False if os.getenv("OPTIONS_RADAR_LOCAL") == "1" else bool(discord.get("headless", True))),
+            )
         self._portfolio: Dict[str, PortfolioContext] = {}
         self._last_results: List[Dict[str, Any]] = []
         self._last_collection: Optional[str] = None
