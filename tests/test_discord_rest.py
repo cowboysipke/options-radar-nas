@@ -37,6 +37,22 @@ class ChannelSnowflakeTests(unittest.TestCase):
         self.assertIsNone(channel_snowflake("not-a-channel"))
 
 
+class DiscordProxyTests(unittest.TestCase):
+    def test_proxy_url_enables_opener_and_reports_health(self):
+        source = DiscordRestSource(
+            channel_targets={"flow": "100000000000000001"},
+            token="t",
+            proxy_url="http://127.0.0.1:7890",
+        )
+        self.assertIsNotNone(source._opener)
+        self.assertEqual(source.health()["proxy_url"], "http://127.0.0.1:7890")
+
+    def test_no_proxy_keeps_default_urlopen(self):
+        source = DiscordRestSource(channel_targets={"flow": "100000000000000001"}, token="t")
+        self.assertIsNone(source._opener)
+        self.assertEqual(source.health()["proxy_url"], "")
+
+
 class DiscordRestSourceTests(unittest.TestCase):
     def _source(self, pages=None, page_size=100):
         source = DiscordRestSource(
@@ -83,6 +99,30 @@ class DiscordRestSourceTests(unittest.TestCase):
         self.assertEqual(len(calls), 3)
         self.assertEqual(calls[1][2]["before"], "5002")
 
+    def test_plain_list_payload_is_accepted(self):
+        # The real Discord API returns a bare JSON array for the messages
+        # endpoint; a wrapped {"messages": [...]} payload was the old
+        # fixture-only shape and silently dropped every message.
+        new = datetime(2026, 8, 6, 0, 0, tzinfo=timezone.utc)
+        source = DiscordRestSource(
+            channel_targets={"flow": "100000000000000001"},
+            token="t",
+            page_size=2,
+        )
+
+        def fake_request(method, path, params=None):
+            if params and params.get("before"):
+                return [_message(5000, "CC 2026-08-21 100 C | 解读", new)]
+            return [
+                _message(5002, "AA 2026-08-21 100 C | 解读", new),
+                _message(5001, "BB 2026-08-21 100 C | 解读", new),
+            ]
+
+        source._request = fake_request
+        messages = source.fetch_since("flow", None, scroll_pages=1)
+        self.assertEqual([item.message_id for item in messages], ["5000", "5001", "5002"])
+        self.assertEqual(source.health()["status"], "ready")
+
     def test_embed_text_is_rendered_into_raw(self):
         new = datetime(2026, 8, 6, 0, 0, tzinfo=timezone.utc)
         payload = {"messages": [{
@@ -114,6 +154,29 @@ class DiscordRestSourceTests(unittest.TestCase):
         source._request = failing
         self.assertEqual(source.fetch_since("flow", None, scroll_pages=0), [])
         self.assertEqual(source.health()["status"], "error")
+
+    def test_channel_name_resolved_through_guild_channels(self):
+        new = datetime(2026, 8, 6, 0, 0, tzinfo=timezone.utc)
+        calls = []
+
+        def fake_request(method, path, params=None):
+            calls.append(path)
+            if path == "/guilds/111111111111111111/channels":
+                return [
+                    {"id": "100000000000000001", "name": "异常期权"},
+                    {"id": "100000000000000002", "name": "pa分析师"},
+                ]
+            return {"messages": [_message(5002, "TSLA 2026-08-21 300 C | 解读", new)]}
+
+        source = DiscordRestSource(
+            channel_targets={"flow": "异常期权", "pa": "pa分析师"},
+            token="t", guild_id="111111111111111111",
+        )
+        source._request = fake_request
+        messages = source.fetch_since("flow", None, scroll_pages=0)
+        self.assertEqual([item.message_id for item in messages], ["5002"])
+        self.assertIn("/channels/100000000000000001/messages", calls)
+        self.assertEqual(source.health()["resolved_channels"], 1)
 
     def test_read_token_from_env(self):
         env = {"DISCORD_USER_TOKEN": "abc"}

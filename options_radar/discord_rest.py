@@ -101,7 +101,9 @@ class DiscordRestSource(DiscordSource):
     """Pagination-based Discord channel reader using a user token.
 
     ``channel_targets`` maps the source role (the pipeline's channel label) to
-    either a channel URL or a numeric channel id.
+    either a channel URL, a numeric channel id, or a channel name.  Names are
+    resolved through ``GET /guilds/{guild_id}/channels`` when ``guild_id`` is
+    configured, so a Chinese-only config works out of the box.
     """
 
     def __init__(
@@ -111,18 +113,24 @@ class DiscordRestSource(DiscordSource):
         base_url: str = DISCORD_API_BASE,
         timeout_ms: int = 30000,
         page_size: int = PAGE_SIZE,
+        guild_id: str = "",
+        proxy_url: str = "",
     ):
         self.channel_targets = {str(role): str(target) for role, target in channel_targets.items()}
         self.token = token
         self.base_url = base_url.rstrip("/")
         self.timeout_ms = int(timeout_ms)
         self.page_size = max(1, min(int(page_size), 100))
+        self.guild_id = str(guild_id or "").strip() or None
+        self.proxy_url = str(proxy_url or "").strip() or None
+        self._opener = self._build_opener() if self.proxy_url else None
         self._lock = threading.RLock()
         self._state = "ready" if token else "stopped"
         self._last_success: Optional[str] = None
         self._last_error: Optional[str] = None
         self._messages_seen = 0
         self._resolved: Dict[str, Optional[str]] = {}
+        self._guild_channels: Optional[Dict[str, str]] = None
 
     @property
     def channel_urls(self) -> Dict[str, str]:
@@ -133,16 +141,46 @@ class DiscordRestSource(DiscordSource):
     def as_raw_message(message: SourceMessage) -> RawMessage:
         return source_message_as_raw(message)
 
+    def _load_guild_channels(self) -> None:
+        if self._guild_channels is not None or not self.guild_id:
+            return
+        try:
+            payload = self._request("GET", f"/guilds/{self.guild_id}/channels")
+        except Exception:
+            payload = None
+        resolved: Dict[str, str] = {}
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict) and item.get("id") and item.get("name"):
+                    resolved[str(item["name"]).strip().lower()] = str(item["id"])
+        with self._lock:
+            self._guild_channels = resolved
+
     def _snowflake(self, role: str) -> Optional[str]:
         with self._lock:
             if role in self._resolved:
                 return self._resolved[role]
         target = self.channel_targets.get(role)
         if not target:
-            self._resolved[role] = None
+            with self._lock:
+                self._resolved[role] = None
             return None
         snowflake = channel_snowflake(target)
-        self._resolved[role] = snowflake
+        if snowflake is None:
+            self._load_guild_channels()
+            if self._guild_channels:
+                needle = str(target).strip().lower()
+                snowflake = self._guild_channels.get(needle)
+                if snowflake is None:
+                    # Discord strips the 频道 suffix from names; a contains
+                    # match keeps Chinese names like "异常期权" working.
+                    candidates = [
+                        channel_id for name, channel_id in self._guild_channels.items()
+                        if needle in name or name in needle
+                    ]
+                    snowflake = candidates[0] if candidates else None
+        with self._lock:
+            self._resolved[role] = snowflake
         if snowflake is None:
             self._last_error = f"channel_id_unresolvable:{role}"
         return snowflake
@@ -154,6 +192,14 @@ class DiscordRestSource(DiscordSource):
             "Accept": "application/json",
         }
 
+    def _build_opener(self) -> Optional[urllib.request.OpenerDirector]:
+        """Route HTTPS through an HTTP proxy (Clash/v2ray etc.) when configured.
+
+        Used from mainland China where Discord is not reachable directly.
+        """
+        proxy = urllib.request.ProxyHandler({"http": self.proxy_url, "https": self.proxy_url})
+        return urllib.request.build_opener(proxy)
+
     def _request(
         self, method: str, path: str, params: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict[str, Any]]:
@@ -162,6 +208,9 @@ class DiscordRestSource(DiscordSource):
         request = urllib.request.Request(url, headers=self._headers(), method=method)
         for attempt in range(3):
             try:
+                if self._opener is not None:
+                    with self._opener.open(request, timeout=self.timeout_ms / 1000.0) as response:
+                        return json.loads(response.read().decode("utf-8"))
                 with urllib.request.urlopen(request, timeout=self.timeout_ms / 1000.0) as response:
                     return json.loads(response.read().decode("utf-8"))
             except urllib.error.HTTPError as exc:
@@ -176,10 +225,13 @@ class DiscordRestSource(DiscordSource):
         raise RuntimeError("discord_http_429")
 
     def _messages_from_payload(self, role: str, payload: Any) -> List[SourceMessage]:
-        if not isinstance(payload, dict) or not isinstance(payload.get("messages"), list):
-            return []
+        items: List[Dict[str, Any]] = []
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict) and isinstance(payload.get("messages"), list):
+            items = payload["messages"]
         output: List[SourceMessage] = []
-        for item in payload["messages"]:
+        for item in items:
             if not isinstance(item, dict):
                 continue
             message_id = str(item.get("id") or "")
@@ -278,6 +330,9 @@ class DiscordRestSource(DiscordSource):
             "collector": "discord_rest",
             "token_configured": bool(self.token),
             "configured_channels": len(self.channel_targets),
+            "resolved_channels": sum(1 for value in self._resolved.values() if value),
+            "guild_id": self.guild_id or "",
+            "proxy_url": self.proxy_url or "",
             "last_success": self._last_success,
             "last_error": self._last_error,
             "messages_seen": self._messages_seen,

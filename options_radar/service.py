@@ -238,6 +238,11 @@ class OptionsRadarService:
         self.database = Database(self.config.database_path)
         self.ai = DeepSeekProvider(self.config.database_path)
         self.refiner = DeepSeekTextRefiner(self.ai)
+        # Full-text LLM refinement for every analyst card is expensive (one
+        # call per message).  Local deterministic parsing covers the vast
+        # majority of cards; enable refinement only where the operator asked.
+        ai_refine = str(self.config.section("ai").get("refine_analyst_cards", "false")).strip().lower()
+        self.ai_refine_enabled = ai_refine in {"1", "true", "yes", "on"}
         futu = self.config.section("futu")
         self.futu = futu_provider or FutuProvider(
             host=str(futu.get("host", "127.0.0.1")),
@@ -315,6 +320,8 @@ class OptionsRadarService:
             self.source = DiscordRestSource(
                 channel_targets=channels, token=discord_token,
                 timeout_ms=int(discord.get("timeout_ms", 30000)),
+                guild_id=str(discord.get("guild_id", "") or ""),
+                proxy_url=str(discord.get("proxy_url", "") or ""),
             )
         else:
             self.source = DiscordBrowserSource(
@@ -440,7 +447,9 @@ class OptionsRadarService:
                     event.raw_message_id = raw_id
                     self.database.insert_flow_event(event)
                 continue
-            signal = parse_analyst_message(message, refiner=self.refiner if self.ai.enabled else None)
+            signal = parse_analyst_message(
+                message, refiner=self.refiner if (self.ai.enabled and self.ai_refine_enabled) else None
+            )
             if signal:
                 signal.raw_message_id = raw_id
                 self.database.insert_signal(signal)
@@ -529,7 +538,7 @@ class OptionsRadarService:
         )
         return snapshot
 
-    def _evaluate(self, target_date: date) -> List[Dict[str, Any]]:
+    def _evaluate(self, target_date: date, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         try:
             self.sync_broker(force=True)
         except Exception as exc:
@@ -538,7 +547,10 @@ class OptionsRadarService:
         paper = self.config.section("paper")
         output: List[Dict[str, Any]] = []
         active_codes: List[str] = []
-        for event in sorted(self._events_for_date(target_date), key=lambda item: item.observed_at, reverse=True):
+        events = sorted(self._events_for_date(target_date), key=lambda item: item.observed_at, reverse=True)
+        if limit:
+            events = events[:max(1, int(limit))]
+        for event in events:
             self.database.enrich_signals_for_event(event)
             signals = self.database.signals_for_event(event.event_key)
             if not signals:

@@ -5,6 +5,10 @@ evidence_dir: evidence
 
 discord:
   source_server: ""
+  # 中国大陆访问 Discord 需要代理时填写，例如 http://127.0.0.1:7890
+  # proxy_url: http://127.0.0.1:7890
+  # guild_id 提供后，REST 采集会按 source_channels 的中文频道名解析频道 ID
+  # guild_id: "1434960637561409689"
   source_channels:
     使用指南: guide
     分析师订阅面板: subscriptions
