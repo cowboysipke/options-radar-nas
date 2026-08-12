@@ -10,6 +10,29 @@ Options Radar 在飞牛 NAS 的一个 Docker 容器中持续运行：采集 Disc
 2. **富途是首版唯一行情与组合数据源。** OpenD、Chromium、OCR、SQLite、DeepSeek 适配器和中文面板都在同一个镜像中。
 3. **交易功能锁定。** 系统只读取行情、持仓和自选，只做推荐、模拟仓位和回测；不会解锁交易，也不会提交真实订单。
 
+## 先跑通闭环（离线自检，推荐第一步）
+
+不连任何外部服务，先用固定样例把整条流水线跑一遍验证环境：
+
+```powershell
+.venv\Scripts\python.exe -m options_radar --config config.yaml e2e --date 2026-08-05
+```
+
+输出中 `"ok": true` 且 `raw_messages / parsed_signals / flow_events / recommendations / signal_outcomes / backtest_bars` 全部大于 0，即表示「采集→解析→共识→行情→回测」闭环可用。行情与回测 K 线不可达时自动使用确定性合成数据，保证离线也能闭环。
+
+回测也可以直接对任意历史区间结算：
+
+```powershell
+.venv\Scripts\python.exe -m options_radar --config config.yaml backtest --start 2026-08-05 --end 2026-08-14
+```
+
+## 采集 Discord 的两种方式
+
+系统按优先级自动选择后端：
+
+1. **官方 REST API（首选）**：设置环境变量 `DISCORD_USER_TOKEN`（个人账号 token），或把 token 写入 `secret_refs.discord_user_token` 指向的文件。采集层直接用 Discord HTTP API 按消息 ID 分页读取频道历史，稳定且不依赖浏览器 DOM，彻底解决“网页结构变了就采不到”的问题。注意：使用个人账号自动化的做法不符合 Discord 服务条款，需自行承担风险。
+2. **浏览器回退**：没有 token 时使用 Playwright 持久化浏览器扫码登录。采集器已修正消息列表选择器并等待页面水合后再提取 DOM。
+
 ## 最快安装
 
 1. 下载 [`nas-quickstart/compose.yaml`](nas-quickstart/compose.yaml)。
@@ -67,17 +90,24 @@ Options Radar 在飞牛 NAS 的一个 Docker 容器中持续运行：采集 Disc
 ## 数据与AI分工
 
 ```text
-Discord DOM（Embed 缺字时 OCR）
+Discord REST 分页读取（无 token 时回退 Playwright DOM/OCR）
   → 本地规则解析
   → 缺失自由文本由 DeepSeek 结构化补充
   → Schema 校验
   → 确定性融合评分、过滤、仓位与进出场计算
-  → 富途 OpenD 实时行情、期权链、持仓和自选验证
+  → 富途 OpenD / IBKR / Massive 行情、期权链、持仓和自选验证
   → 中文面板、飞书提醒与日报
-  → 模拟盘、1/3/5 日表现与回测优化
+  → 模拟盘、1/3/5 日回放与策略优化
 ```
 
 DeepSeek只负责文本识别、摘要和解释。综合评分、推荐数量、最大风险、止盈止损、回测收益与分析师权重由确定性代码计算。
+
+## 飞书通知：两种接入方式
+
+1. **群机器人 Webhook（最简单）**：创建飞书群 → 添加自定义机器人 → 把 webhook 地址写入 `FEISHU_WEBHOOK_URL`（或 `secret_refs.feishu_webhook`）。无需 App 凭据、无需绑定，日报和提醒直接发到该群。
+2. **自建应用（可双向对话）**：在飞书开放平台创建应用并开启事件订阅（长连接模式），填 `FEISHU_APP_ID` 与 `FEISHU_APP_SECRET`。用户私聊机器人发送“绑定”后，日报/提醒发送到该对话；支持“今日推荐 / 查看持仓 / 添加自选 TSLA / 为什么推荐第N名 / 系统状态”等命令。
+
+面板 `/system` 里点“飞书测试”可验证凭据并投递测试卡片。
 
 ## 更新
 
@@ -95,5 +125,7 @@ DeepSeek只负责文本识别、摘要和解释。综合评分、推荐数量、
 .venv\Scripts\python.exe -m unittest discover -s tests -v
 .venv\Scripts\python.exe -m compileall -q options_radar tests
 ```
+
+端到端自检与回测回放命令见上文「先跑通闭环」。
 
 所有 Markdown 日报使用 UTF-8 BOM 和 Windows 兼容换行；网页和 JSON 明确声明 UTF-8。
