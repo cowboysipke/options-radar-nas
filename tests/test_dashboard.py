@@ -35,6 +35,7 @@ class DashboardHttpTests(unittest.TestCase):
             "analysts": callback("analysts", {"pa": {"weight": 1.0}}),
             "backtest": callback("backtest", {"win_rate": 0.61}),
             "providers": callback("providers", {"items": [{"provider": "ibkr", "connected": True}]}),
+            "signals": callback("signals", []),
             "provider_status": callback("provider_status", {"provider": "ibkr", "quality": "realtime"}),
             "provider_action": callback("provider_action", {"status": "ok"}),
             "market_provenance": callback("market_provenance", {"provider": "ibkr"}),
@@ -83,15 +84,12 @@ class DashboardHttpTests(unittest.TestCase):
 
     def test_all_chinese_pages_are_authenticated_and_utf8(self):
         pages = {
-            "/": "今日概览",
-            "/setup": "一次性配置",
-            "/contracts": "合约与推荐",
-            "/rules": "规则库",
-            "/portfolio": "富途组合",
-            "/analysts": "分析师",
-            "/backtest": "回测",
-            "/providers": "数据源",
-            "/system": "系统",
+            "/": "今日推荐",
+            "/setup": "本地配置",
+            "/signals": "信号明细",
+            "/portfolio": "自选与持仓",
+            "/providers": "数据源诊断",
+            "/system": "系统诊断",
         }
         for path, text in pages.items():
             with self.subTest(path=path):
@@ -100,10 +98,9 @@ class DashboardHttpTests(unittest.TestCase):
                 self.assertIn("charset=utf-8", headers["Content-Type"])
                 self.assertIn('<meta charset="utf-8">', body)
                 self.assertIn(text, body)
-        status, _, body = self.request("GET", "/rules")
+        status, _, body = self.request("GET", "/signals")
         self.assertEqual(status, 200)
-        self.assertIn("管理口令", body)
-        self.assertNotIn("使用指南", body)
+        self.assertIn("信号明细", body)
 
     def test_json_apis_require_login_and_return_unicode(self):
         status, _, body = self.request("GET", "/api/futu/status")
@@ -146,9 +143,9 @@ class DashboardHttpTests(unittest.TestCase):
     def test_provider_page_has_chinese_navigation_and_one_click_actions(self):
         status, _, page = self.request("GET", "/providers", headers={"Cookie": self.cookie})
         self.assertEqual(status, 200)
-        self.assertIn("数据源", page)
-        self.assertIn("一键检测", page)
-        self.assertIn("扫描本机 TWS/Gateway", page)
+        self.assertIn("数据源诊断", page)
+        self.assertIn("IBKR", page)
+        self.assertIn("Massive", page)
         self.assertIn('/api/providers/ibkr/test', page)
         self.assertIn(("providers", {}), self.calls)
 

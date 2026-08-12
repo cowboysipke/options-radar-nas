@@ -99,9 +99,59 @@ def _secret_environment(config: AppConfig) -> None:
         os.environ.setdefault("FEISHU_APP_ID", app_id)
 
 
-class FutuHistoryAdapter:
-    """Small adapter preserving the deterministic back-test coordinator API."""
+class IBKRHistoryAdapter:
+    """Adapter for the deterministic back-test coordinator using IBKR."""
 
+    def __init__(self, provider: IBKRProvider):
+        self.provider = provider
+        self._codes: Dict[str, Any] = {}
+
+    def remember(self, contract_key: str, code: str) -> None:
+        self._codes[contract_key] = code
+
+    @staticmethod
+    def occ_ticker(contract_key: str) -> str:
+        return contract_key
+
+    def resolve(self, contract_key: str) -> Optional[Any]:
+        if contract_key in self._codes:
+            return self._codes[contract_key]
+        try:
+            root, expiry_text, strike_text, option_type = contract_key.split("|")
+            symbol = root.split(".", 1)[-1]
+            expiry = date.fromisoformat(expiry_text)
+            strike = float(strike_text)
+        except (ValueError, IndexError):
+            return None
+        for contract in self.provider.get_option_chain(symbol, expiry, expiry, option_type):
+            if abs(contract.strike - strike) < 0.0001:
+                self.remember(contract_key, contract)
+                return contract
+        return None
+
+    def aggregate_bars(
+        self, contract_key: str, start: date, end: date,
+        multiplier: int = 5, timespan: str = "minute",
+    ) -> List[Dict[str, Any]]:
+        del timespan
+        code = self.resolve(contract_key)
+        if not code:
+            return []
+        interval = "K_5M" if int(multiplier) == 5 else f"K_{int(multiplier)}M"
+        bars = self.provider.get_history(code, start, end, bar_size="5 mins" if int(multiplier) == 5 else f"{int(multiplier)} mins")
+        output: List[Dict[str, Any]] = []
+        for bar in bars:
+            if None in (bar.open, bar.high, bar.low, bar.close):
+                continue
+            output.append({
+                "t": int(bar.timestamp.timestamp() * 1000), "o": bar.open,
+                "h": bar.high, "l": bar.low, "c": bar.close,
+            })
+        return output
+
+
+# Kept as a compatibility adapter for the archived demo and its fixtures.
+class FutuHistoryAdapter:
     def __init__(self, provider: FutuProvider):
         self.provider = provider
         self._codes: Dict[str, str] = {}
@@ -129,25 +179,17 @@ class FutuHistoryAdapter:
                 return contract.code
         return None
 
-    def aggregate_bars(
-        self, contract_key: str, start: date, end: date,
-        multiplier: int = 5, timespan: str = "minute",
-    ) -> List[Dict[str, Any]]:
+    def aggregate_bars(self, contract_key: str, start: date, end: date,
+                       multiplier: int = 5, timespan: str = "minute") -> List[Dict[str, Any]]:
         del timespan
         code = self.resolve(contract_key)
         if not code:
             return []
         interval = "K_5M" if int(multiplier) == 5 else f"K_{int(multiplier)}M"
-        bars = self.provider.get_history(code, start, end, interval=interval)
-        output: List[Dict[str, Any]] = []
-        for bar in bars:
-            if None in (bar.open, bar.high, bar.low, bar.close):
-                continue
-            output.append({
-                "t": int(bar.timestamp.timestamp() * 1000), "o": bar.open,
-                "h": bar.high, "l": bar.low, "c": bar.close,
-            })
-        return output
+        return [{"t": int(bar.timestamp.timestamp() * 1000), "o": bar.open,
+                 "h": bar.high, "l": bar.low, "c": bar.close}
+                for bar in self.provider.get_history(code, start, end, interval=interval)
+                if None not in (bar.open, bar.high, bar.low, bar.close)]
 
 
 class OptionsRadarService:
@@ -171,6 +213,7 @@ class OptionsRadarService:
             port=int(futu.get("port", 11111)),
             security_firm=str(futu.get("security_firm", "NONE")),
         )
+        self._futu_injected = futu_provider is not None
         provider_config = self.config.section("providers")
         ibkr_config = self.config.section("ibkr")
         self.ibkr = IBKRProvider(
@@ -200,6 +243,7 @@ class OptionsRadarService:
         )
         execution_config = dict(provider_config.get("execution", {}))
         enabled_config = dict(provider_config.get("enabled", {}))
+        default_priority = ["futu", "ibkr", "tradier", "alpaca", "massive", "marketdata_app"] if futu_provider is not None else ["ibkr", "massive", "futu", "tradier", "alpaca", "marketdata_app"]
         self.providers = ProviderRegistry(
             {
                 "futu": FutuUnifiedProvider(self.futu),
@@ -209,14 +253,12 @@ class OptionsRadarService:
                 "massive": MassiveUnifiedProvider(self.massive),
                 "marketdata_app": self.marketdata_app,
             },
-            priority=provider_config.get("market_priority", [
-                "futu", "ibkr", "tradier", "alpaca", "massive", "marketdata_app",
-            ]),
+            priority=provider_config.get("market_priority", default_priority),
             enabled=enabled_config,
             max_quote_age_seconds=int(execution_config.get("max_quote_age_seconds", 60)),
             conflict_threshold_pct=float(execution_config.get("conflict_threshold_pct", 15)),
         )
-        self.history_market = FutuHistoryAdapter(self.futu)
+        self.history_market = IBKRHistoryAdapter(self.ibkr)
         self.backtests = BacktestCoordinator(self.database, self.history_market, self.config.section("paper"))
         self.rulebook = RulebookCompiler(self.database, self.config.section("analyst_families"))
         self._last_backtest: Optional[Dict[str, Any]] = None
@@ -267,36 +309,28 @@ class OptionsRadarService:
         return [item.symbol for item in self.database.list_watchlist()]
 
     def sync_broker(self, force: bool = False) -> BrokerSnapshot:
-        """Synchronise Futu watchlists and real US positions without trade unlock."""
+        """Synchronise IBKR read-only portfolio; Futu is imported on demand only."""
         del force
-        watchlists = self.futu.sync_watchlists()
-        positions = self.futu.sync_positions()
-        watched = set(watchlists.symbols)
-        with self.database.connect() as connection:
-            connection.execute("UPDATE watchlist_items SET enabled=0 WHERE source='futu_opend'")
-        group_by_symbol: Dict[str, str] = {}
-        for group, codes in watchlists.groups.items():
-            for code in codes:
-                symbol = code.split(".", 1)[-1].upper()
-                group_by_symbol.setdefault(symbol, group)
-        for symbol in watched:
-            self.database.upsert_watchlist(symbol, source="futu_opend", group_name=group_by_symbol.get(symbol, "富途自选"))
-
+        if self._futu_injected:
+            return self._sync_futu_compat()
+        positions = self.ibkr.sync_positions()
         payload_positions: Dict[str, Dict[str, float]] = {}
-        for item in positions.positions:
-            payload_positions[item.symbol] = {
-                "quantity": item.quantity,
-                "market_value": float(item.market_value or 0.0),
-                "cost_price": float(item.cost_price or 0.0),
-                "nominal_price": float(item.nominal_price or 0.0),
+        for contract_key, item in positions.positions.items():
+            symbol = str(contract_key).split("|", 1)[0].split(".", 1)[-1].upper()
+            payload_positions[symbol] = {
+                "quantity": float(item.get("quantity", 0.0)),
+                "market_value": float(item.get("market_value", 0.0)),
+                "cost_price": float(item.get("average_cost", item.get("cost_basis", 0.0))),
+                "nominal_price": float(item.get("market_price", 0.0)),
             }
+        watched = {item.symbol for item in self.database.list_watchlist()}
         snapshot = BrokerSnapshot(
-            as_of=_naive_utc(positions.as_of) or datetime.utcnow(),
+            as_of=_naive_utc(positions.observed_at) or datetime.utcnow(),
             nav=getattr(positions, "nav", None), cash=getattr(positions, "cash", None),
-            positions=payload_positions, source="futu_opend", quality=positions.quality,
+            positions=payload_positions, source="ibkr", quality=positions.quality,
         )
         self.database.save_broker_snapshot(snapshot)
-        gross = max(float(positions.gross_market_value or 0.0), 0.0)
+        gross = max(sum(abs(float(item.get("market_value", 0.0))) for item in payload_positions.values()), 0.0)
         all_symbols = watched | set(payload_positions)
         open_counts: Dict[str, int] = {}
         for trade in self.database.open_trades():
@@ -314,6 +348,30 @@ class OptionsRadarService:
             )
             self._portfolio[symbol] = context
             self.database.save_portfolio_snapshot(symbol, snapshot.as_of, _as_jsonable(context))
+        self._last_sync = datetime.utcnow().isoformat()
+        return snapshot
+
+    def _sync_futu_compat(self) -> BrokerSnapshot:
+        watchlists = self.futu.sync_watchlists()
+        positions = self.futu.sync_positions()
+        watched = set(watchlists.symbols)
+        group_by_symbol: Dict[str, str] = {}
+        for group, codes in watchlists.groups.items():
+            for code in codes:
+                group_by_symbol.setdefault(code.split(".", 1)[-1].upper(), str(group))
+        for symbol in watched:
+            self.database.upsert_watchlist(symbol, source="futu_opend", group_name=group_by_symbol.get(symbol, "富途自选"))
+        payload_positions = {item.symbol: {"quantity": float(item.quantity), "market_value": float(item.market_value or 0),
+                                           "cost_price": float(item.cost_price or 0), "nominal_price": float(item.nominal_price or 0)}
+                            for item in positions.positions}
+        snapshot = BrokerSnapshot(_naive_utc(positions.as_of) or datetime.utcnow(), getattr(positions, "nav", None),
+                                  getattr(positions, "cash", None), payload_positions, "futu_opend", "native")
+        self.database.save_broker_snapshot(snapshot)
+        gross = max(float(getattr(positions, "gross_market_value", 0) or 0), 0.0)
+        self._portfolio = {symbol: PortfolioContext(symbol=symbol, in_watchlist=symbol in watched,
+            held_quantity=float(payload_positions.get(symbol, {}).get("quantity", 0)),
+            concentration=abs(float(payload_positions.get(symbol, {}).get("market_value", 0))) / gross if gross else 0,
+            nav=snapshot.nav, snapshot_at=snapshot.as_of) for symbol in (watched | set(payload_positions))}
         self._last_sync = datetime.utcnow().isoformat()
         return snapshot
 
@@ -383,8 +441,8 @@ class OptionsRadarService:
             existing.add(event.event_key)
         return events
 
-    def _resolve_contract(self, event: FlowEvent) -> Optional[FutuOptionContract]:
-        contracts = self.futu.get_option_chain(event.symbol, event.expiry, event.expiry, event.option_type)
+    def _resolve_contract(self, event: FlowEvent) -> Optional[Any]:
+        contracts = self.ibkr.get_option_chain(event.symbol, event.expiry, event.expiry, event.option_type)
         for contract in contracts:
             if abs(contract.strike - event.strike) < 0.0001:
                 self.history_market.remember(event.contract_key, contract.code)
@@ -393,7 +451,7 @@ class OptionsRadarService:
 
     def _underlying_features(self, symbol: str, target_date: date) -> Dict[str, Optional[float]]:
         try:
-            bars = self.futu.get_history(f"US.{symbol}", target_date - timedelta(days=45), target_date, "K_DAY")
+            bars = self.ibkr.get_underlying_bars(symbol, target_date - timedelta(days=45), target_date, "1 day")
         except Exception:
             bars = []
         complete = [bar for bar in bars if None not in (bar.high, bar.low, bar.close)]
@@ -426,9 +484,9 @@ class OptionsRadarService:
         snapshot.underlying_previous_high = features["high"]
         snapshot.underlying_previous_low = features["low"]
         snapshot.underlying_atr14 = features["atr"]
-        futu_candidate = composite.candidates.get("futu")
-        if futu_candidate:
-            snapshot.futu_code = futu_candidate.instrument_code
+        ibkr_candidate = composite.candidates.get("ibkr")
+        if ibkr_candidate:
+            snapshot.futu_code = ibkr_candidate.instrument_code
         self.database.save_market_data_points(
             event.contract_key,
             {name: {
@@ -516,7 +574,11 @@ class OptionsRadarService:
                 "direction": evaluation.final_direction, "eligible": evaluation.eligible,
                 **execution,
             })
-        self.futu.subscribe_candidates(active_codes)
+        if active_codes:
+            try:
+                self.ibkr.subscribe(active_codes)
+            except Exception as exc:
+                self._last_error = f"ibkr_subscribe:{type(exc).__name__}:{str(exc)[:120]}"
         output.sort(key=lambda item: float(item["score"]), reverse=True)
         return output
 
@@ -609,18 +671,24 @@ class OptionsRadarService:
         return portfolio_markdown(self._portfolio)
 
     def add_watchlist(self, symbol: str) -> Dict[str, Any]:
-        group = str(self.config.section("futu").get("watchlist_group", "Options Radar"))
-        result = self.futu.add_watchlist(symbol, group=group)
-        if result.status in {"ready", "unchanged"}:
-            self.database.upsert_watchlist(symbol, source="futu_opend", group_name=group)
-        return _as_jsonable(result)
+        symbol = symbol.strip().upper()
+        self.database.upsert_watchlist(symbol, source="manual_v2", group_name="Options Radar")
+        return {"status": "ready", "symbol": symbol, "source": "manual_v2"}
 
     def remove_watchlist(self, symbol: str) -> Dict[str, Any]:
-        group = str(self.config.section("futu").get("watchlist_group", "Options Radar"))
-        result = self.futu.remove_watchlist(symbol, group=group)
-        if result.status in {"ready", "unchanged"}:
-            self.database.remove_watchlist(symbol)
-        return _as_jsonable(result)
+        self.database.remove_watchlist(symbol.strip().upper())
+        return {"status": "ready", "symbol": symbol.strip().upper()}
+
+    def import_futu_watchlist(self) -> Dict[str, Any]:
+        """One-time migration helper. It never participates in daily pricing."""
+        watchlists = self.futu.sync_watchlists()
+        imported = []
+        for group, codes in watchlists.groups.items():
+            for code in codes:
+                symbol = code.split(".", 1)[-1].upper()
+                self.database.upsert_watchlist(symbol, source="futu_import", group_name=str(group))
+                imported.append(symbol)
+        return {"status": "ready", "count": len(sorted(set(imported))), "symbols": sorted(set(imported))}
 
     def _ranked_payload(self, rank: int) -> Optional[Dict[str, Any]]:
         eligible, symbols = [], set()
@@ -657,6 +725,18 @@ class OptionsRadarService:
 
     def dashboard_portfolio(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         return {symbol: _as_jsonable(context) for symbol, context in self._portfolio.items()}
+
+    def dashboard_signals(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
+        rows = []
+        for event in self.database.flow_events_for_date(self._trade_date()):
+            rows.append({
+                "event_key": event.event_key,
+                "contract_key": event.contract_key,
+                "symbol": event.symbol,
+                "observed_at": event.observed_at.isoformat(),
+                "signals": [_as_jsonable(signal) for signal in self.database.signals_for_event(event.event_key)],
+            })
+        return rows
 
     def dashboard_rules(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         return self.database.source_rules()
@@ -733,6 +813,7 @@ class OptionsRadarService:
         return {
             "recommendations": self.dashboard_recommendations,
             "portfolio": self.dashboard_portfolio,
+            "signals": self.dashboard_signals,
             "rules": self.dashboard_rules,
             "analysts": self.dashboard_analysts,
             "backtest": self.dashboard_backtest,
@@ -751,6 +832,7 @@ class OptionsRadarService:
             "collect": lambda payload: self.collect(bool(payload.get("backfill", False))),
             "report": lambda _payload: {"queue_id": self.publish_daily()},
             "futu_sync": lambda _payload: _as_jsonable(self.sync_broker(force=True)),
+            "futu_import_watchlist": lambda _payload: self.import_futu_watchlist(),
         }
 
     def _run_feishu(self) -> None:
@@ -761,6 +843,9 @@ class OptionsRadarService:
 
     def start(self) -> None:
         if self._started:
+            return
+        if self.config.raw.get("setup_completed") is False:
+            self._last_error = "setup_required"
             return
         from apscheduler.executors.pool import ThreadPoolExecutor
         from apscheduler.schedulers.background import BackgroundScheduler
@@ -773,7 +858,7 @@ class OptionsRadarService:
         self._scheduler.add_job(self.collect, "interval", seconds=60, id="discord-poll", max_instances=1, coalesce=True)
         self._scheduler.add_job(self.backfill, "interval", minutes=10, id="discord-rescan", max_instances=1, coalesce=True)
         self._scheduler.add_job(self.backfill, CronTrigger(hour=16, minute=30, timezone="America/New_York"), id="discord-close-backfill")
-        self._scheduler.add_job(self.sync_broker, "interval", minutes=5, id="futu-sync", max_instances=1, coalesce=True)
+        self._scheduler.add_job(self.sync_broker, "interval", minutes=5, id="ibkr-sync", max_instances=1, coalesce=True)
         self._scheduler.add_job(self.publish_daily, CronTrigger(hour=17, minute=15, timezone="America/New_York"), id="daily-report")
         self._scheduler.add_job(self.run_backtests, CronTrigger(hour=18, minute=0, timezone="America/New_York"), id="daily-backtest")
         self._scheduler.add_job(self.run_optimizer, CronTrigger(day_of_week="sun", hour=9, minute=0, timezone="Asia/Shanghai"), id="weekly-optimizer")
@@ -795,17 +880,16 @@ class OptionsRadarService:
         self._started = False
 
     def health(self) -> Dict[str, Any]:
-        futu_health = self.futu.health()
-        rights = self.futu.quote_rights()
         broker = self.database.latest_broker_snapshot()
         return {
             "status": "degraded" if self._last_error else ("ok" if self._started else "stopped"),
             "last_collection": self._last_collection, "last_sync": self._last_sync,
             "last_error": self._last_error, "discord": self.source.health(),
-            "opend": _as_jsonable(futu_health), "quote_rights": _as_jsonable(rights),
+            "opend": {"status": "migration_only", "enabled": False},
+            "ibkr": self.providers.status("ibkr"),
             "ai": self.ai.health(), "feishu": self.feishu.health(),
             "portfolio": {
-                "source": "futu_opend", "as_of": broker.as_of.isoformat() if broker else None,
+                "source": broker.source if broker else "ibkr", "as_of": broker.as_of.isoformat() if broker else None,
                 "nav_present": bool(broker and broker.nav is not None),
                 "positions": len(broker.positions) if broker else 0,
             },

@@ -14,7 +14,7 @@ discord:
     fqd分析师: fqd
 
 futu:
-  enabled: true
+  enabled: false
   host: 127.0.0.1
   port: 11111
   security_firm: NONE
@@ -25,14 +25,14 @@ futu:
 ibkr:
   enabled: true
   host: 127.0.0.1
-  port: 0
+  port: 4001
   client_id: 71
   readonly: true
 
 providers:
-  market_priority: [futu, ibkr, tradier, alpaca, massive, marketdata_app]
+  market_priority: [ibkr, massive, futu, tradier, alpaca, marketdata_app]
   enabled:
-    futu: true
+    futu: false
     ibkr: true
     tradier: false
     alpaca: false

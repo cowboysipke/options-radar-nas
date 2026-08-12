@@ -154,6 +154,7 @@ class IBKRProvider:
         self._request_count = 0
         self._last_error = ""
         self._market_data_type = 1
+        self._contract_cache: Dict[str, IBKROptionContract] = {}
 
     @staticmethod
     def capabilities() -> ProviderCapability:
@@ -415,13 +416,15 @@ class IBKRProvider:
             for strike in sorted(float(v) for v in (_attr(selected, "strikes", []) or [])):
                 for right in rights:
                     key = f"US.{symbol.upper()}|{expiry.isoformat()}|{strike:g}|{right}"
-                    result.append(IBKROptionContract(
+                    item = IBKROptionContract(
                         code=key, contract_key=key, symbol=symbol.upper(), expiry=expiry,
                         strike=strike, option_type=right, provider="ibkr",
                         exchange=str(_attr(selected, "exchange", "SMART") or "SMART"),
                         multiplier=int(_number(_attr(selected, "multiplier", 100)) or 100),
                         trading_class=str(_attr(selected, "tradingClass", "") or "") or None,
-                    ))
+                    )
+                    self._contract_cache[key] = item
+                    result.append(item)
         return result
 
     def _contract_key(self, contract: Any) -> str:
@@ -435,6 +438,9 @@ class IBKRProvider:
 
     def _native_contract(self, contract: Any) -> Any:
         if isinstance(contract, str):
+            cached = self._contract_cache.get(contract)
+            if cached is not None:
+                return self._make_option(cached)
             parts = contract.split("|")
             if len(parts) == 4:
                 symbol = parts[0].split(".", 1)[-1]
@@ -464,7 +470,14 @@ class IBKRProvider:
         contract = _attr(ticker, "contract", contract)
         key = self._contract_key(contract)
         market_time = _timestamp(_attr(ticker, "time"))
-        quality = self._quality()
+        ticker_type = _attr(ticker, "marketDataType", None)
+        try:
+            ticker_type = int(ticker_type) if ticker_type is not None else self._market_data_type
+        except (TypeError, ValueError):
+            ticker_type = self._market_data_type
+        quality = {1: "realtime", 2: "frozen", 3: "delayed", 4: "delayed"}.get(ticker_type, self._quality())
+        if _attr(ticker, "bid", None) in (None, -1) and _attr(ticker, "ask", None) in (None, -1):
+            quality = "missing"
         greeks = _attr(ticker, "modelGreeks") or _attr(ticker, "bidGreeks") or {}
         value = lambda raw: self._sourced(_number(raw), quality, market_time)
         fields = {

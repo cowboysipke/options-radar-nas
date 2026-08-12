@@ -43,7 +43,9 @@ class LocalRuntime:
         else:
             token = secrets.token_urlsafe(24)
             token_path.write_text(token, encoding="utf-8")
-        self.service.start()
+        # Configuration is saved by /setup before scheduled jobs are allowed.
+        if self.store.load().get("setup_completed"):
+            self.service.start()
         self.server = create_setup_server(
             "127.0.0.1", port, self.store, token, self.service.health,
             callbacks=self.callbacks(),

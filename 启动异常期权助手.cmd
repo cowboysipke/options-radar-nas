@@ -12,7 +12,7 @@ if not exist ".venv-local\Scripts\python.exe" (
 )
 
 echo [2/3] 正在检查依赖...
-.venv-local\Scripts\python.exe -c "import yaml,pydantic" >nul 2>&1
+.venv-local\Scripts\python.exe -c "import yaml,pydantic,ib_insync,apscheduler" >nul 2>&1
 if errorlevel 1 .venv-local\Scripts\python.exe -m pip install -e ".[futu,ibkr]" APScheduler playwright lark-oapi discord.py || goto :error
 
 echo [3/3] 正在启动本地面板...

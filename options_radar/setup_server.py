@@ -62,14 +62,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "ibkr": {"enabled": True, "host": "127.0.0.1", "port": 0, "client_id": 71,
              "readonly": True, "flex_query_id": ""},
     "providers": {
-        "market_priority": ["futu", "ibkr", "tradier", "alpaca", "massive", "marketdata_app"],
-        "enabled": {"futu": True, "ibkr": True, "tradier": False, "alpaca": False,
+        "market_priority": ["ibkr", "massive", "futu", "tradier", "alpaca", "marketdata_app"],
+        "enabled": {"futu": False, "ibkr": True, "tradier": False, "alpaca": False,
                     "massive": True, "marketdata_app": False},
         "portfolio": {"aggregate_enabled_accounts": True},
         "execution": {"accepted_quality": ["realtime"], "max_quote_age_seconds": 60,
                       "conflict_threshold_pct": 15},
     },
-    "market": {"provider": "futu"},
+    "market": {"provider": "ibkr"},
     "ai": {
         "provider": "deepseek",
         "base_url": "https://api.deepseek.com",
@@ -284,7 +284,11 @@ class SetupConfigStore:
                 channel_names[source]: source
                 for source in ("flow", "pa", "mr", "qmr", "fpd", "guide", "subscriptions")
             }
-            data["market"]["provider"] = "futu"
+            data["market"]["provider"] = "ibkr"
+            data["ibkr"]["enabled"] = True
+            data["providers"]["market_priority"] = ["ibkr", "massive", "futu", "tradier", "alpaca", "marketdata_app"]
+            data["providers"]["enabled"]["ibkr"] = True
+            data["providers"]["enabled"]["futu"] = False
             data["setup_completed"] = True
             data["secret_refs"] = self.fixed_secret_refs()
             self._save_secrets(values, data["secret_refs"])
@@ -436,14 +440,12 @@ def secret_presence() -> Dict[str, bool]:
 
 
 PAGE_INFO = {
-    "/": ("今日概览", "recommendations", "今日推荐"),
-    "/contracts": ("合约与推荐", "contracts", "候选合约"),
-    "/rules": ("规则库", "rules", "Discord指南与规则版本"),
-    "/portfolio": ("富途组合", "portfolio", "持仓、自选与风险集中度"),
-    "/analysts": ("分析师", "analysts", "分析师表现与权重"),
-    "/backtest": ("回测", "backtest", "模拟净值与策略版本"),
-    "/providers": ("数据源", "providers", "连接状态、行情权限、延迟、额度与字段来源"),
-    "/system": ("系统", "status", "服务状态、日志与备份"),
+    "/": ("今日推荐", "recommendations", "IBKR实时验证后的0–3张合约"),
+    "/signals": ("信号明细", "signals", "Discord原文、分析师意见和融合过程"),
+    "/portfolio": ("自选与持仓", "portfolio", "IBKR组合与富途一次性导入自选"),
+    "/system": ("系统诊断", "status", "IB Gateway、Discord、Massive、DeepSeek和飞书"),
+    "/setup": ("设置", "status", "首次配置和连接测试"),
+    "/providers": ("数据源诊断", "providers", "IBKR主源与Massive历史复核"),
 }
 
 GET_APIS = {
@@ -456,6 +458,7 @@ GET_APIS = {
     "/api/analysts": "analysts",
     "/api/backtest": "backtest",
     "/api/providers": "providers",
+    "/api/signals": "signals",
 }
 
 POST_APIS = {
@@ -484,6 +487,7 @@ FORM_ACTIONS = {
     "/futu/submit-code": "futu_submit_verification",
     "/futu/relogin": "futu_relogin",
     "/futu/sync": "futu_sync",
+    "/futu/import-watchlist": "futu_import_watchlist",
 }
 
 
@@ -704,10 +708,8 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _shell(title: str, content: str, active: str = "") -> str:
-        links = (("/", "首页"), ("/contracts", "合约"), ("/rules", "规则库"),
-                  ("/portfolio", "富途组合"), ("/analysts", "分析师"),
-                  ("/backtest", "回测"), ("/providers", "数据源"),
-                  ("/system", "系统"), ("/setup", "设置"))
+        links = (("/", "今日推荐"), ("/signals", "信号明细"),
+                  ("/portfolio", "自选与持仓"), ("/system", "系统诊断"), ("/setup", "设置"))
         nav = "".join(
             f'<a class="{"active" if path == active else ""}" href="{path}">{label}</a>' for path, label in links
         )
@@ -719,6 +721,7 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
 header{{background:#101827;color:white;padding:14px 20px;display:flex;align-items:center;gap:22px;overflow:auto}}header b{{white-space:nowrap}}nav{{display:flex;gap:5px}}nav a{{color:#cbd5e1;text-decoration:none;padding:8px 10px;border-radius:7px;white-space:nowrap}}nav a.active,nav a:hover{{color:white;background:#263754}}
 main{{max-width:1120px;margin:22px auto;padding:0 16px}}h1{{margin:0 0 6px}}h2{{margin-top:26px}}.sub{{color:var(--muted);margin-top:0}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}}.card{{background:var(--card);border:1px solid var(--line);padding:17px;border-radius:12px;box-shadow:0 5px 18px #1020400b}}.metric{{font-size:25px;font-weight:750}}.muted,small{{color:var(--muted)}}
 label{{display:block;margin:13px 0 5px;font-weight:650}}input{{width:100%;padding:10px;border:1px solid #c9d2e1;border-radius:7px}}button,.button{{display:inline-block;margin:9px 6px 0 0;padding:10px 15px;border:0;border-radius:7px;background:var(--blue);color:white;font-weight:700;text-decoration:none}}button.secondary{{background:#475569}}.ok,.error{{padding:10px;border-radius:7px}}.ok{{background:#e7f8ed}}.error{{background:#feecec}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#dbeafe;padding:14px;border-radius:9px;max-height:520px;overflow:auto}}code{{background:#eef2f8;padding:2px 5px;border-radius:4px}}.status{{display:grid;grid-template-columns:1fr auto;gap:8px}}@media(max-width:620px){{header{{display:block}}nav{{margin-top:9px}}}}
+table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left}}summary{{cursor:pointer;font-weight:700}}
 </style></head><body><header><b>Options Radar</b><nav>{nav}</nav></header><main>{content}</main></body></html>'''
 
     def _login_page(self, message: str = "") -> str:
@@ -742,13 +745,63 @@ label{{display:block;margin:13px 0 5px;font-weight:650}}input{{width:100%;paddin
         encoded = html.escape(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         action_cards = ""
         if path == "/":
-            action_cards = self._action_forms(csrf, (("/api/actions/collect", "立即采集"), ("/api/actions/report", "生成日报"), ("/api/futu/sync", "同步富途")))
+            action_cards = self._action_forms(csrf, (("/api/actions/collect", "立即采集并生成推荐"), ("/api/actions/report", "生成飞书日报")))
+        elif path == "/portfolio":
+            action_cards = self._action_forms(csrf, (("/futu/import-watchlist", "从富途导入自选"), ("/api/ibkr/sync", "同步IBKR持仓")))
         elif path == "/system":
-            action_cards = self._action_forms(csrf, (("/api/futu/relogin", "重新登录OpenD"), ("/api/futu/sync", "同步富途"), ("/api/actions/backup", "创建备份")))
+            action_cards = self._action_forms(csrf, (("/api/ibkr/discover", "检测IB Gateway"), ("/api/actions/backup", "创建备份")))
         elif path == "/providers":
             action_cards = self._provider_actions(csrf)
-        content = f'<h1>{title}</h1><p class="sub">{description}</p>{action_cards}<section class="card"><h2>当前数据</h2><pre>{encoded}</pre></section>'
+        content = f'<h1>{html.escape(title)}</h1><p class="sub">{html.escape(description)}</p>{action_cards}{self._visual_summary(path, data)}<details class="card"><summary>查看原始数据</summary><pre>{encoded}</pre></details>'
         return self._shell(f"{title} - Options Radar", content, path)
+
+    @staticmethod
+    def _visual_summary(path: str, data: Any) -> str:
+        if path == "/" and isinstance(data, list):
+            if not data:
+                return '<section class="card"><h2>今日暂无合格推荐</h2><p class="muted">点击“立即采集并生成推荐”，或先完成Discord与IBKR配置。</p></section>'
+            cards = []
+            for item in data[:3]:
+                key = html.escape(str(item.get("contract_key", "")))
+                cards.append('<section class="card"><h2>{} · {}分</h2><p><b>{}</b> · {} · {}</p><p>bid/ask: {} / {}　数据: {}</p><p>入场: {}　止盈: {}　止损: {}</p><p class="muted">{}</p></section>'.format(
+                    html.escape(str(item.get("grade", "-"))), html.escape(str(item.get("score", "-"))), key,
+                    html.escape(str(item.get("direction", "-"))), html.escape(str(item.get("market_status", "-"))),
+                    html.escape(str(item.get("bid", "-"))), html.escape(str(item.get("ask", "-"))),
+                    html.escape(str(item.get("data_quality", "-"))), html.escape(str(item.get("max_entry_price", "-"))),
+                    html.escape(str(item.get("take_profit", "-"))), html.escape(str(item.get("stop_loss", "-"))),
+                    html.escape(str(item.get("invalidation", ""))),
+                ))
+            return '<div class="grid">' + "".join(cards) + '</div>'
+        if path == "/signals" and isinstance(data, list):
+            rows = []
+            for item in data:
+                rows.append('<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>'.format(
+                    html.escape(str(item.get("symbol", ""))), html.escape(str(item.get("contract_key", ""))),
+                    html.escape(str(item.get("observed_at", ""))), len(item.get("signals", [])),
+                ))
+            return '<section class="card"><table><tr><th>标的</th><th>合约</th><th>时间</th><th>分析师意见数</th></tr>{}</table></section>'.format("".join(rows) or '<tr><td colspan="4">暂无信号</td></tr>')
+        if path == "/portfolio" and isinstance(data, dict):
+            rows = []
+            for symbol, item in data.items():
+                if not isinstance(item, Mapping):
+                    rows.append('<tr><td>{}</td><td colspan="3">{}</td></tr>'.format(html.escape(str(symbol)), html.escape(str(item))))
+                    continue
+                rows.append('<tr><td>{}</td><td>{}</td><td>{}</td><td>{:.2%}</td></tr>'.format(
+                    html.escape(str(symbol)), html.escape(str(item.get("held_quantity", 0))),
+                    "是" if item.get("in_watchlist") else "否", float(item.get("concentration", 0) or 0),
+                ))
+            return '<section class="card"><table><tr><th>标的</th><th>持仓数量</th><th>自选</th><th>集中度</th></tr>{}</table></section>'.format("".join(rows) or '<tr><td colspan="4">暂无组合快照</td></tr>')
+        if path == "/system" and isinstance(data, dict):
+            statuses = []
+            for name in ("ibkr", "discord", "ai", "feishu"):
+                value = data.get(name, {})
+                if isinstance(value, dict):
+                    state = value.get("status", value.get("connected", "unknown"))
+                else:
+                    state = value
+                statuses.append('<section class="card"><h2>{}</h2><div class="metric">{}</div></section>'.format(html.escape(name.upper()), html.escape(str(state))))
+            return '<div class="grid">' + "".join(statuses) + '</div>'
+        return '<section class="card"><p>数据已加载。展开下方“查看原始数据”查看完整内容。</p></section>'
 
     @staticmethod
     def _provider_actions(csrf: str) -> str:
@@ -834,7 +887,7 @@ label{{display:block;margin:13px 0 5px;font-weight:650}}input{{width:100%;paddin
             + captcha_html + qr_html + '</section>'
             f'<form method="post" action="/logout"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button class="secondary">退出登录</button></form>'
         )
-        return self._shell("本地配置" if local else "NAS 配置", content, "/setup")
+        return self._shell("本地配置" if local else "本地配置 / NAS部署", content, "/setup")
 
 
 def create_setup_server(
