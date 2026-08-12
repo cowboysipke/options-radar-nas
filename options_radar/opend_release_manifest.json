@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-08-11",
+  "releases": {
+    "linux-amd64": {
+      "version": "10.9.6918",
+      "url": "https://softwaredownload.futunn.com/Futu_OpenD_10.9.6918_Ubuntu18.04.tar.gz",
+      "sha256": "37d95a2b302b50189e5eb464869d3bc364d2f5d8b466144f00d6a560d266c0b3",
+      "executable": "FutuOpenD",
+      "source": "https://www.futunn.com/download/fetch-lasted-link?name=opend-ubuntu",
+      "verified_size": 466851054
+    }
+  }
+}
