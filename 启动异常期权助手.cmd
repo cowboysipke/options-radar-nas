@@ -6,26 +6,18 @@ cd /d "%~dp0"
 set "OPTIONS_RADAR_BUILD_VERSION=v2-local"
 for /f "tokens=*" %%G in ('git rev-parse --short HEAD 2^>nul') do set "OPTIONS_RADAR_GIT_SHA=%%G"
 
-set "PYTHON_EXE=C:\Users\jiangyue\AppData\Local\Programs\Python\Python312\python.exe"
-if not exist "%PYTHON_EXE%" set "PYTHON_EXE=py -3.12"
-
-if not exist ".venv-local\Scripts\python.exe" (
-  echo [1/3] 正在创建独立运行环境...
-  %PYTHON_EXE% -m venv .venv-local || goto :error
+rem 优先使用已就绪的 .venv（Python 3.8，已装好全部依赖）
+if exist ".venv\Scripts\python.exe" (
+  set "PY=.venv\Scripts\python.exe"
+) else (
+  echo 未找到 .venv，请先运行: python -m venv .venv
+  echo 然后安装依赖: .venv\Scripts\python.exe -m pip install -r requirements.txt
+  pause
+  exit /b 1
 )
 
-echo [2/3] 正在检查依赖...
-.venv-local\Scripts\python.exe -c "import yaml,pydantic,ib_insync,apscheduler" >nul 2>&1
-if errorlevel 1 .venv-local\Scripts\python.exe -m pip install -e ".[futu,ibkr]" APScheduler playwright lark-oapi discord.py || goto :error
-
-echo [3/3] 正在启动本地面板...
+echo 正在启动本地面板: http://127.0.0.1:8787/
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
-.venv-local\Scripts\python.exe -m options_radar.local_runtime
+%PY% -m options_radar.local_runtime
 exit /b 0
-
-:error
-echo.
-echo 启动准备失败，请保留此窗口中的错误信息。
-pause
-exit /b 1
