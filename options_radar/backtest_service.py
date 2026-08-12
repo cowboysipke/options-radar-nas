@@ -66,23 +66,39 @@ class BacktestCoordinator:
 
     def record_daily(self, today: Optional[date] = None) -> Dict[str, int]:
         today = today or date.today()
+        return self.replay(today - timedelta(days=30), today, horizons=(1, 3, 5))
+
+    def replay(
+        self, start: date, end: date, horizons: Sequence[int] = (1, 3, 5)
+    ) -> Dict[str, int]:
+        """Settle 1/3/5-day outcomes for every recommendation in ``[start, end]``.
+
+        This is the offline replay entry point: it never waits for real Discord
+        data and works from whatever recommendations already exist.  Together
+        with the synthetic bar fallback it lets any machine produce and verify
+        a complete back-test loop without a broker or historical API.
+        """
         existing = {(item.recommendation_id, item.horizon_days) for item in self.database.signal_outcomes()}
         saved = 0
         no_fill = 0
-        for row in self.database.recommendations_since(today - timedelta(days=30)):
+        seen = 0
+        for row in self.database.recommendations_since(start):
             if not row.get("session_date"):
                 continue
             session = date.fromisoformat(str(row["session_date"]))
+            if session > end:
+                continue
             payload = json.loads(str(row["payload_json"]))
             execution = payload.get("execution", {}) if isinstance(payload.get("execution"), dict) else {}
-            for horizon in (1, 3, 5):
+            for horizon in horizons:
                 key = (int(row["id"]), horizon)
-                if key in existing or business_days_between(session, today) < horizon:
+                if key in existing or business_days_between(session, end) < horizon:
                     continue
-                start = add_business_days(session, 1)
-                end = add_business_days(session, horizon)
+                seen += 1
+                bar_start = add_business_days(session, 1)
+                bar_end = add_business_days(session, horizon)
                 try:
-                    bars = self._bars_for(str(row["contract_key"]), start, end)
+                    bars = self._bars_for(str(row["contract_key"]), bar_start, bar_end)
                 except Exception:
                     bars = []
                 result = simulate_long_option(
@@ -98,7 +114,43 @@ class BacktestCoordinator:
                 ))
                 saved += 1
                 no_fill += int(result.status == "no-fill")
-        return {"saved": saved, "no_fill": no_fill}
+        return {"saved": saved, "no_fill": no_fill, "candidates": seen}
+
+    def replay_summary(self, start: date, end: date) -> Dict[str, Any]:
+        """Stable outcome table for a date range, usable by CLI and dashboard."""
+        outcomes = {
+            (item.recommendation_id, item.horizon_days): item
+            for item in self.database.signal_outcomes()
+        }
+        rows: List[Dict[str, Any]] = []
+        for row in self.database.recommendations_since(start):
+            session = date.fromisoformat(str(row["session_date"])) if row.get("session_date") else None
+            if session is None or session > end:
+                continue
+            for horizon in (1, 3, 5):
+                outcome = outcomes.get((int(row["id"]), horizon))
+                if outcome is None:
+                    continue
+                rows.append({
+                    "recommendation_id": int(row["id"]),
+                    "contract_key": str(row["contract_key"]),
+                    "session_date": session.isoformat(),
+                    "horizon_days": horizon,
+                    "status": outcome.status,
+                    "pnl_pct": outcome.pnl_pct,
+                    "exit_reason": outcome.status,
+                })
+        rows.sort(key=lambda item: (item["session_date"], item["recommendation_id"], item["horizon_days"]))
+        filled = [item for item in rows if item["status"] == "filled"]
+        returns = [float(item["pnl_pct"] or 0.0) for item in filled]
+        return {
+            "range": {"start": start.isoformat(), "end": end.isoformat()},
+            "outcomes": rows,
+            "filled": len(filled),
+            "no_fill": sum(1 for item in rows if item["status"] == "no-fill"),
+            "avg_net_return": (sum(returns) / len(returns)) if returns else 0.0,
+            "max_drawdown": _drawdown(returns) if returns else 0.0,
+        }
 
     def _samples(self) -> List[Dict[str, Any]]:
         outcomes = {

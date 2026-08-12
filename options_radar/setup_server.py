@@ -98,6 +98,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "max_holding_business_days": 5,
         "exit_before_expiry_days": 3,
     },
+    "backtest": {"use_synthetic_when_unavailable": True},
     "schedule": {"report_delay_minutes": 75},
     "secret_refs": {
         "deepseek_api_key": "/data/secrets/deepseek_api_key",

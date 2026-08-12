@@ -92,3 +92,8 @@ paper:
   stop_loss_pct: 0.25
   max_holding_business_days: 5
   exit_before_expiry_days: 3
+
+backtest:
+  # 行情源不可达（无 Massive key / 无券商连接）时，用确定性合成 K 线跑回测，
+  # 保证离线也能闭环验证；关闭后回测遇到空数据会标记 no-fill。
+  use_synthetic_when_unavailable: true

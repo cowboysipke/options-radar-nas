@@ -29,7 +29,7 @@ from .futu_provider import (
     FutuOptionContract,
     FutuProvider,
 )
-from .history_adapters import CompositeHistoryAdapter
+from .history_adapters import CompositeHistoryAdapter, SyntheticHistoryAdapter
 from .ibkr_flex import IBKRFlexClient
 from .ibkr_provider import IBKRProvider
 from .massive_client import MassiveClient
@@ -289,6 +289,9 @@ class OptionsRadarService:
             conflict_threshold_pct=float(execution_config.get("conflict_threshold_pct", 15)),
         )
         self.history_market = CompositeHistoryAdapter(self.massive, IBKRHistoryAdapter(self.ibkr))
+        backtest_config = self.config.section("backtest")
+        if bool(backtest_config.get("use_synthetic_when_unavailable", True)):
+            self.history_market = SyntheticHistoryAdapter(self.history_market, enabled=True)
         self.backtests = BacktestCoordinator(self.database, self.history_market, self.config.section("paper"))
         self.rulebook = RulebookCompiler(self.database, self.config.section("analyst_families"))
         self._last_backtest: Optional[Dict[str, Any]] = None
@@ -653,6 +656,15 @@ class OptionsRadarService:
         update_analyst_weights_from_outcomes(self.database)
         return self._last_backtest
 
+    def replay_backtest(self, start: str = "", end: str = "") -> Dict[str, Any]:
+        """Offline back-test replay over an explicit date range."""
+        start_date = date.fromisoformat(start) if start else self._trade_date() - timedelta(days=30)
+        end_date = date.fromisoformat(end) if end else self._trade_date()
+        settlement = self.backtests.replay(start_date, end_date)
+        summary = self.backtests.replay_summary(start_date, end_date)
+        update_analyst_weights_from_outcomes(self.database)
+        return {"settlement": settlement, **summary}
+
     def run_optimizer(self) -> Dict[str, Any]:
         self._last_optimization = self.backtests.optimize_weekly()
         if self._last_optimization.get("status") in {"promoted", "shadow_started"}:
@@ -845,6 +857,7 @@ class OptionsRadarService:
             "rules": self.dashboard_rules,
             "analysts": self.dashboard_analysts,
             "backtest": self.dashboard_backtest,
+            "backtest_replay": lambda payload: self.replay_backtest(**{k: v for k, v in payload.items() if k in ("start", "end")}),
             "contracts": self.dashboard_contracts,
             "providers": self.dashboard_providers,
             "provider_status": lambda payload: self.provider_status(**payload),

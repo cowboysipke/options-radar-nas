@@ -96,6 +96,18 @@ def command_report(args) -> None:
     print(f"\n日报已保存：{report_path}")
 
 
+def command_backtest(args) -> None:
+    from .service import OptionsRadarService
+
+    config_path = str(Path(args.config).resolve())
+    service = OptionsRadarService(config_path, str(Path(config_path).parent))
+    try:
+        result = service.replay_backtest(args.start, args.end)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    finally:
+        service.stop()
+
+
 def command_doctor(args) -> None:
     pipeline = build_pipeline(args.config)
     checks = {}
@@ -174,6 +186,11 @@ def parser() -> argparse.ArgumentParser:
     report = commands.add_parser("report", help="print daily report")
     report.add_argument("--date")
     report.set_defaults(func=command_report)
+
+    backtest = commands.add_parser("backtest", help="settle offline back-test outcomes for a date range")
+    backtest.add_argument("--start", help="YYYY-MM-DD")
+    backtest.add_argument("--end", help="YYYY-MM-DD")
+    backtest.set_defaults(func=command_backtest)
 
     doctor = commands.add_parser("doctor", help="check runtime dependencies")
     doctor.set_defaults(func=command_doctor)
