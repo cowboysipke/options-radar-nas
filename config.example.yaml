@@ -1,4 +1,5 @@
 timezone: Asia/Shanghai
+setup_completed: false
 database_path: data/options_radar.db
 evidence_dir: evidence
 

@@ -515,8 +515,7 @@ class OptionsRadarService:
             except Exception as exc:
                 market = MarketSnapshot(event.contract_key, datetime.utcnow(), provider="futu_opend", data_status="missing")
                 market.field_quality["error"] = f"{type(exc).__name__}:{str(exc)[:100]}"
-            if market.futu_code:
-                active_codes.append(market.futu_code)
+            active_codes.append(event.contract_key)
             self._last_market_by_contract[event.contract_key] = market
             self.database.save_option_snapshot(event.contract_key, market.observed_at, _as_jsonable(market))
             portfolio = self._portfolio.get(event.symbol, PortfolioContext(
@@ -844,7 +843,7 @@ class OptionsRadarService:
     def start(self) -> None:
         if self._started:
             return
-        if self.config.raw.get("setup_completed") is False:
+        if not bool(self.config.raw.get("setup_completed", False)):
             self._last_error = "setup_required"
             return
         from apscheduler.executors.pool import ThreadPoolExecutor
