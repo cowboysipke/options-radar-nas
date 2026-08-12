@@ -804,7 +804,40 @@ class OptionsRadarService:
         return [json.loads(str(row["payload_json"])) for row in self.database.recommendations_for_date(session)]
 
     def dashboard_portfolio(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
-        return {symbol: _as_jsonable(context) for symbol, context in self._portfolio.items()}
+        self._refresh_stock_meta()
+        result = {}
+        for symbol, context in self._portfolio.items():
+            item = _as_jsonable(context)
+            item["company_name"] = self._stock_meta.get(symbol, {}).get("name", "")
+            item["current_price"] = self._stock_meta.get(symbol, {}).get("price")
+            item["change_pct"] = self._stock_meta.get(symbol, {}).get("change_pct")
+            result[symbol] = item
+        return result
+
+    _stock_meta: Dict[str, Dict[str, Any]] = {}
+
+    def _refresh_stock_meta(self) -> None:
+        """Populate company names and prices for portfolio symbols (lazy, cached)."""
+        symbols = list(self._portfolio.keys())
+        if not symbols:
+            return
+        try:
+            backend = self.ibkr._ensure()
+            for sym in symbols:
+                if sym in self._stock_meta:
+                    continue
+                try:
+                    stock = self.ibkr._make_stock(sym)
+                    details = backend.reqContractDetails(stock)
+                    if details:
+                        name = getattr(details[0], "longName", "") or sym
+                        self._stock_meta[sym] = {"name": name}
+                    else:
+                        self._stock_meta[sym] = {"name": sym}
+                except Exception:
+                    self._stock_meta[sym] = {"name": sym}
+        except Exception:
+            pass
 
     def dashboard_signals(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         date_str = str((_payload or {}).get("date", "")).strip()
@@ -838,7 +871,31 @@ class OptionsRadarService:
             return []
 
     def dashboard_backtest(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
-        return {"paper": self.database.paper_stats(), "last_run": self._last_backtest, "optimization": self._last_optimization}
+        # Replay on whatever sessions have recommendations in the DB.
+        try:
+            with self.database.connect() as conn:
+                sessions = [row[0] for row in conn.execute(
+                    "SELECT DISTINCT session_date FROM recommendations WHERE session_date IS NOT NULL ORDER BY session_date"
+                ).fetchall()]
+        except Exception:
+            sessions = []
+        summary = {}
+        if sessions:
+            try:
+                start = date.fromisoformat(sessions[0])
+                end = date.fromisoformat(sessions[-1])
+                settlement = self.backtests.replay(start, end)
+                summary = self.backtests.replay_summary(start, end)
+            except Exception:
+                summary = {"error": "replay_failed"}
+        return {
+            "paper": self.database.paper_stats(),
+            "last_run": self._last_backtest,
+            "optimization": self._last_optimization,
+            "historical_range": {"start": sessions[0] if sessions else None, "end": sessions[-1] if sessions else None},
+            "sessions_available": len(sessions),
+            "replay": summary,
+        }
 
     def dashboard_contracts(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         return self.dashboard_recommendations({})

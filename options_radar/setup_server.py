@@ -900,13 +900,33 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
             rows = []
             for symbol, item in data.items():
                 if not isinstance(item, Mapping):
-                    rows.append('<tr><td>{}</td><td colspan="3">{}</td></tr>'.format(html.escape(str(symbol)), html.escape(str(item))))
+                    rows.append(f'<tr><td>{html.escape(str(symbol))}</td><td colspan="5">{html.escape(str(item))}</td></tr>')
                     continue
-                rows.append('<tr><td>{}</td><td>{}</td><td>{}</td><td>{:.2%}</td></tr>'.format(
-                    html.escape(str(symbol)), html.escape(str(item.get("held_quantity", 0))),
-                    "是" if item.get("in_watchlist") else "否", float(item.get("concentration", 0) or 0),
+                name = html.escape(str(item.get("company_name", "") or ""))
+                price = item.get("current_price")
+                change = item.get("change_pct")
+                price_str = f"{float(price):.2f}" if price is not None else "-"
+                change_str = f"{float(change)*100:+.2f}%" if change is not None else "-"
+                rows.append('<tr><td>{}</td><td class="muted">{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.2%}</td></tr>'.format(
+                    html.escape(str(symbol)), name, html.escape(str(item.get("held_quantity", 0))),
+                    price_str, change_str, float(item.get("concentration", 0) or 0),
                 ))
-            return '<section class="card"><table><tr><th>标的</th><th>持仓数量</th><th>自选</th><th>集中度</th></tr>{}</table></section>'.format("".join(rows) or '<tr><td colspan="4">暂无组合快照</td></tr>')
+            return '<section class="card"><table><tr><th>标的</th><th>公司名称</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th></tr>{}</table></section>'.format("".join(rows) or '<tr><td colspan="6">暂无组合快照</td></tr>')
+        if path == "/backtest" and isinstance(data, dict):
+            replay = data.get("replay") or {}
+            ranges = data.get("historical_range") or {}
+            paper = data.get("paper") or {}
+            parts = []
+            if ranges.get("start"):
+                parts.append(f'<section class="card"><h2>历史回放（{ranges["start"]} ~ {ranges["end"]}，共 {data.get("sessions_available",0)} 个交易日）</h2>')
+                parts.append(f'<p>结算笔数: {replay.get("filled",0)} 成交 / {replay.get("no_fill",0)} 未成交</p>')
+                parts.append(f'<p>平均收益率: <b>{round(replay.get("avg_net_return",0)*100,2)}%</b>　最大回撤: <b>{round(replay.get("max_drawdown",0)*100,2)}%</b></p>')
+                parts.append('<p class="muted">注：基于当前数据库中的信号（不含完整 30 天历史），只反映已有数据。</p>')
+                parts.append(f'<details><summary>逐笔明细</summary><pre>{html.escape(json.dumps(replay.get("outcomes",[])[-30:], ensure_ascii=False, indent=2, default=str))}</pre></details>')
+                parts.append('</section>')
+            if paper:
+                parts.append(f'<section class="card"><h2>模拟交易统计</h2><p>平仓: {paper.get("closed",0)} 笔　胜率: {round(paper.get("win_rate",0)*100,1)}%　损益: ${paper.get("realized_pnl",0):,.2f}</p></section>')
+            return "".join(parts) if parts else '<section class="card"><p>暂无回测数据。等待系统积累足够交易日后再查看。</p></section>'
         if path == "/system" and isinstance(data, dict):
             statuses = []
             for name in ("ibkr", "discord", "ai", "feishu"):
