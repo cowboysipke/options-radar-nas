@@ -20,3 +20,5 @@ secrets/
 *.db-shm
 feishu_state.db*
 live-output/
+__pycache__/
+.pytest_cache/

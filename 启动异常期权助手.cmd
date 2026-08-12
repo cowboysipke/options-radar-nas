@@ -2,6 +2,7 @@
 setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
+title Options Radar 本地面板
 
 set "OPTIONS_RADAR_BUILD_VERSION=v2-local"
 for /f "tokens=*" %%G in ('git rev-parse --short HEAD 2^>nul') do set "OPTIONS_RADAR_GIT_SHA=%%G"
@@ -20,4 +21,5 @@ echo 正在启动本地面板: http://127.0.0.1:8787/
 set "PYTHONUTF8=1"
 set "PYTHONIOENCODING=utf-8"
 %PY% -m options_radar.local_runtime
+pause
 exit /b 0
