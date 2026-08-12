@@ -20,6 +20,7 @@ discord:
 secret_refs:
   deepseek_api_key: data-local/secrets/deepseek_api_key
   feishu_app_secret: data-local/secrets/feishu_app_secret
+  feishu_webhook: data-local/secrets/feishu_webhook
   discord_user_token: data-local/secrets/discord_user_token
   massive_api_key: data-local/secrets/massive_api_key
 

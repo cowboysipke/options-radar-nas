@@ -158,6 +158,29 @@ def load_feishu_credentials(
     return FeishuCredentials(app_id=app_id, app_secret=app_secret)
 
 
+def load_feishu_webhook(
+    environ: Optional[Mapping[str, str]] = None,
+    secret_dir: Optional[Path] = None,
+) -> Optional[str]:
+    """Load an optional group-bot webhook URL.
+
+    The webhook is the low-friction notification path: it needs no app
+    credentials, no event subscription and no binding.  Delivery goes to the
+    group where the bot was added.
+    """
+    env = os.environ if environ is None else environ
+    directory = Path("/run/secrets") if secret_dir is None else Path(secret_dir)
+    url = str(env.get("FEISHU_WEBHOOK_URL", "") or env.get("LARK_WEBHOOK_URL", "")).strip()
+    url_file = str(env.get("FEISHU_WEBHOOK_URL_FILE", "")).strip()
+    if not url and url_file and Path(url_file).is_file():
+        url = Path(url_file).read_text(encoding="utf-8").strip()
+    if not url:
+        url = _read_docker_secret(directory, ("feishu_webhook", "FEISHU_WEBHOOK_URL", "lark_webhook"))
+    if url and not url.startswith(("https://", "http://")):
+        return None
+    return url or None
+
+
 @dataclass
 class FeishuCallbacks:
     """Business operations injected into the transport layer."""
@@ -699,6 +722,62 @@ class LarkMessageSender:
             raise FeishuDeliveryError("Feishu API {}: {}".format(code, message))
 
 
+class FeishuWebhookSender:
+    """Send interactive cards through a Feishu group-bot webhook.
+
+    The webhook needs no SDK, no app credentials and no binding, which makes it
+    the fastest path to a working notification loop.
+    """
+
+    def __init__(self, url: str, timeout: float = 10.0):
+        self.url = url
+        self.timeout = timeout
+
+    def __call__(self, item: OutboxMessage) -> None:
+        try:
+            card = json.loads(str(item.content))
+        except (TypeError, ValueError) as exc:
+            raise FeishuDeliveryError("Feishu invalid card") from exc
+        payload = {"msg_type": "interactive", "card": card}
+        request = urllib.request.Request(
+            self.url,
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json", "User-Agent": "options-radar/0.2"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                body = json.loads(response.read().decode("utf-8"))
+            raw_code = body.get("code") if isinstance(body, Mapping) else None
+            code = int(raw_code) if raw_code is not None else -1
+            if code != 0:
+                message = str(body.get("msg", "api_error"))[:160] if isinstance(body, Mapping) else "api_error"
+                raise FeishuDeliveryError("Feishu webhook {}: {}".format(code, message))
+        except urllib.error.HTTPError as exc:
+            raise FeishuDeliveryError("Feishu webhook http_{}".format(exc.code)) from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise FeishuDeliveryError("Feishu webhook network_error") from exc
+
+
+WEBHOOK_RECEIVE_ID = "webhook"
+
+
+def default_feishu_sender() -> Optional[Callable[[OutboxMessage], None]]:
+    """Return a working sender for the configured mode, or ``None``.
+
+    Priority: group-bot webhook, then app credentials (lark-oapi).  A webhook
+    also implies a fixed destination so binding is never required.
+    """
+    webhook_url = load_feishu_webhook()
+    if webhook_url:
+        return FeishuWebhookSender(webhook_url)
+    try:
+        credentials = load_feishu_credentials()
+    except FeishuConfigurationError:
+        return None
+    return LarkMessageSender(credentials)
+
+
 def _attribute(value: Any, *names: str) -> Any:
     current = value
     for name in names:
@@ -802,11 +881,21 @@ class FeishuBot:
             payload=message.payload,
         )
 
+    def _webhook_mode(self) -> bool:
+        if isinstance(self.sender, FeishuWebhookSender):
+            return True
+        if self.sender is None and load_feishu_webhook():
+            return True
+        return False
+
     def enqueue_card(
         self, card: Mapping[str, Any], receive_id: Optional[str] = None,
         source_message_id: Optional[str] = None
     ) -> Optional[str]:
-        destination = receive_id or self.store.bound_chat_id() or self.store.latest_chat_id()
+        if self._webhook_mode():
+            destination = receive_id or WEBHOOK_RECEIVE_ID
+        else:
+            destination = receive_id or self.store.bound_chat_id() or self.store.latest_chat_id()
         if not destination:
             return None
         source = source_message_id or "system-{}".format(int(self.clock()))
@@ -821,7 +910,13 @@ class FeishuBot:
         The regular outbox worker performs delivery and records any API error;
         this method is therefore safe for the dashboard's synchronous action.
         """
-
+        if self._webhook_mode():
+            queue_id = self.enqueue_card(
+                build_card("飞书连接测试", "绑定成功，日报将发送到此对话。", "green"),
+                receive_id=WEBHOOK_RECEIVE_ID,
+                source_message_id="feishu-test",
+            )
+            return {"status": "queued", "queue_id": queue_id, "mode": "webhook"}
         chat_id = self.store.bound_chat_id() or self.store.latest_chat_id()
         if not chat_id:
             return {"status": "error", "message": "请先在飞书私聊机器人发送“绑定”。"}
@@ -834,7 +929,9 @@ class FeishuBot:
 
     def test_credentials(self, timeout: float = 10.0) -> Dict[str, Any]:
         """Validate app credentials and, when bound, queue a test card."""
-
+        if load_feishu_webhook():
+            binding = self.test_binding()
+            return {"provider": "feishu", "mode": "webhook", "status": "ok", "binding": binding}
         result = probe_feishu_credentials(timeout=timeout)
         if result.get("status") != "ok":
             return result
@@ -983,12 +1080,22 @@ class FeishuBot:
         encrypt_key: str = "",
         log_level: Any = None,
     ) -> None:
-        """Start the lark-oapi websocket client and the durable worker."""
-
+        """Start delivery and, for app credentials, the lark-oapi receiver."""
+        if self.sender is None:
+            self.sender = default_feishu_sender()
+        self.start_worker()
+        if self.sender is None or isinstance(self.sender, FeishuWebhookSender):
+            # Webhook mode only needs the outbox worker; no websocket receiver.
+            self._receiver_running = self.sender is not None
+            try:
+                while not self._stop.wait(5.0):
+                    pass
+            finally:
+                self._receiver_running = False
+                self.stop()
+            return
         credentials = load_feishu_credentials()
         lark = importlib.import_module("lark_oapi")
-        if self.sender is None:
-            self.sender = LarkMessageSender(credentials)
 
         def receive(data: Any) -> None:
             self.handle_event(data)

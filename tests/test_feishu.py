@@ -1,19 +1,24 @@
 import importlib
+import io
 import json
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from options_radar.feishu import (
     FeishuBot,
     FeishuCallbacks,
     FeishuConfigurationError,
     FeishuStore,
+    FeishuWebhookSender,
     RETRY_DELAYS_SECONDS,
+    WEBHOOK_RECEIVE_ID,
     build_card,
     load_feishu_credentials,
+    load_feishu_webhook,
     parse_command,
 )
 
@@ -52,11 +57,19 @@ class FeishuTests(unittest.TestCase):
         )
 
     def test_import_has_no_lark_dependency(self):
-        # Importing/reloading the transport must not trigger an SDK import.
-        before = set(sys.modules)
-        importlib.reload(sys.modules["options_radar.feishu"])
-        newly_loaded = set(sys.modules) - before
-        self.assertFalse(any(name == "lark_oapi" or name.startswith("lark_oapi.") for name in newly_loaded))
+        # Importing the transport must not pull lark-oapi.  This runs in a fresh
+        # subprocess instead of importlib.reload so the shared module keeps its
+        # original class identity for the other tests in this file.
+        code = (
+            "import sys\n"
+            "import options_radar.feishu\n"
+            "loaded = {name for name in sys.modules if name == 'lark_oapi' or name.startswith('lark_oapi.')}\n"
+            "assert not loaded, loaded\n"
+        )
+        import subprocess
+
+        result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_credentials_environment_then_docker_secret(self):
         credentials = load_feishu_credentials({"FEISHU_APP_ID": "cli_a", "FEISHU_APP_SECRET": "sensitive-value"})
@@ -162,6 +175,79 @@ class FeishuTests(unittest.TestCase):
             reopened = FeishuStore(path, clock=clock)
             self.assertEqual(reopened.outbox_row(message_uuid)["message_uuid"], message_uuid)
             reopened.close()
+
+    def test_load_feishu_webhook_from_env_and_file(self):
+        self.assertEqual(load_feishu_webhook({"FEISHU_WEBHOOK_URL": "https://open.feishu.cn/xxx"}), "https://open.feishu.cn/xxx")
+        self.assertIsNone(load_feishu_webhook({}))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "feishu_webhook"
+            path.write_text("https://open.feishu.cn/webhook\n", encoding="utf-8")
+            loaded = load_feishu_webhook({"FEISHU_WEBHOOK_URL_FILE": str(path)})
+            self.assertEqual(loaded, "https://open.feishu.cn/webhook")
+
+    def test_webhook_mode_enqueues_and_delivers_without_binding(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bot = FeishuBot(
+                self.callbacks([]), Path(directory) / "state.db",
+                sender=FeishuWebhookSender("https://open.feishu.cn/webhook"),
+            )
+            queue_id = bot.enqueue_card(build_card("日报", "正文"))
+            self.assertIsNotNone(queue_id)
+            item = bot.store.claim_outbox()
+            self.assertIsNotNone(item)
+            self.assertEqual(item.receive_id, WEBHOOK_RECEIVE_ID)
+            self.assertTrue(bot._webhook_mode())
+            result = bot.test_binding()
+            self.assertEqual(result["mode"], "webhook")
+            bot.close()
+
+    def test_webhook_sender_posts_interactive_card(self):
+        sender = FeishuWebhookSender("https://open.feishu.cn/webhook")
+        payload = json.dumps(build_card("标题", "正文"), ensure_ascii=False)
+        captured = {}
+
+        class FakeResponse(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        response = FakeResponse(json.dumps({"code": 0}).encode("utf-8"))
+
+        class FakeOpener:
+            def __init__(self, request, timeout=10):
+                captured["request"] = request
+                captured["timeout"] = timeout
+
+            def __enter__(self):
+                return response
+
+            def __exit__(self, *args):
+                return False
+
+        with mock.patch("urllib.request.urlopen", FakeOpener):
+            from options_radar.feishu import OutboxMessage
+
+            item = OutboxMessage(1, "uuid", "src", WEBHOOK_RECEIVE_ID, "chat_id", "interactive", payload, 0, 0.0)
+            sender(item)
+        self.assertEqual(captured["request"].method, "POST")
+        body = json.loads(captured["request"].data.decode("utf-8"))
+        self.assertEqual(body["msg_type"], "interactive")
+        self.assertIn("标题", json.dumps(body["card"], ensure_ascii=False))
+
+    def test_webhook_sender_raises_on_api_error(self):
+        sender = FeishuWebhookSender("https://open.feishu.cn/webhook")
+
+        def fake_urlopen(request, timeout=10.0):
+            return io.BytesIO(json.dumps({"code": 19001, "msg": "bad"}).encode("utf-8"))
+
+        from options_radar.feishu import FeishuDeliveryError, OutboxMessage
+
+        item = OutboxMessage(1, "uuid", "src", WEBHOOK_RECEIVE_ID, "chat_id", "interactive", "{}", 0, 0.0)
+        with mock.patch("urllib.request.urlopen", fake_urlopen):
+            with self.assertRaises(FeishuDeliveryError):
+                sender(item)
 
     def test_health_degrades_for_dead_letter(self):
         clock = MutableClock()

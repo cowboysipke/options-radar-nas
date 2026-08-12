@@ -81,6 +81,7 @@ def _secret_environment(config: AppConfig) -> None:
     mapping = {
         "deepseek_api_key": "DEEPSEEK_API_KEY_FILE",
         "feishu_app_secret": "FEISHU_APP_SECRET_FILE",
+        "feishu_webhook": "FEISHU_WEBHOOK_URL_FILE",
         "discord_user_token": "DISCORD_USER_TOKEN_FILE",
         "ibkr_flex_token": "IBKR_FLEX_TOKEN_FILE",
         "massive_api_key": "MASSIVE_API_KEY_FILE",

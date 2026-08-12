@@ -103,6 +103,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "secret_refs": {
         "deepseek_api_key": "/data/secrets/deepseek_api_key",
         "feishu_app_secret": "/data/secrets/feishu_app_secret",
+        "feishu_webhook": "/data/secrets/feishu_webhook",
         "futu_login_password_md5": "/data/secrets/futu_login_password_md5",
         "ibkr_flex_token": "/data/secrets/ibkr_flex_token",
         "massive_api_key": "/data/secrets/massive_api_key",
@@ -118,6 +119,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
 SECRET_ENV_FILES = {
     "DeepSeek API Key": "DEEPSEEK_API_KEY_FILE",
     "飞书 App Secret": "FEISHU_APP_SECRET_FILE",
+    "飞书 Webhook URL": "FEISHU_WEBHOOK_URL_FILE",
     "Massive API Key": "MASSIVE_API_KEY_FILE",
     "Alpaca API Key": "ALPACA_API_KEY_FILE",
     "Alpaca API Secret": "ALPACA_API_SECRET_FILE",
@@ -129,6 +131,7 @@ SECRET_ENV_FILES = {
 SECRET_FORM_FIELDS = {
     "deepseek_api_key": ("DeepSeek API Key", "deepseek_api_key"),
     "feishu_app_secret": ("飞书 App Secret", "feishu_app_secret"),
+    "feishu_webhook": ("飞书 Webhook URL", "feishu_webhook"),
     "massive_api_key": ("Massive API Key", "massive_api_key"),
     "alpaca_api_key": ("Alpaca API Key", "alpaca_api_key"),
     "alpaca_api_secret": ("Alpaca API Secret", "alpaca_api_secret"),
@@ -266,6 +269,7 @@ class SetupConfigStore:
         ref_by_label = {
             "DeepSeek API Key": "deepseek_api_key",
             "飞书 App Secret": "feishu_app_secret",
+            "飞书 Webhook URL": "feishu_webhook",
             "富途登录凭据": "futu_login_password_md5",
             "Massive API Key": "massive_api_key",
             "Alpaca API Key": "alpaca_api_key",
