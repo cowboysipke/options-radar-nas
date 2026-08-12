@@ -15,3 +15,8 @@ nas-data/
 data-local/
 secrets/
 .env.nas
+
+*.db-wal
+*.db-shm
+feishu_state.db*
+live-output/
