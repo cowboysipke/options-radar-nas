@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import socket
 from typing import Any, Dict, Iterable, List, Optional
 
 from .futu_provider import FutuProvider
@@ -36,6 +37,14 @@ class FutuUnifiedProvider:
         )
 
     def health(self) -> ProviderHealth:
+        try:
+            connection = socket.create_connection((self.client.host, self.client.port), timeout=0.25)
+            connection.close()
+        except OSError as exc:
+            return ProviderHealth(
+                self.name, True, False, "offline", message=str(exc)[:160], quality="missing",
+                endpoint=f"{self.client.host}:{self.client.port}",
+            )
         value = self.client.health()
         connected = bool(getattr(value, "connected", False))
         return ProviderHealth(
