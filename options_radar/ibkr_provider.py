@@ -143,6 +143,7 @@ class IBKRProvider:
         socket_factory: Callable[..., Any] = socket.create_connection,
         now: Callable[[], datetime] = _utcnow,
         connect_timeout: float = 1.5,
+        market_data_type: int = 3,
     ) -> None:
         self.host = host
         self.port = int(port) if port is not None else None
@@ -154,7 +155,7 @@ class IBKRProvider:
         self.connect_timeout = float(connect_timeout)
         self._request_count = 0
         self._last_error = ""
-        self._market_data_type = 1
+        self._market_data_type = int(market_data_type) if int(market_data_type) in (1, 2, 3, 4) else 3
         self._contract_cache: Dict[str, IBKROptionContract] = {}
 
     @staticmethod
@@ -259,7 +260,13 @@ class IBKRProvider:
 
     def _ensure(self) -> Any:
         self.connect()
-        return self._backend
+        backend = self._backend
+        if backend is not None and self._market_data_type != 1:
+            try:
+                backend.reqMarketDataType(self._market_data_type)
+            except Exception:
+                pass
+        return backend
 
     def _quality(self) -> str:
         # API values: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen.

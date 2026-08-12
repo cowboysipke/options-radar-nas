@@ -54,6 +54,22 @@
 5. **Playwright 备用采集器 DOM 选择器**
    - 选择器从 `li[id^='chat-messages']` 改为多选择器组合 + `_wait_messages()` 水合等待
 
+6. **IBKR 延迟行情支持**（`ibkr_provider.py`）
+   - `_market_data_type` 改为可配置（默认 3=Delayed，config `ibkr.market_data_type`）
+   - `_ensure()` 每次连接后主动调 `reqMarketDataType`
+
+7. **富途从行情路由分离**（`config.local.yaml`）
+   - `providers.market_priority` 移除 `futu`；`enabled.futu: false`
+
+8. **富途导入自选错误处理**（`service.py`）
+   - `import_futu_watchlist()` 加 try/except + 中文错误提示
+
+9. **面板今日推荐/信号无数据**（`service.py`）
+   - 新增 `_dashboard_date()`：自动回退到最近一个有数据的交易日
+
+10. **live_test 产物路径 + UTF-8 编码**（`live_test.py`）
+    - `data_dir` 改为 `data-local/`，启动设 `chcp 65001`
+
 ### 配置变更
 
 - `config.example.yaml`：增加 `secret_refs`（disord_user_token / feishu_webhook）、`backtest` 段

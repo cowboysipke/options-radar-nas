@@ -94,7 +94,7 @@ class IBKRProviderTests(unittest.TestCase):
                 return FakeSocket()
             raise OSError("closed")
 
-        self.provider = IBKRProvider(backend=self.backend, socket_factory=socket_factory, now=lambda: NOW)
+        self.provider = IBKRProvider(backend=self.backend, socket_factory=socket_factory, now=lambda: NOW, market_data_type=1)
 
     def test_discovers_all_standard_ports_in_priority_order(self):
         endpoints = self.provider.discover()

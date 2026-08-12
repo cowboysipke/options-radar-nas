@@ -62,7 +62,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "auto_hold_quote_right": 1,
     },
     "ibkr": {"enabled": True, "host": "127.0.0.1", "port": 0, "client_id": 71,
-             "readonly": True, "flex_query_id": ""},
+             "readonly": True, "market_data_type": 3, "flex_query_id": ""},
     "providers": {
         "market_priority": ["ibkr", "massive", "futu", "tradier", "alpaca", "marketdata_app"],
         "enabled": {"futu": False, "ibkr": True, "tradier": False, "alpaca": False,

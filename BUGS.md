@@ -3,45 +3,39 @@
 ## 当前未解决
 
 ### BUG-001: IBKR 期权实时/延迟行情不可用
-- **状态**：未解决（账号权限问题，非代码缺陷）
-- **现象**：IBKR 对任何期权/正股请求实时行情返回 Error 10089/10091（需额外订阅），延迟行情同样不可用
-- **影响**：推荐无法获取 bid/ask，评分停留在 C 级观察榜，无法达到合格线 65 分
-- **根因**：用户 IBKR 账号未订阅美股行情数据包（Market Data Bundle）
-- **解决方案**：IBKR 账户管理 → Market Data Subscriptions → 订阅 US Securities Snapshot Bundle（约 $10/月）
-- **临时措施**：系统自动回退到 Massive EOD 数据（有 last/volume，无 bid/ask）
+- **状态**：待验证（代码已加固，需美股开盘后测试）
+- **现象**：IBKR 对期权/正股请求行情返回 Error 10089/10091（需额外订阅）
+- **排查发现**：探测时美股为 PRE_MARKET_BEGIN（北京时间 18:56），无活跃报价
+- **已实施修复**：`_market_data_type` 默认从 1（Live）改为 3（Delayed），由配置 `ibkr.market_data_type` 控制；`_ensure()` 里主动调 `reqMarketDataType`
+- **验证方法**：美股开盘后（北京时间 21:30+）运行 `live_test.py`，观察推荐中 `market_status` 是否从 eod 变为 realtime/delayed
 
 ### BUG-002: 富途期权权限缺失
-- **状态**：未解决（账号权限问题，非代码缺陷）
-- **现象**：富途 `get_option_chain` 返回 `期权无获取US.XXX数据的权限，请先开通美股期权权限`
-- **影响**：富途不能作为期权的行情源（正股行情可用）
-- **根因**：用户富途账号未开通美股期权交易权限
-- **解决方案**：富途牛牛 App → 业务办理 → 期权 → 开通美股期权权限（通常需 2 万+ 资产 + 知识测试）
-- **临时措施**：富途仅用于正股实时行情增强（待实现）
+- **状态**：已解决（富途不再参与行情路由，仅作自选导入）
+- **修复**：`config.local.yaml` 移除 futu 从 `providers.market_priority`，`enabled.futu: false`
+- **影响**：富途自选导入仍然可用，行情路由回归 IBKR + Massive
 
 ### BUG-003: 富途持仓同步失败
-- **状态**：未解决（不影响核心功能）
-- **现象**：`sync_broker` 走富途路径时返回 `active REAL US trading account not found`
-- **影响**：无法用富途读取持仓；IBKR 持仓同步正常，已覆盖
-- **根因**：富途 OpenD 未配置/登录实盘 US 交易账号
+- **状态**：已解决（加错误处理，返回友好中文提示）
+- **修复**：`import_futu_watchlist()` 加 try/except，抛出时返回 `{status: error, message: 中文提示}`
+- **说明**：系统日常 `sync_broker` 走 IBKR 路径（不受影响），仅面板「从富途导入自选」按钮受影响
 
 ### BUG-004: 面板服务实例创建的 `feishu_state.db` 出现在项目根目录
-- **状态**：已缓解（加入 .gitignore），未根治
-- **现象**：`live_test.py` 运行后在项目根目录生成 `feishu_state.db`
-- **根因**：`live_test.py` 传入的 `data_dir` = 项目根目录，而 `local_runtime` 使用的是 `data-local/`
-- **临时措施**：gitignore 已排除 `feishu_state.db*`
-- **修复建议**：统一 `live_test.py` 的 `data_dir` 为 `data-local`
+- **状态**：已解决
+- **修复**：`live_test.py` 的 `data_dir` 改为 `config_path.parent / "data-local"`，与 `local_runtime` 一致
 
-### BUG-005: 富途 UT8 编码输出在控制台显示乱码
-- **状态**：未解决（显示问题，不影响功能）
-- **现象**：`futu-api` SDK 打印的日志中中文字段在 PowerShell 控制台显示为问号
-- **根因**：PowerShell 5.1 默认 GBK 编码，futu-api 输出 UTF-8
-- **影响**：仅影响控制台显示，不影响数据和业务逻辑
-- **修复建议**：每次脚本启动时设置 `[Console]::OutputEncoding = UTF-8`
+### BUG-005: 富途 UTF-8 编码输出在控制台显示乱码
+- **状态**：已解决
+- **修复**：`live_test.py` 启动时调用 `chcp 65001` 切换到 UTF-8；`启动异常期权助手.cmd` 已有 `PYTHONUTF8=1`
 
 ## 已解决
 
 | 编号 | 问题 | 解决日期 | 修复方式 |
 |---|---|---|---|
+| ~~BUG-006~~ | 面板"今日推荐/信号详情"无数据 | 2026-08-12 | `_dashboard_date()` 回退到最近有数据的交易日，不再死绑定当天 |
+| ~~BUG-005~~ | 富途中文日志控制台乱码 | 2026-08-12 | live_test 启动设 chcp 65001 |
+| ~~BUG-004~~ | feishu_state.db 出现在项目根 | 2026-08-12 | live_test data_dir 指向 data-local |
+| ~~BUG-003~~ | 富途导入自选报错无提示 | 2026-08-12 | import_futu_watchlist 加 try/except 中文错误 |
+| ~~BUG-002~~ | 富途参与行情路由 | 2026-08-12 | 移除 futu 从 providers.market_priority + disabled |
 | ~~BUG-100~~ | Discord DOM 采集返回 0 条消息 | 2026-08-12 | 新增 `DiscordRestSource`（REST API），Playwright 选择器修正为备用 |
 | ~~BUG-101~~ | 回测无法闭环（需 100+ 样本） | 2026-08-12 | 新增 `replay()` 支持任意日期回放 + 合成 K 线兜底 |
 | ~~BUG-102~~ | 飞书配置断链（本地路径错误） | 2026-08-12 | 强制 secret_refs 为 data-local/secrets/* + 新增 webhook 模式 |

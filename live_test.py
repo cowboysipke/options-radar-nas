@@ -163,9 +163,16 @@ def main() -> None:
     args = parser.parse_args()
 
     config_path = Path(args.config).resolve()
-    os.environ.setdefault("DATA_DIR", str(config_path.parent))
+    os.environ.setdefault("DATA_DIR", str(config_path.parent / "data-local"))
     config = load_config(str(config_path))
     _secret_environment(config)
+    # Windows console defaults to GBK; set UTF-8 so Chinese log output is readable.
+    try:
+        import subprocess, sys
+        if sys.platform == "win32":
+            subprocess.run(["chcp", "65001"], capture_output=True, shell=True)
+    except Exception:
+        pass
 
     results: Dict[str, Any] = {"time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"), "errors": []}
 
@@ -178,7 +185,7 @@ def main() -> None:
 
     from options_radar.service import OptionsRadarService
 
-    service = OptionsRadarService(str(config_path), str(config_path.parent))
+    service = OptionsRadarService(str(config_path), str(config_path.parent / "data-local"))
     try:
         # ---- Probe: Massive ----
         section("PROBE: Massive")

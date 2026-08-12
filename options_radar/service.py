@@ -256,6 +256,7 @@ class OptionsRadarService:
             host=str(ibkr_config.get("host", "127.0.0.1")),
             port=int(ibkr_config.get("port", 0)) or None,
             client_id=int(ibkr_config.get("client_id", 71)),
+            market_data_type=int(ibkr_config.get("market_data_type", 3)),
         )
         self.ibkr_flex = IBKRFlexClient()
         self.massive = MassiveClient()
@@ -734,7 +735,14 @@ class OptionsRadarService:
 
     def import_futu_watchlist(self) -> Dict[str, Any]:
         """One-time migration helper. It never participates in daily pricing."""
-        watchlists = self.futu.sync_watchlists()
+        try:
+            watchlists = self.futu.sync_watchlists()
+        except Exception as exc:
+            return {
+                "status": "error",
+                "message": f"富途自选导入失败：{type(exc).__name__}",
+                "detail": str(exc)[:300],
+            }
         imported = []
         for group, codes in watchlists.groups.items():
             for code in codes:
@@ -773,15 +781,33 @@ class OptionsRadarService:
         return answer.text or "已检查当前日报与脱敏组合上下文，暂无更多可引用数据。"
 
     # Dashboard callbacks -------------------------------------------------
+    def _dashboard_date(self) -> date:
+        """Return the most recent US session date that has stored recommendations.
+
+        Falls back to today's session only when no historical data exists at all.
+        """
+        today = self._trade_date()
+        try:
+            with self.database.connect() as connection:
+                row = connection.execute(
+                    "SELECT session_date FROM recommendations WHERE session_date IS NOT NULL ORDER BY session_date DESC LIMIT 1"
+                ).fetchone()
+            if row and row["session_date"]:
+                return date.fromisoformat(str(row["session_date"]))
+        except Exception:
+            pass
+        return today
+
     def dashboard_recommendations(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
-        return [json.loads(str(row["payload_json"])) for row in self.database.recommendations_for_date(self._trade_date())]
+        return [json.loads(str(row["payload_json"])) for row in self.database.recommendations_for_date(self._dashboard_date())]
 
     def dashboard_portfolio(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         return {symbol: _as_jsonable(context) for symbol, context in self._portfolio.items()}
 
     def dashboard_signals(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
+        session = self._dashboard_date()
         rows = []
-        for event in self.database.flow_events_for_date(self._trade_date()):
+        for event in self.database.flow_events_for_date(session):
             rows.append({
                 "event_key": event.event_key,
                 "contract_key": event.contract_key,

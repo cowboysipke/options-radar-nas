@@ -47,6 +47,7 @@ ibkr:
   port: 4001
   client_id: 71
   readonly: true
+  market_data_type: 3
 
 providers:
   market_priority: [ibkr, massive, futu, tradier, alpaca, marketdata_app]
