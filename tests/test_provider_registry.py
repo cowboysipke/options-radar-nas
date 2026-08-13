@@ -62,6 +62,16 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertEqual(value.data_status, "stale")
         self.assertFalse(value.execution_allowed)
 
+    def test_realtime_non_quote_fields_do_not_hide_missing_bid_ask(self):
+        registry = ProviderRegistry(priority=["ibkr"])
+        value = registry.composite_snapshot(
+            "US.TEST|2026-09-18|100|C",
+            {"ibkr": snapshot("ibkr", quality="realtime", volume=1000, delta=0.4)},
+            now=NOW,
+        )
+        self.assertEqual(value.data_status, "quote_missing")
+        self.assertFalse(value.execution_allowed)
+
     def test_status_and_enablement(self):
         class Fake:
             def health(self):

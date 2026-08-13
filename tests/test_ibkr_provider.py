@@ -137,6 +137,11 @@ class IBKRProviderTests(unittest.TestCase):
         self.assertEqual(self.backend.market_type, 3)
         self.assertEqual(item.bid.quality, "delayed")
 
+    def test_market_data_errors_are_retained_for_diagnostics(self):
+        self.provider._capture_market_error(7, 10091, "delayed data available")
+        self.provider._capture_market_error(8, 2104, "farm connected")
+        self.assertEqual(self.provider._market_errors, ["Error 10091: delayed data available"])
+
     def test_history_and_underlying_bars_use_read_api(self):
         contract = self.provider.get_option_chain("AAPL", option_type="C")[0]
         bars = self.provider.get_history(contract, date(2026, 8, 10), date(2026, 8, 12))

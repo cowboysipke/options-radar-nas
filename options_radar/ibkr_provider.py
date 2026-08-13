@@ -155,6 +155,8 @@ class IBKRProvider:
         self.connect_timeout = float(connect_timeout)
         self._request_count = 0
         self._last_error = ""
+        self._market_errors: List[str] = []
+        self._error_handler_attached = False
         self._market_data_type = int(market_data_type) if int(market_data_type) in (1, 2, 3, 4) else 3
         self._contract_cache: Dict[str, IBKROptionContract] = {}
 
@@ -245,7 +247,7 @@ class IBKRProvider:
                 quality=self._quality(), endpoint=f"{self.host}:{self.port}",
                 requests_used=self._request_count, last_success=checked_at,
                 last_error=self._last_error or None,
-                details={"account_access": bool(accounts), "readonly": True},
+                details={"account_access": bool(accounts), "readonly": True, "market_errors": list(self._market_errors)},
             )
         except Exception as exc:
             self._last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
@@ -255,18 +257,40 @@ class IBKRProvider:
                 status="missing_dependency" if missing else "error",
                 endpoint=f"{self.host}:{self.port}" if self.port else "",
                 message=self._last_error, last_error=self._last_error,
-                details={"readonly": True},
+                details={"readonly": True, "market_errors": list(self._market_errors)},
             )
 
     def _ensure(self) -> Any:
         self.connect()
         backend = self._backend
+        if backend is not None and not self._error_handler_attached:
+            error_event = getattr(backend, "errorEvent", None)
+            if error_event is not None:
+                try:
+                    error_event += self._capture_market_error
+                    self._error_handler_attached = True
+                except Exception:
+                    pass
         if backend is not None and self._market_data_type != 1:
             try:
                 backend.reqMarketDataType(self._market_data_type)
             except Exception:
                 pass
         return backend
+
+    def _capture_market_error(
+        self, request_id: Any, error_code: Any, error_message: Any, _contract: Any = None
+    ) -> None:
+        try:
+            code = int(error_code)
+        except (TypeError, ValueError):
+            return
+        if code not in {10089, 10090, 10091, 162, 200, 321}:
+            return
+        record = f"Error {code}: {str(error_message)[:240]}"
+        if record not in self._market_errors:
+            self._market_errors.append(record)
+            self._market_errors = self._market_errors[-20:]
 
     def _quality(self) -> str:
         # API values: 1 live, 2 frozen, 3 delayed, 4 delayed-frozen.

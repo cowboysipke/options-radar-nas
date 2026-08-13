@@ -57,6 +57,15 @@ def _as_jsonable(value: Any) -> Dict[str, Any]:
     return json.loads(json.dumps(asdict(value), ensure_ascii=False, default=_iso))
 
 
+def _format_price(value: Any) -> str:
+    if value is None:
+        return "待行情"
+    try:
+        return f"{float(value):.2f}"
+    except (TypeError, ValueError):
+        return "待行情"
+
+
 def _naive_utc(value: Optional[datetime]) -> Optional[datetime]:
     if value is None:
         return None
@@ -642,11 +651,10 @@ class OptionsRadarService:
             f"**#{i+1} {item['contract_key']}**｜{float(item.get('score', 0)):.1f}分｜"
             f"{item.get('grade', '-')}｜{item.get('direction', '-')}｜"
             f"行情:{item.get('market_status', '待行情')}｜执行:{item.get('execution_status', '待行情')}\n"
-            f"bid/ask: {item.get('bid') if item.get('bid') is not None else '待行情'} / "
-            f"{item.get('ask') if item.get('ask') is not None else '待行情'}；"
-            f"入场:{item.get('max_entry_price') if item.get('max_entry_price') is not None else '待行情'}；"
-            f"止盈:{item.get('take_profit') if item.get('take_profit') is not None else '待行情'}；"
-            f"止损:{item.get('stop_loss') if item.get('stop_loss') is not None else '待行情'}\n"
+            f"bid/ask: {_format_price(item.get('bid'))} / {_format_price(item.get('ask'))}；"
+            f"入场:{_format_price(item.get('max_entry_price'))}；"
+            f"止盈:{_format_price(item.get('take_profit'))}；"
+            f"止损:{_format_price(item.get('stop_loss'))}\n"
             f"理由：{item.get('reason', '暂无理由')}"
             for i, item in enumerate(top)
         )

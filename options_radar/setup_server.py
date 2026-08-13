@@ -882,13 +882,21 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
             if not data:
                 return '<section class="card"><h2>今日暂无合格推荐</h2><p class="muted">点击“立即采集并生成推荐”，或先完成Discord与IBKR配置。</p></section>'
             cards = []
+            def format_price(value: Any) -> str:
+                if value is None:
+                    return "待行情"
+                try:
+                    return f"{float(value):.2f}"
+                except (TypeError, ValueError):
+                    return "待行情"
+
             for item in data[:5]:
                 key = html.escape(str(item.get("contract_key", "")))
-                bid = item.get("bid") if item.get("bid") is not None else "待行情"
-                ask = item.get("ask") if item.get("ask") is not None else "待行情"
-                entry = item.get("max_entry_price") if item.get("max_entry_price") is not None else "待行情"
-                take_profit = item.get("take_profit") if item.get("take_profit") is not None else "待行情"
-                stop_loss = item.get("stop_loss") if item.get("stop_loss") is not None else "待行情"
+                bid = format_price(item.get("bid"))
+                ask = format_price(item.get("ask"))
+                entry = format_price(item.get("max_entry_price"))
+                take_profit = format_price(item.get("take_profit"))
+                stop_loss = format_price(item.get("stop_loss"))
                 cards.append('<section class="card"><h2>{} · {}分</h2><p><b>{}</b> · {} · {}</p><p>bid/ask: {} / {}　数据: {}　执行: {}</p><p>入场: {}　止盈: {}　止损: {}</p><p class="muted">理由：{}</p></section>'.format(
                     html.escape(str(item.get("grade", "-"))), html.escape(str(item.get("score", "-"))), key,
                     html.escape(str(item.get("direction", "-"))), html.escape(str(item.get("market_status", "-"))),

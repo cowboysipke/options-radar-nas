@@ -174,7 +174,10 @@ class ProviderRegistry:
             else:
                 data_status = quality
         elif any(point.usable for point in fields.values()):
-            data_status = max(fields.values(), key=lambda item: QUALITY_ORDER.get(item.quality, 0)).quality
+            # A realtime volume/last/Greek field is not an executable quote.
+            # Without an atomic bid/ask pair expose the missing quote state
+            # instead of falsely labelling the whole snapshot realtime.
+            data_status = "quote_missing"
 
         result = CompositeMarketSnapshot(contract_key, fields, now, quote_provider, data_status, conflicts, candidates)
         self._last_composites[contract_key] = result

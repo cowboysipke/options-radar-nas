@@ -70,6 +70,8 @@
 | `history_adapters.py` | 组合 | Massive 优先 → IBKR 回退 → 合成兜底 |
 | `provider_registry.py` | 路由 | 多供应商字段级融合，冲突检测 |
 
+行情状态规则：只有同一供应商、同一质量、同时存在且有效的 bid/ask 才能形成可执行 quote pair；否则状态为 `quote_missing`、`eod` 或 `delayed`，不生成真实执行限价。
+
 ### 回测层 (`backtest_service.py`)
 - `replay(start, end)`：任意历史日期范围结算 1/3/5 日 P&L
 - `replay_summary()`：产出指标表（胜率、平均收益、最大回撤）
