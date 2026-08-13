@@ -112,13 +112,15 @@ RawMessage (dedup by content_hash)
         ▼
     build_candidate (仓位/止盈止损) ──► OptionCandidate
         │
-        ├─► 推荐输出 (score ≥ 65 → eligible)
+        ├─► 推荐输出（按分数排序前5；score ≥ 65 才是 eligible）
         ├─► PaperEngine.maybe_open (模拟盘)
         └─► 飞书日报 + A级提醒
                 │
                 ▼
         backtest replay (1/3/5日结算)
 ```
+
+持仓页面：页面只读取内存缓存；“手动刷新持仓”启动后台 IBKR 同步和合约元数据刷新，避免 HTTP 请求线程阻塞。
 
 ## 模块依赖关系
 

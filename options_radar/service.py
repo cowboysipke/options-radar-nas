@@ -333,6 +333,11 @@ class OptionsRadarService:
                 headless=(False if os.getenv("OPTIONS_RADAR_LOCAL") == "1" else bool(discord.get("headless", True))),
             )
         self._portfolio: Dict[str, PortfolioContext] = {}
+        self._stock_meta: Dict[str, Dict[str, Any]] = {}
+        self._portfolio_refresh_lock = threading.Lock()
+        self._portfolio_refresh_running = False
+        self._portfolio_refresh_status = "idle"
+        self._portfolio_refresh_error: Optional[str] = None
         self._last_results: List[Dict[str, Any]] = []
         self._last_collection: Optional[str] = None
         self._last_sync: Optional[str] = None
@@ -629,17 +634,20 @@ class OptionsRadarService:
 
     def publish_top5(self) -> Optional[str]:
         """Send the top-5 scored recommendations to Feishu as a regular update."""
-        results = self._last_results
-        if not results:
-            results = [json.loads(str(row["payload_json"])) for row in self.database.recommendations_for_date(self._trade_date())]
-        top = sorted(
-            [r for r in results if float(r.get("score", 0)) > 0],
-            key=lambda x: float(x.get("score", 0)), reverse=True,
-        )[:5]
+        results = self.dashboard_recommendations({"date": self._trade_date().isoformat()})
+        top = sorted(results, key=lambda x: float(x.get("score", 0)), reverse=True)[:5]
         if not top:
             return None
         body = "\n".join(
-            f"**#{i+1} {item['contract_key']}**｜{item['score']:.1f}分｜{item['grade']}｜{item['direction']}｜行情:{item.get('market_status','-')}"
+            f"**#{i+1} {item['contract_key']}**｜{float(item.get('score', 0)):.1f}分｜"
+            f"{item.get('grade', '-')}｜{item.get('direction', '-')}｜"
+            f"行情:{item.get('market_status', '待行情')}｜执行:{item.get('execution_status', '待行情')}\n"
+            f"bid/ask: {item.get('bid') if item.get('bid') is not None else '待行情'} / "
+            f"{item.get('ask') if item.get('ask') is not None else '待行情'}；"
+            f"入场:{item.get('max_entry_price') if item.get('max_entry_price') is not None else '待行情'}；"
+            f"止盈:{item.get('take_profit') if item.get('take_profit') is not None else '待行情'}；"
+            f"止损:{item.get('stop_loss') if item.get('stop_loss') is not None else '待行情'}\n"
+            f"理由：{item.get('reason', '暂无理由')}"
             for i, item in enumerate(top)
         )
         source = "top5-" + datetime.utcnow().strftime("%Y%m%d%H%M")
@@ -654,7 +662,6 @@ class OptionsRadarService:
                 self._last_results = results
                 self._last_collection = datetime.utcnow().isoformat()
                 self._last_error = None
-                self.publish_top5()
                 source_health = self.source.health()
                 if source_health.get("status") == "login_required":
                     self.feishu.enqueue_card(
@@ -809,13 +816,56 @@ class OptionsRadarService:
             pass
         return today
 
+    @staticmethod
+    def _recommendation_view(payload: Mapping[str, Any]) -> Dict[str, Any]:
+        """Flatten stored execution fields and build a user-facing reason."""
+        execution = payload.get("execution") if isinstance(payload.get("execution"), Mapping) else {}
+        result = dict(payload)
+        result.update(dict(execution))
+        result["execution"] = dict(execution)
+
+        votes = payload.get("votes") if isinstance(payload.get("votes"), list) else []
+        vote_text = "、".join(
+            f"{item.get('analyst', '?')}:{item.get('direction', '?')}/{item.get('decision', '?')}"
+            for item in votes if isinstance(item, Mapping)
+        )
+        components = payload.get("components") if isinstance(payload.get("components"), Mapping) else {}
+        component_labels = {"consensus": "共识", "signal_quality": "信号质量", "market_quality": "行情质量", "portfolio_fit": "组合适配"}
+        component_text = "、".join(
+            f"{component_labels.get(str(key), key)} {float(value):.1f}"
+            for key, value in components.items()
+            if key in component_labels
+        )
+        reasons = []
+        if vote_text:
+            reasons.append("分析师判断：" + vote_text)
+        if component_text:
+            reasons.append("评分组成：" + component_text)
+        risk_flags = payload.get("risk_flags") if isinstance(payload.get("risk_flags"), list) else []
+        if risk_flags:
+            reasons.append("风险提示：" + "；".join(str(item) for item in risk_flags[:3]))
+
+        required = ("bid", "ask", "max_entry_price", "take_profit", "stop_loss")
+        missing = [field for field in required if result.get(field) is None]
+        result["missing_execution_fields"] = missing
+        result["data_complete"] = not missing
+        result["execution_status"] = "可执行" if not missing else "待行情/字段未就绪"
+        if missing:
+            labels = {"bid": "bid", "ask": "ask", "max_entry_price": "入场价", "take_profit": "止盈", "stop_loss": "止损"}
+            reasons.append("执行字段未就绪：" + "、".join(labels[field] for field in missing))
+        result["reason"] = "；".join(reasons) or "暂无可引用的分析理由。"
+        return result
+
     def dashboard_recommendations(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         date_str = str((_payload or {}).get("date", "")).strip()
         session = date.fromisoformat(date_str) if date_str else self._dashboard_date()
-        return [json.loads(str(row["payload_json"])) for row in self.database.recommendations_for_date(session)]
+        views = [
+            self._recommendation_view(json.loads(str(row["payload_json"])))
+            for row in self.database.recommendations_for_date(session)
+        ]
+        return sorted(views, key=lambda item: float(item.get("score", 0)), reverse=True)[:5]
 
     def dashboard_portfolio(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
-        self._refresh_stock_meta()
         result = {}
         for symbol, context in self._portfolio.items():
             item = _as_jsonable(context)
@@ -824,8 +874,6 @@ class OptionsRadarService:
             item["change_pct"] = self._stock_meta.get(symbol, {}).get("change_pct")
             result[symbol] = item
         return result
-
-    _stock_meta: Dict[str, Dict[str, Any]] = {}
 
     def _refresh_stock_meta(self) -> None:
         """Populate company names and prices for portfolio symbols (lazy, cached)."""
@@ -849,6 +897,34 @@ class OptionsRadarService:
                     self._stock_meta[sym] = {"name": sym}
         except Exception:
             pass
+
+    def _portfolio_refresh_worker(self) -> None:
+        try:
+            self._portfolio_refresh_status = "syncing"
+            self._portfolio_refresh_error = None
+            self.sync_broker(force=True)
+            self._refresh_stock_meta()
+            self._portfolio_refresh_status = "ready"
+            self._last_sync = datetime.utcnow().isoformat()
+        except Exception as exc:
+            self._portfolio_refresh_status = "error"
+            self._portfolio_refresh_error = f"{type(exc).__name__}: {str(exc)[:200]}"
+        finally:
+            with self._portfolio_refresh_lock:
+                self._portfolio_refresh_running = False
+
+    def refresh_portfolio(self, _payload: Optional[Mapping[str, Any]] = None, **_kwargs: Any) -> Dict[str, Any]:
+        """Queue one manual portfolio/metadata refresh without blocking the page."""
+        with self._portfolio_refresh_lock:
+            if self._portfolio_refresh_running:
+                return {"status": "running", "message": "持仓正在后台刷新，请稍候刷新页面。"}
+            self._portfolio_refresh_running = True
+        threading.Thread(
+            target=self._portfolio_refresh_worker,
+            name="portfolio-refresh",
+            daemon=True,
+        ).start()
+        return {"status": "queued", "message": "持仓刷新已开始，稍后刷新页面查看结果。"}
 
     def dashboard_signals(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         date_str = str((_payload or {}).get("date", "")).strip()
@@ -974,6 +1050,7 @@ class OptionsRadarService:
         return {
             "recommendations": self.dashboard_recommendations,
             "portfolio": self.dashboard_portfolio,
+            "portfolio_refresh": self.refresh_portfolio,
             "signals": self.dashboard_signals,
             "rules": self.dashboard_rules,
             "analysts": self.dashboard_analysts,

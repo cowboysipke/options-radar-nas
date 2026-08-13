@@ -27,6 +27,16 @@
 - **状态**：已解决
 - **修复**：`live_test.py` 启动时调用 `chcp 65001` 切换到 UTF-8；`启动异常期权助手.cmd` 已有 `PYTHONUTF8=1`
 
+### BUG-007: 持仓页同步 IBKR 导致页面阻塞
+- **状态**：已解决
+- **根因**：页面请求线程同步调用 `reqContractDetails`
+- **修复**：页面只读缓存；新增“手动刷新持仓”后台任务
+
+### BUG-008: 推荐页 execution 字段显示为空
+- **状态**：已解决
+- **根因**：bid/ask/入场/止盈/止损存储在 `payload.execution`，页面只读取顶层字段
+- **修复**：统一推荐视图展开 execution，并增加字段完整性状态；缺失时显示“待行情/字段未就绪”，不伪造数据
+
 ## 已解决
 
 | 编号 | 问题 | 解决日期 | 修复方式 |
@@ -41,3 +51,4 @@
 | ~~BUG-102~~ | 飞书配置断链（本地路径错误） | 2026-08-12 | 强制 secret_refs 为 data-local/secrets/* + 新增 webhook 模式 |
 | ~~BUG-103~~ | IBKR 期权链返回 0（US. 前缀 + SMART 链单一） | 2026-08-12 | `_plain_symbol` 剥离前缀 + 选数据最全链 |
 | ~~BUG-104~~ | openCode bash 工具完全故障 | 2026-08-12 | 禁用 `opencode-devcontainers` 插件 + 清除状态DB |
+| ~~BUG-105~~ | 富途导入 AJAX 返回整页 HTML | 2026-08-13 | FORM_ACTIONS 改为 JSON 响应 |

@@ -485,7 +485,7 @@ def secret_presence() -> Dict[str, bool]:
 
 
 PAGE_INFO = {
-    "/": ("今日推荐", "recommendations", "IBKR实时验证后的0–3张合约"),
+    "/": ("今日推荐", "recommendations", "按评分排序的前5张候选合约"),
     "/signals": ("信号明细", "signals", "Discord原文、分析师意见和融合过程"),
     "/portfolio": ("自选与持仓", "portfolio", "IBKR组合与富途一次性导入自选"),
     "/backtest": ("回测", "backtest", "模拟盘、回测结算与策略优化"),
@@ -520,6 +520,7 @@ POST_APIS = {
     "/api/actions/deepseek-test": "deepseek_test",
     "/api/ibkr/discover": "ibkr_discover",
     "/api/ibkr/sync": "ibkr_sync",
+    "/api/portfolio/refresh": "portfolio_refresh",
 }
 
 PROVIDER_STATUS_ROUTE = re.compile(r"^/api/providers/([a-z0-9_-]+)/status$")
@@ -776,7 +777,8 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _shell(title: str, content: str, active: str = "") -> str:
         links = (("/", "今日推荐"), ("/signals", "信号明细"),
-                  ("/portfolio", "自选与持仓"), ("/system", "系统诊断"), ("/setup", "设置"))
+                  ("/portfolio", "自选与持仓"), ("/backtest", "回测"),
+                  ("/system", "系统诊断"), ("/setup", "设置"))
         nav = "".join(
             f'<a class="{"active" if path == active else ""}" href="{path}">{label}</a>' for path, label in links
         )
@@ -841,7 +843,7 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
         if path == "/":
             action_cards = self._action_forms(csrf, (("/api/actions/collect", "立即采集并生成推荐"), ("/api/actions/report", "生成飞书日报")))
         elif path == "/portfolio":
-            action_cards = self._action_forms(csrf, (("/futu/import-watchlist", "从富途导入自选"), ("/api/ibkr/sync", "同步IBKR持仓")))
+            action_cards = self._action_forms(csrf, (("/futu/import-watchlist", "从富途导入自选"), ("/api/portfolio/refresh", "手动刷新持仓")))
         elif path == "/system":
             action_cards = self._action_forms(csrf, (
                 ("/api/ibkr/discover", "检测IB Gateway"),
@@ -880,15 +882,21 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
             if not data:
                 return '<section class="card"><h2>今日暂无合格推荐</h2><p class="muted">点击“立即采集并生成推荐”，或先完成Discord与IBKR配置。</p></section>'
             cards = []
-            for item in data[:3]:
+            for item in data[:5]:
                 key = html.escape(str(item.get("contract_key", "")))
-                cards.append('<section class="card"><h2>{} · {}分</h2><p><b>{}</b> · {} · {}</p><p>bid/ask: {} / {}　数据: {}</p><p>入场: {}　止盈: {}　止损: {}</p><p class="muted">{}</p></section>'.format(
+                bid = item.get("bid") if item.get("bid") is not None else "待行情"
+                ask = item.get("ask") if item.get("ask") is not None else "待行情"
+                entry = item.get("max_entry_price") if item.get("max_entry_price") is not None else "待行情"
+                take_profit = item.get("take_profit") if item.get("take_profit") is not None else "待行情"
+                stop_loss = item.get("stop_loss") if item.get("stop_loss") is not None else "待行情"
+                cards.append('<section class="card"><h2>{} · {}分</h2><p><b>{}</b> · {} · {}</p><p>bid/ask: {} / {}　数据: {}　执行: {}</p><p>入场: {}　止盈: {}　止损: {}</p><p class="muted">理由：{}</p></section>'.format(
                     html.escape(str(item.get("grade", "-"))), html.escape(str(item.get("score", "-"))), key,
                     html.escape(str(item.get("direction", "-"))), html.escape(str(item.get("market_status", "-"))),
-                    html.escape(str(item.get("bid", "-"))), html.escape(str(item.get("ask", "-"))),
-                    html.escape(str(item.get("data_quality", "-"))), html.escape(str(item.get("max_entry_price", "-"))),
-                    html.escape(str(item.get("take_profit", "-"))), html.escape(str(item.get("stop_loss", "-"))),
-                    html.escape(str(item.get("invalidation", ""))),
+                    html.escape(str(bid)), html.escape(str(ask)),
+                    html.escape(str(item.get("data_quality", item.get("market_status", "待行情")))),
+                    html.escape(str(item.get("execution_status", "待行情"))),
+                    html.escape(str(entry)), html.escape(str(take_profit)), html.escape(str(stop_loss)),
+                    html.escape(str(item.get("reason", "暂无理由"))),
                 ))
             return '<div class="grid">' + "".join(cards) + '</div><details class="card" style="margin-top:16px"><summary>评价标准说明</summary><table><tr><th>维度</th><th>权重</th><th>说明</th></tr><tr><td>共识</td><td>40%</td><td>各分析家族（价格行为/动量反转/资金流向）方向一致性，跨家族冲突扣分封顶64</td></tr><tr><td>历史</td><td>20%</td><td>分析师过去推荐的盈亏表现（基于回测结果动态调整）</td></tr><tr><td>信号质量</td><td>15%</td><td>信号完整性×置信度×时效性</td></tr><tr><td>行情质量</td><td>15%</td><td>实时bid/ask、价差、Open Interest验证</td></tr><tr><td>组合适配</td><td>10%</td><td>标的是否在持仓/自选中、仓位集中度</td></tr></table><p>A级≥80分（飞书提醒）｜B级65-79（合格）｜C级50-64（观察榜）｜D级&lt;50（过滤）</p></details>'
         if path == "/signals" and isinstance(data, list):
