@@ -608,7 +608,8 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
         try:
             return self.app.invoke(name, payload)
         except Exception as exc:  # boundary: runtime errors become stable HTTP responses
-            return {"status": "error", "message": str(exc)}
+            message = str(exc) or type(exc).__name__
+            return {"status": "error", "message": message}
 
     @staticmethod
     def _contract_key(path: str, prefix: str) -> Optional[str]:
@@ -743,14 +744,15 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
             callback_payload = {key: value for key, value in values.items() if key != "csrf"}
             result = self._callback(FORM_ACTIONS[path], callback_payload)
             if isinstance(result, Mapping):
+                state = str(result.get("status", "ok"))
                 message = str(result.get("message", "")).strip()
                 if not message:
-                    state = str(result.get("status", "ok"))
                     message = "操作已完成。" if state != "error" else "操作出错，请查看系统页。"
+                payload: Dict[str, Any] = {"status": state, "message": message, "data": result}
             else:
-                message = "操作已完成。"
+                payload = {"status": "ok", "message": "操作已完成。"}
             status = HTTPStatus.INTERNAL_SERVER_ERROR if isinstance(result, Mapping) and result.get("status") == "error" else HTTPStatus.OK
-            self._send(status, self._setup_page(csrf, message))
+            self._json(status, payload)
             return
         provider_match = PROVIDER_ACTION_ROUTE.fullmatch(path)
         contract_key = self._contract_key(path, MARKET_COMPARE_PREFIX)
