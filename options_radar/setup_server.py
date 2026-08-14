@@ -919,18 +919,23 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
             rows = []
             for symbol, item in data.items():
                 if not isinstance(item, Mapping):
-                    rows.append(f'<tr><td>{html.escape(str(symbol))}</td><td colspan="5">{html.escape(str(item))}</td></tr>')
+                    rows.append(f'<tr><td>{html.escape(str(symbol))}</td><td colspan="8">{html.escape(str(item))}</td></tr>')
                     continue
                 name = html.escape(str(item.get("company_name", "") or ""))
+                name_zh = html.escape(str(item.get("company_name_zh", "") or ""))
+                industry = html.escape(str(item.get("industry", "") or ""))
                 price = item.get("current_price")
                 change = item.get("change_pct")
+                updated = html.escape(str((item.get("updated_at") or "")[:19]))
                 price_str = f"{float(price):.2f}" if price is not None else "-"
                 change_str = f"{float(change)*100:+.2f}%" if change is not None else "-"
-                rows.append('<tr><td>{}</td><td class="muted">{}</td><td>{}</td><td>{}</td><td>{}</td><td>{:.2%}</td></tr>'.format(
-                    html.escape(str(symbol)), name, html.escape(str(item.get("held_quantity", 0))),
-                    price_str, change_str, float(item.get("concentration", 0) or 0),
+                display_name = f"{name_zh}（{name}）" if name_zh else name
+                rows.append('<tr><td>{}</td><td class="muted">{}</td><td class="muted">{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>'.format(
+                    html.escape(str(symbol)), display_name, industry,
+                    html.escape(str(item.get("held_quantity", 0))),
+                    price_str, change_str, float(item.get("concentration", 0) or 0), updated,
                 ))
-            return '<section class="card"><table><tr><th>标的</th><th>公司名称</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th></tr>{}</table></section>'.format("".join(rows) or '<tr><td colspan="6">暂无组合快照</td></tr>')
+            return '<section class="card"><table><tr><th>标的</th><th>公司名称</th><th>行业</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>{}</table></section>'.format("".join(rows) or '<tr><td colspan="8">暂无组合快照</td></tr>')
         if path == "/backtest" and isinstance(data, dict):
             replay = data.get("replay") or {}
             ranges = data.get("historical_range") or {}

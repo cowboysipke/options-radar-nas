@@ -303,6 +303,17 @@ CREATE TABLE IF NOT EXISTS opend_login_states (
     payload_json TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS instrument_metadata (
+    symbol TEXT PRIMARY KEY,
+    name_en TEXT,
+    name_zh TEXT,
+    industry TEXT,
+    current_price REAL,
+    change_pct REAL,
+    source TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_signal_contract_time ON parsed_signals(contract_key, observed_at);
 CREATE INDEX IF NOT EXISTS idx_rec_time ON recommendations(evaluated_at);
 CREATE INDEX IF NOT EXISTS idx_trade_status ON paper_trades(status);
@@ -820,6 +831,41 @@ class Database:
             group_name=str(row["group_name"]), enabled=bool(row["enabled"]),
             added_at=datetime.fromisoformat(str(row["added_at"])),
         ) for row in rows]
+
+    def save_instrument_metadata(
+        self, symbol: str, *, name_en: Optional[str] = None, name_zh: Optional[str] = None,
+        industry: Optional[str] = None, current_price: Optional[float] = None,
+        change_pct: Optional[float] = None, source: str = "unknown",
+    ) -> None:
+        now = datetime.utcnow().isoformat()
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO instrument_metadata
+                   (symbol, name_en, name_zh, industry, current_price, change_pct, source, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(symbol) DO UPDATE SET
+                     name_en=COALESCE(excluded.name_en, instrument_metadata.name_en),
+                     name_zh=COALESCE(excluded.name_zh, instrument_metadata.name_zh),
+                     industry=COALESCE(excluded.industry, instrument_metadata.industry),
+                     current_price=COALESCE(excluded.current_price, instrument_metadata.current_price),
+                     change_pct=COALESCE(excluded.change_pct, instrument_metadata.change_pct),
+                     source=excluded.source, updated_at=excluded.updated_at""",
+                (str(symbol).upper(), name_en, name_zh, industry, current_price, change_pct, str(source), now),
+            )
+
+    def instrument_metadata(self, symbol: str) -> Optional[Dict[str, object]]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM instrument_metadata WHERE symbol=?", (str(symbol).upper(),)
+            ).fetchone()
+        if row is None:
+            return None
+        return dict(row)
+
+    def all_instrument_metadata(self) -> Dict[str, Dict[str, object]]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM instrument_metadata").fetchall()
+        return {str(row["symbol"]): dict(row) for row in rows}
 
     def save_source_cursor(self, cursor: SourceCursor) -> None:
         with self.connect() as connection:

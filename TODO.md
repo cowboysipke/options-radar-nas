@@ -9,8 +9,10 @@
 - [ ] BUG-001 最终验证：Gateway 连接稳定后，在美股开盘时运行 `live_test.py`，确认 bid/ask 可用
 - [x] 任务 A 代码：价格格式化、quote_missing 状态、IBKR 市场错误诊断
 - [x] Phase A1：Alpaca Trading API Paper 认证和期权快照探针
-- [ ] Phase A2：Alpaca 主行情路由切换后的全链路验证
+- [x] Phase A2：Alpaca 主行情路由切换后的全链路验证
+- [x] Phase B：自选持仓证券元数据固化（instrument_metadata + 中文名翻译）
 - [ ] Phase A3：解决 Alpaca OPRA agreement / 历史期权 bars 权限
+- [ ] Phase C：回测 Phase 1（真实结束日 + 成熟 1/3/5 日结算）
 
 ## 高优先级
 

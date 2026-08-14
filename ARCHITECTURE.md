@@ -65,6 +65,7 @@
 | 模块 | 供应商 | 数据 |
 |---|---|---|
 | `backup_providers.py:AlpacaProvider` | Alpaca Trading API | Paper Indicative 期权/正股快照和历史接口 |
+| `db.py:instrument_metadata` | SQLite | 证券英文/中文名、行业、价格、涨跌幅固化，手动刷新更新 |
 | `ibkr_provider.py` | IBKR Gateway | 暂时只读持仓/账户，不参与主行情 |
 | `futu_provider.py` | 富途 OpenD | 一次性自选导入，不参与行情 |
 | `massive_client.py` | Massive API | 保留回退代码，当前不参与主行情 |

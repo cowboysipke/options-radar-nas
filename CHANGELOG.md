@@ -151,3 +151,13 @@
     - 正股实时快照和期权 Indicative bid/ask 正常
     - 期权历史 bars 返回 `OPRA agreement is not signed`，已记录为权限限制
     - `live_test.py` 的真实回放入口改为 Alpaca，不再主动调用 Massive
+
+### 2026-08-14 Phase B：自选持仓证券元数据固化
+
+25. **instrument_metadata 表**
+    - SQLite 新增证券元数据表（symbol/name_en/name_zh/industry/current_price/change_pct/source/updated_at）
+    - `_refresh_stock_meta` 批量拉取 Alpaca 股票快照（分块 50，过滤非法符号）与资产名称
+    - 中文名通过 DeepSeek 翻译，缺失时才调用且每轮限制 15 次，结果持久化
+    - 手动刷新持仓时后台更新元数据，broker 同步失败不再中断元数据刷新
+    - 持仓页表格新增中文名/行业/更新时间列
+    - 修复 DeepSeek 文本操作对“只返回名称”非 JSON 输出的宽松解析

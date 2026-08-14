@@ -337,6 +337,34 @@ class DeepSeekProvider(AIProvider):
         }
         return self._text_operation("answer", prompt, use_pro=False)
 
+    def translate_name(self, name: str) -> AITextResult:
+        """Translate an English company name into simplified Chinese.
+
+        Uses the same strict JSON text channel as summarize/answer.  The model
+        is asked to return only the translated name.
+        """
+        if not name or not name.strip():
+            return AITextResult(ai_degraded=True, reason="empty_name")
+        prompt = {
+            "source_name": name.strip(),
+            "instruction": "把source_name翻译成简体中文公司名称，只返回名称，不要解释。",
+        }
+        result = self._text_operation("translate", prompt, use_pro=False)
+        if result.ai_degraded or not result.text:
+            return result
+        # The model sometimes wraps the answer in a small JSON object; unwrap it.
+        raw = result.text.strip()
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                for key in ("translated_name", "translation", "text", "name", "result"):
+                    value = parsed.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return AITextResult(text=value.strip(), model=result.model, cached=result.cached)
+        except (ValueError, TypeError):
+            pass
+        return result
+
     def health(self, check_remote: bool = False) -> Dict[str, Any]:
         now = self._utc_now()
         spent = self.store.monthly_spend(now)
@@ -461,8 +489,20 @@ class DeepSeekProvider(AIProvider):
             try:
                 response = self._request(model, messages)
                 content = self._response_content(response)
-                parsed = json.loads(content)
-                validated = validation_model.parse_obj(parsed)
+                try:
+                    parsed = json.loads(content)
+                    validated = validation_model.parse_obj(parsed)
+                except (ValueError, TypeError, KeyError, ValidationError, json.JSONDecodeError):
+                    # Text-only operations may return a bare sentence when the
+                    # prompt asks for "only the name/answer".  Accept the raw
+                    # content as text for _TextPayload; keep structured
+                    # extraction strict.
+                    if validation_model is not _TextPayload:
+                        raise
+                    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content, flags=re.IGNORECASE).strip()
+                    if not cleaned:
+                        raise
+                    validated = validation_model(text=cleaned)
                 success = True
                 error = ""
             except (RuntimeError, ValueError, TypeError, KeyError, ValidationError, json.JSONDecodeError) as exc:

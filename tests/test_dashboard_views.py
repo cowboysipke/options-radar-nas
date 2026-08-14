@@ -1,7 +1,10 @@
 import json
+import tempfile
 import unittest
 from datetime import datetime
+from pathlib import Path
 
+from options_radar.db import Database
 from options_radar.feishu import build_card
 from options_radar.models import PortfolioContext
 from options_radar.service import OptionsRadarService
@@ -70,17 +73,50 @@ class DashboardViewTests(unittest.TestCase):
         self.assertIn("59", content)
 
     def test_portfolio_view_uses_cache_without_refreshing_ibkr(self):
+        class FakeDatabase:
+            def __init__(self):
+                self.rows = {}
+                self.writes = []
+
+            def all_instrument_metadata(self):
+                return dict(self.rows)
+
+            def instrument_metadata(self, symbol):
+                return self.rows.get(symbol)
+
+            def save_instrument_metadata(self, symbol, **kwargs):
+                self.writes.append((symbol, kwargs))
+
         service = object.__new__(OptionsRadarService)
         service._portfolio = {
             "AAPL": PortfolioContext(
                 symbol="AAPL", held_quantity=1, snapshot_at=datetime(2026, 8, 12),
             )
         }
+        service.database = FakeDatabase()
         service._stock_meta = {"AAPL": {"name": "Apple Inc."}}
         service._refresh_stock_meta = lambda: (_ for _ in ()).throw(AssertionError("must not refresh during page render"))
         result = service.dashboard_portfolio()
         self.assertEqual(result["AAPL"]["company_name"], "Apple Inc.")
         self.assertEqual(result["AAPL"]["held_quantity"], 1)
+
+    def test_instrument_metadata_persists_and_merges(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "radar.db")
+            database.save_instrument_metadata(
+                "AAPL", name_en="Apple Inc.", name_zh="苹果公司",
+                industry="Technology", current_price=200.0, change_pct=0.01, source="manual_refresh",
+            )
+            stored = database.instrument_metadata("AAPL")
+            self.assertEqual(stored["name_zh"], "苹果公司")
+            self.assertEqual(stored["industry"], "Technology")
+            all_rows = database.all_instrument_metadata()
+            self.assertIn("AAPL", all_rows)
+            # COALESCE keeps existing values when new call omits them
+            database.save_instrument_metadata("AAPL", name_en="Apple Inc.", current_price=205.0, source="manual_refresh")
+            refreshed = database.instrument_metadata("AAPL")
+            self.assertEqual(refreshed["name_zh"], "苹果公司")
+            self.assertEqual(refreshed["current_price"], 205.0)
 
 
 if __name__ == "__main__":

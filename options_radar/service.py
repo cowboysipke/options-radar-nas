@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import urllib.parse
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -64,6 +65,13 @@ def _format_price(value: Any) -> str:
         return f"{float(value):.2f}"
     except (TypeError, ValueError):
         return "待行情"
+
+
+def _to_float(value: Any) -> Optional[float]:
+    try:
+        return None if value in (None, "") else float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _naive_utc(value: Optional[datetime]) -> Optional[datetime]:
@@ -882,43 +890,126 @@ class OptionsRadarService:
         return sorted(views, key=lambda item: float(item.get("score", 0)), reverse=True)[:5]
 
     def dashboard_portfolio(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
+        metadata = self.database.all_instrument_metadata()
         result = {}
         for symbol, context in self._portfolio.items():
             item = _as_jsonable(context)
-            item["company_name"] = self._stock_meta.get(symbol, {}).get("name", "")
-            item["current_price"] = self._stock_meta.get(symbol, {}).get("price")
-            item["change_pct"] = self._stock_meta.get(symbol, {}).get("change_pct")
+            meta = metadata.get(symbol, {})
+            item["company_name"] = meta.get("name_en") or self._stock_meta.get(symbol, {}).get("name", "")
+            item["company_name_zh"] = meta.get("name_zh") or ""
+            item["industry"] = meta.get("industry") or ""
+            item["current_price"] = meta.get("current_price")
+            item["change_pct"] = meta.get("change_pct")
+            item["updated_at"] = meta.get("updated_at") or ""
             result[symbol] = item
         return result
 
     def _refresh_stock_meta(self) -> None:
-        """Populate company names and prices for portfolio symbols (lazy, cached)."""
-        symbols = list(self._portfolio.keys())
+        """Populate company names, prices and change for portfolio symbols.
+
+        Uses one batched Alpaca stock snapshot and one batched asset lookup;
+        IBKR is only used as a secondary name source when it is already
+        connected.  Chinese names are produced by DeepSeek only when missing
+        and are capped per refresh; results persist in SQLite.
+        """
+        try:
+            watch = {item.symbol for item in self.database.list_watchlist(enabled_only=True)}
+        except Exception:
+            watch = set()
+        symbols = list(set(self._portfolio.keys()) | watch)
         if not symbols:
             return
+        # Holdings first, then watchlist; cap per-symbol asset lookups so one
+        # manual refresh finishes quickly and fills the rest on later refreshes.
+        symbols = sorted(
+            symbols,
+            key=lambda sym: (
+                0 if (self._portfolio.get(sym) or PortfolioContext(sym)).held_quantity != 0 else 1,
+                sym,
+            ),
+        )
+        asset_budget = 40
+        translate_budget = 15
+        snapshots: Dict[str, Any] = {}
+        valid_symbols = [sym for sym in symbols if sym and ".." not in sym and not sym.startswith(".")]
+        for chunk_start in range(0, len(valid_symbols), 50):
+            chunk = valid_symbols[chunk_start:chunk_start + 50]
+            try:
+                payload = self.alpaca._get("/v2/stocks/snapshots", {"symbols": ",".join(chunk), "feed": "iex"})
+                raw = payload.get("snapshots") if isinstance(payload.get("snapshots"), Mapping) else payload
+                if isinstance(raw, Mapping):
+                    snapshots.update(dict(raw))
+            except Exception:
+                continue
+
+        names: Dict[str, str] = {}
         try:
-            backend = self.ibkr._ensure()
-            for sym in symbols:
-                if sym in self._stock_meta:
-                    continue
-                try:
-                    stock = self.ibkr._make_stock(sym)
-                    details = backend.reqContractDetails(stock)
-                    if details:
-                        name = getattr(details[0], "longName", "") or sym
-                        self._stock_meta[sym] = {"name": name}
-                    else:
-                        self._stock_meta[sym] = {"name": sym}
-                except Exception:
-                    self._stock_meta[sym] = {"name": sym}
+            payload = self.alpaca._request(
+                f"{self.alpaca.contracts_base_url}/v2/assets",
+                {"symbols": ",".join(symbols)}, headers=self.alpaca._headers,
+            )
+            rows = payload.get("data") if isinstance(payload, Mapping) and isinstance(payload.get("data"), list) else (
+                payload if isinstance(payload, list) else []
+            )
+            for row in rows:
+                if isinstance(row, Mapping) and row.get("symbol") and row.get("name") and str(row.get("status", "")).lower() == "active":
+                    names[str(row["symbol"]).upper()] = str(row["name"])
         except Exception:
             pass
+
+        def _asset_name(sym: str) -> str:
+            try:
+                payload = self.alpaca._request(
+                    f"{self.alpaca.contracts_base_url}/v2/assets/{urllib.parse.quote(sym)}",
+                    {}, headers=self.alpaca._headers,
+                )
+                return str(payload.get("name") or "") if isinstance(payload, Mapping) else ""
+            except Exception:
+                return ""
+
+        translate_budget = 15
+        for sym in symbols:
+            item = snapshots.get(sym) if isinstance(snapshots.get(sym), Mapping) else None
+            price: Optional[float] = None
+            change_pct: Optional[float] = None
+            if item:
+                quote = item.get("latestQuote") if isinstance(item.get("latestQuote"), Mapping) else {}
+                trade = item.get("latestTrade") if isinstance(item.get("latestTrade"), Mapping) else {}
+                prev = item.get("prevDailyBar") if isinstance(item.get("prevDailyBar"), Mapping) else {}
+                price = _to_float(trade.get("p") or quote.get("bp") or quote.get("ap"))
+                prev_close = _to_float(prev.get("c"))
+                if price is not None and prev_close:
+                    change_pct = (price - prev_close) / prev_close
+            name_en = names.get(sym) or sym
+            if name_en == sym and sym not in names and asset_budget > 0:
+                found = _asset_name(sym)
+                asset_budget -= 1
+                name_en = found or sym
+            existing = self.database.instrument_metadata(sym)
+            name_zh = str(existing.get("name_zh") or "") if existing else ""
+            if name_zh.startswith("{") or name_zh.startswith('"'):
+                name_zh = ""
+            if not name_zh and name_en != sym and self.ai.enabled and translate_budget > 0:
+                try:
+                    translated = self.ai.translate_name(name_en)
+                    name_zh = (translated.text or "").strip()
+                    translate_budget -= 1
+                except Exception:
+                    pass
+            self._stock_meta[sym] = {"name": name_en, "price": price, "change_pct": change_pct}
+            self.database.save_instrument_metadata(
+                sym, name_en=name_en, name_zh=name_zh or None,
+                industry=None, current_price=price, change_pct=change_pct, source="manual_refresh",
+            )
 
     def _portfolio_refresh_worker(self) -> None:
         try:
             self._portfolio_refresh_status = "syncing"
             self._portfolio_refresh_error = None
-            self.sync_broker(force=True)
+            try:
+                self.sync_broker(force=True)
+            except Exception as exc:
+                self._portfolio_refresh_error = f"broker_sync:{type(exc).__name__}:{str(exc)[:150]}"
             self._refresh_stock_meta()
             self._portfolio_refresh_status = "ready"
             self._last_sync = datetime.utcnow().isoformat()
