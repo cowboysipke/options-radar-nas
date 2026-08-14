@@ -891,8 +891,19 @@ class OptionsRadarService:
 
     def dashboard_portfolio(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         metadata = self.database.all_instrument_metadata()
+        watch_symbols = set()
+        try:
+            watch_symbols = {item.symbol for item in self.database.list_watchlist(enabled_only=True)}
+        except Exception:
+            pass
+        symbols = set(self._portfolio.keys())
+        if not symbols:
+            symbols = watch_symbols | set(metadata.keys())
         result = {}
-        for symbol, context in self._portfolio.items():
+        for symbol in sorted(symbols):
+            context = self._portfolio.get(symbol) or PortfolioContext(
+                symbol=symbol, in_watchlist=symbol in watch_symbols,
+            )
             item = _as_jsonable(context)
             meta = metadata.get(symbol, {})
             item["company_name"] = meta.get("name_en") or self._stock_meta.get(symbol, {}).get("name", "")
