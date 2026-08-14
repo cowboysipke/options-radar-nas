@@ -2,7 +2,7 @@
 
 ## 项目目标
 
-从 Discord 的异常期权频道实时采集美股期权信号，合并多位分析师意见，对接行情源（IBKR/Massive/富途）做确定性评分筛选，每日输出评分前 5 张候选合约，通过飞书群发送日报与提醒。系统只读不交易，模拟仓位和回测仅用于评估策略表现。
+从 Discord 的异常期权频道实时采集美股期权信号，合并多位分析师意见，对接 Alpaca 行情 API 做确定性评分筛选，每日输出评分前 5 张候选合约，通过飞书群发送日报与提醒。IBKR 暂时只读同步持仓，富途只做一次性自选导入。系统只读不交易，模拟仓位和回测仅用于评估策略表现。
 
 ## 当前版本
 
@@ -16,8 +16,9 @@
 | Discord 采集（Playwright 备用） | ✅ | 无 token 时扫码登录回退，已修正 DOM 选择器和页面水合等待 |
 | 信号解析（确定性 + DeepSeek 补充） | ✅ | raw flow + 分析师卡片 → ParsedSignal，缺失字段用 DeepSeek 结构化补齐 |
 | 多分析师共识评分 | ✅ | 权重融合 + 方向一致性 → 确定性打分，家族内部/跨家族冲突检测 |
-| IBKR Gateway 连接 | ✅ | 只读连接，实时持仓/账户同步，期权链查询（已修复 US. 前缀和链选择） |
-| Massive 行情 (EOD) | ✅ | 期权日线 K 线（回测数据源）、标的收盘价 |
+| Alpaca 行情 API | ✅ | Paper Trading API，Indicative 期权快照、正股快照；OPRA 需升级套餐 |
+| IBKR Gateway 连接 | ✅ | 暂时只读同步持仓/账户，不再参与主行情路由 |
+| Massive 行情 (EOD) | ⏸️ | 保留代码用于回退，当前不参与主行情路由 |
 | 富途 OpenD 连接 | ✅ | 行情已登录，自选组已读取；期权权限尚未开通 |
 | 回测引擎（任意日期回放） | ✅ | 支持任意历史日期范围结算 1/3/5 日 P&L；真实 Massive K 线 + 合成兜底 |
 | 飞书通知（webhook） | ✅ | 群机器人 webhook，日报/提醒直接发群，无需 App 凭据 |
@@ -44,7 +45,7 @@ Discord REST（用户 token 分页）→ RawMessage
   → parse_flow_message → FlowEvent（raw flow 行）
   → parse_analyst_message → ParsedSignal（分析师卡片）
     → evaluate_consensus（权重 × 置信度 × 方向 → 确定性打分）
-      → MarketSnapshot（IBKR/Massive/富途复合行情）
+      → MarketSnapshot（Alpaca 主行情）
       → PortfolioContext（IBKR 持仓/自选）
         → build_candidate（仓位、止盈止损）
           → 推荐输出（前 5 张，65 分才标记为 eligible/A 级提醒）

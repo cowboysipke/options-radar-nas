@@ -12,6 +12,7 @@ import logging
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
+from .backup_providers import AlpacaProvider
 from .massive_client import MassiveClient
 
 logger = logging.getLogger("options_radar.history")
@@ -74,6 +75,60 @@ class MassiveHistoryAdapter:
         return {
             "high": _num(latest["h"]), "low": _num(latest["l"]),
             "atr": sum(ranges[-14:]) / min(14, len(ranges)), "trend": trend,
+        }
+
+
+class AlpacaHistoryAdapter:
+    """Expose Alpaca option and stock bars to the replay coordinator."""
+
+    def __init__(self, provider: AlpacaProvider):
+        self.provider = provider
+
+    def occ_ticker(self, contract_key: str) -> str:
+        return contract_key
+
+    def aggregate_bars(
+        self, contract_key: str, start: date, end: date,
+        multiplier: int = 5, timespan: str = "minute",
+    ) -> List[Dict[str, Any]]:
+        interval = f"{int(multiplier)}Min" if timespan == "minute" else "1Day"
+        bars = self.provider.get_history(
+            contract_key,
+            datetime.combine(start, time.min, tzinfo=timezone.utc),
+            datetime.combine(end + timedelta(days=1), time.min, tzinfo=timezone.utc),
+            interval,
+        )
+        return [
+            {"t": int(item.timestamp.timestamp() * 1000), "o": item.open,
+             "h": item.high, "l": item.low, "c": item.close}
+            for item in bars if None not in (item.open, item.high, item.low, item.close)
+        ]
+
+    def underlying_features(self, symbol: str, end: date, lookback_days: int = 45) -> Dict[str, Optional[float]]:
+        bars = self.provider.get_underlying_bars(
+            symbol,
+            datetime.combine(end - timedelta(days=lookback_days), time.min, tzinfo=timezone.utc),
+            datetime.combine(end + timedelta(days=1), time.min, tzinfo=timezone.utc),
+            "1Day",
+        )
+        complete = [item for item in bars if None not in (item.high, item.low, item.close)]
+        if not complete:
+            return {"high": None, "low": None, "atr": None, "trend": None}
+        latest = complete[-1]
+        ranges: List[float] = []
+        previous_close: Optional[float] = None
+        for item in complete[-15:]:
+            values = [float(item.high) - float(item.low)]
+            if previous_close is not None:
+                values += [abs(float(item.high) - previous_close), abs(float(item.low) - previous_close)]
+            ranges.append(max(values))
+            previous_close = float(item.close)
+        closes = [float(item.close) for item in complete[-20:]]
+        average = sum(closes) / len(closes)
+        return {
+            "high": float(latest.high), "low": float(latest.low),
+            "atr": sum(ranges[-14:]) / min(14, len(ranges)),
+            "trend": 1.0 if closes[-1] > average else -1.0 if closes[-1] < average else 0.0,
         }
 
 
@@ -191,4 +246,4 @@ class SyntheticHistoryAdapter:
         return {"high": None, "low": None, "atr": None, "trend": None}
 
 
-__all__ = ["MassiveHistoryAdapter", "CompositeHistoryAdapter", "SyntheticHistoryAdapter"]
+__all__ = ["AlpacaHistoryAdapter", "MassiveHistoryAdapter", "CompositeHistoryAdapter", "SyntheticHistoryAdapter"]

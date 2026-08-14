@@ -8,12 +8,15 @@
 - [x] 持仓页非阻塞、手动刷新、回测导航、推荐前5与理由、飞书Top5无分数门槛
 - [ ] BUG-001 最终验证：Gateway 连接稳定后，在美股开盘时运行 `live_test.py`，确认 bid/ask 可用
 - [x] 任务 A 代码：价格格式化、quote_missing 状态、IBKR 市场错误诊断
+- [x] Phase A1：Alpaca Trading API Paper 认证和期权快照探针
+- [ ] Phase A2：Alpaca 主行情路由切换后的全链路验证
+- [ ] Phase A3：解决 Alpaca OPRA agreement / 历史期权 bars 权限
 
 ## 高优先级
 
 | # | 任务 | 状态 | 说明 |
 |---|---|---|---|
-| 1 | **BUG-001 美股开盘验证** | 待验证 | 代码已加固（`reqMarketDataType(3)`），需开盘时段实测 |
+| 1 | **BUG-001 美股开盘验证** | 降级为历史兼容项 | 主行情迁移 Alpaca；IBKR 只读持仓保留 |
 | 2 | 持续运行验证 | 待验证 | 面板已在运行，等 1-2 天看日报+回测是否自动产出 |
 
 ## 中优先级

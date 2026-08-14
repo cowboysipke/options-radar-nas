@@ -275,11 +275,14 @@ class AlpacaProvider(_HttpMarketProvider):
     def __init__(
         self, api_key: str = "", secret_key: str = "", *,
         base_url: str = "https://data.alpaca.markets",
-        contracts_base_url: str = "https://paper-api.alpaca.markets", **kwargs: Any,
+        contracts_base_url: str = "https://paper-api.alpaca.markets",
+        feed: str = "indicative", **kwargs: Any,
     ) -> None:
         super().__init__(api_key, base_url=base_url, **kwargs)
         self.secret_key = str(secret_key or "").strip()
         self.contracts_base_url = contracts_base_url.rstrip("/")
+        self.feed = str(feed or "indicative").strip().lower()
+        self.quality = "realtime" if self.feed == "opra" else "indicative"
 
     @property
     def configured(self) -> bool:
@@ -328,7 +331,7 @@ class AlpacaProvider(_HttpMarketProvider):
         rows: Dict[str, Any] = {}
         underlyings = sorted({_contract_parts(key)[0] for key in keys})
         for symbol in underlyings:
-            params: Dict[str, Any] = {"feed": "indicative", "limit": 1000}
+            params: Dict[str, Any] = {"feed": self.feed, "limit": 1000}
             for _ in range(20):
                 payload = self._get(f"/v1beta1/options/snapshots/{symbol}", params)
                 page = payload.get("snapshots") or payload.get("option_snapshots") or {}
@@ -361,7 +364,7 @@ class AlpacaProvider(_HttpMarketProvider):
     def get_history(self, contract_key: str, start: datetime, end: datetime, interval: str = "1Day") -> List[HistoryBar]:
         occ = _occ_symbol(contract_key)
         payload = self._get("/v1beta1/options/bars", {
-            "symbols": occ, "timeframe": interval, "start": start.isoformat(), "end": end.isoformat(), "feed": "indicative",
+            "symbols": occ, "timeframe": interval, "start": start.isoformat(), "end": end.isoformat(),
         })
         rows = payload.get("bars") or {}
         rows = rows.get(occ, []) if isinstance(rows, Mapping) else rows

@@ -27,6 +27,8 @@ secret_refs:
   feishu_webhook: data-local/secrets/feishu_webhook
   discord_user_token: data-local/secrets/discord_user_token
   massive_api_key: data-local/secrets/massive_api_key
+  alpaca_api_key: data-local/secrets/alpaca_api_key
+  alpaca_api_secret: data-local/secrets/alpaca_api_secret
 
 notifications:
   provider: feishu
@@ -49,14 +51,21 @@ ibkr:
   readonly: true
   market_data_type: 3
 
+alpaca:
+  enabled: true
+  environment: paper
+  data_base_url: https://data.alpaca.markets
+  contracts_base_url: https://paper-api.alpaca.markets
+  feed: indicative
+
 providers:
-  market_priority: [ibkr, massive, futu, tradier, alpaca, marketdata_app]
+  market_priority: [alpaca]
   enabled:
+    alpaca: true
     futu: false
-    ibkr: true
+    ibkr: false
     tradier: false
-    alpaca: false
-    massive: true
+    massive: false
     marketdata_app: false
   portfolio:
     aggregate_enabled_accounts: true

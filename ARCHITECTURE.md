@@ -64,10 +64,11 @@
 ### 行情层
 | 模块 | 供应商 | 数据 |
 |---|---|---|
-| `ibkr_provider.py` | IBKR Gateway | 持仓、账户、期权链。实时/延迟行情需订阅 |
-| `futu_provider.py` | 富途 OpenD | 标的实时行情、自选组。期权需权限 |
-| `massive_client.py` | Massive API | EOD 收盘价、期权日线 OHLC（回测核心） |
-| `history_adapters.py` | 组合 | Massive 优先 → IBKR 回退 → 合成兜底 |
+| `backup_providers.py:AlpacaProvider` | Alpaca Trading API | Paper Indicative 期权/正股快照和历史接口 |
+| `ibkr_provider.py` | IBKR Gateway | 暂时只读持仓/账户，不参与主行情 |
+| `futu_provider.py` | 富途 OpenD | 一次性自选导入，不参与行情 |
+| `massive_client.py` | Massive API | 保留回退代码，当前不参与主行情 |
+| `history_adapters.py` | AlpacaHistoryAdapter | Alpaca 期权/正股历史 K 线 + 合成兜底 |
 | `provider_registry.py` | 路由 | 多供应商字段级融合，冲突检测 |
 
 行情状态规则：只有同一供应商、同一质量、同时存在且有效的 bid/ask 才能形成可执行 quote pair；否则状态为 `quote_missing`、`eod` 或 `delayed`，不生成真实执行限价。
@@ -106,7 +107,7 @@ RawMessage (dedup by content_hash)
     FlowEvent ←──────── join ───────── ParsedSignal[] (by event_key)
         │
         ▼
-    MarketSnapshot (复合行情)  ←── ProviderRegistry (ibkr/massive/futu 字段级融合)
+    MarketSnapshot (Alpaca 行情)  ←── ProviderRegistry (Alpaca 主源)
         │
         ▼
     evaluate_consensus (打分) ──► ConsensusEvaluation (score, grade, votes, risk_flags)

@@ -131,3 +131,17 @@
     - ProviderRegistry 增加 `quote_missing`，避免用单个 realtime 字段误判盘口可用
     - IBKR Provider 记录 10089/10090/10091/162/200/321 市场数据错误到系统诊断
     - 新增缺失字段状态，禁止用猜测值伪造 bid/ask
+
+### 2026-08-14 Alpaca Phase A1
+
+22. **Alpaca Trading API Paper 探针**
+    - Paper 账户认证成功，options trading level=3
+    - 正股快照正常返回实时 bid/ask/last
+    - 期权合约查询正常
+    - Indicative 期权快照正常返回 bid/ask/last
+    - 历史期权 bars 返回 `OPRA agreement is not signed`，暂不能作为真实回测数据
+
+23. **Alpaca 主路由准备**
+    - 本地配置切换为 `market_priority: [alpaca]`
+    - 增加 `AlpacaHistoryAdapter`
+    - IBKR 保留为只读持仓源，Massive/Futu 不再参与行情主路由

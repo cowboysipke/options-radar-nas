@@ -67,6 +67,13 @@ def test_alpaca_history_is_indicative_and_cached():
     assert provider.cache_status()["hits"] == 1
 
 
+def test_alpaca_feed_quality_is_configurable():
+    indicative = AlpacaProvider("key", "secret", feed="indicative")
+    opra = AlpacaProvider("key", "secret", feed="opra")
+    assert indicative.quality == "indicative"
+    assert opra.quality == "realtime"
+
+
 def test_marketdata_chain_quote_and_columnar_history_are_delayed():
     transport = Transport({
         "/options/chain/AAPL/": {"optionSymbol": [OCC]},

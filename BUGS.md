@@ -3,12 +3,19 @@
 ## 当前未解决
 
 ### BUG-001: IBKR 期权实时/延迟行情不可用
-- **状态**：待验证（代码已加固，开盘时仍需 Gateway 连接稳定后验证）
+- **状态**：降级为兼容项（Alpaca 已成为主行情，IBKR 只读持仓保留）
 - **现象**：IBKR 对期权/正股请求行情返回 Error 10089/10091（需额外订阅）
 - **排查发现**：探测时美股为 PRE_MARKET_BEGIN（北京时间 18:56），无活跃报价
 - **已实施修复**：`_market_data_type` 默认从 1（Live）改为 3（Delayed），由配置 `ibkr.market_data_type` 控制；`_ensure()` 里主动调 `reqMarketDataType`
 - **验证方法**：美股开盘后（北京时间 21:30+）运行 `live_test.py`，观察推荐中 `market_status` 是否从 eod 变为 realtime/delayed
 - **本轮诊断**：纽约时间 15:50 时，额外诊断连接在账户初始化阶段超时，未能把 10089/10091 与实时盘口请求重新关联；面板现已记录对应 IBKR 市场错误码。
+
+### BUG-011: Alpaca Basic 期权历史接口受 OPRA agreement 限制
+- **状态**：已确认，待账户协议/套餐处理
+- **现象**：期权快照可返回 Indicative bid/ask，但历史 bars 返回 HTTP 403：`OPRA agreement is not signed`
+- **影响**：实时观察可用；真实历史期权回测暂时不可用
+- **根因**：Paper Trading API 当前未完成 Alpaca OPRA agreement/完整期权历史权限
+- **临时措施**：保留合成 K 线兜底；不把 Indicative 标记为可执行实时行情
 
 ### BUG-009: 推荐价格展示过多小数位
 - **状态**：已解决

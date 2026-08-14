@@ -29,7 +29,7 @@ from .futu_provider import (
     FutuOptionContract,
     FutuProvider,
 )
-from .history_adapters import CompositeHistoryAdapter, SyntheticHistoryAdapter
+from .history_adapters import AlpacaHistoryAdapter, CompositeHistoryAdapter, SyntheticHistoryAdapter
 from .ibkr_flex import IBKRFlexClient
 from .ibkr_provider import IBKRProvider
 from .massive_client import MassiveClient
@@ -276,9 +276,13 @@ class OptionsRadarService:
                 value = Path(path).read_text(encoding="utf-8").strip()
             return value
 
+        alpaca_config = self.config.section("alpaca")
         self.alpaca = AlpacaProvider(
             secret_value("ALPACA_API_KEY", "ALPACA_API_KEY_FILE"),
             secret_value("ALPACA_API_SECRET", "ALPACA_API_SECRET_FILE"),
+            base_url=str(alpaca_config.get("data_base_url", "https://data.alpaca.markets")),
+            contracts_base_url=str(alpaca_config.get("contracts_base_url", "https://paper-api.alpaca.markets")),
+            feed=str(alpaca_config.get("feed", "indicative")),
         )
         self.marketdata_app = MarketDataAppProvider(
             secret_value("MARKETDATA_API_KEY", "MARKETDATA_API_KEY_FILE")
@@ -304,7 +308,11 @@ class OptionsRadarService:
             max_quote_age_seconds=int(execution_config.get("max_quote_age_seconds", 60)),
             conflict_threshold_pct=float(execution_config.get("conflict_threshold_pct", 15)),
         )
-        self.history_market = CompositeHistoryAdapter(self.massive, IBKRHistoryAdapter(self.ibkr))
+        market_priority = list(provider_config.get("market_priority", default_priority))
+        if market_priority and market_priority[0] == "alpaca":
+            self.history_market = AlpacaHistoryAdapter(self.alpaca)
+        else:
+            self.history_market = CompositeHistoryAdapter(self.massive, IBKRHistoryAdapter(self.ibkr))
         backtest_config = self.config.section("backtest")
         if bool(backtest_config.get("use_synthetic_when_unavailable", True)):
             self.history_market = SyntheticHistoryAdapter(self.history_market, enabled=True)
