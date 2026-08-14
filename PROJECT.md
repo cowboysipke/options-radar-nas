@@ -16,7 +16,7 @@
 | Discord 采集（Playwright 备用） | ✅ | 无 token 时扫码登录回退，已修正 DOM 选择器和页面水合等待 |
 | 信号解析（确定性 + DeepSeek 补充） | ✅ | raw flow + 分析师卡片 → ParsedSignal，缺失字段用 DeepSeek 结构化补齐 |
 | 多分析师共识评分 | ✅ | 权重融合 + 方向一致性 → 确定性打分，家族内部/跨家族冲突检测 |
-| Alpaca 行情 API | ✅ | Paper Trading API，Indicative 期权快照、正股快照；OPRA 需升级套餐 |
+| Alpaca 行情 API | ✅ | Paper Trading API，Indicative 期权快照、正股快照；OPRA/历史权限另需协议和套餐 |
 | IBKR Gateway 连接 | ✅ | 暂时只读同步持仓/账户，不再参与主行情路由 |
 | Massive 行情 (EOD) | ⏸️ | 保留代码用于回退，当前不参与主行情路由 |
 | 富途 OpenD 连接 | ✅ | 行情已登录，自选组已读取；期权权限尚未开通 |

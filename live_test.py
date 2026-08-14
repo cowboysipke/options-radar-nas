@@ -91,10 +91,10 @@ def render_summary(results: Dict[str, Any]) -> str:
     lines: List[str] = []
     lines.append("**运行时间** {time}".format(**results))
 
-    massive = results.get("massive") or {}
-    lines.append("**Massive 行情**: {status} {err}".format(
-        status=massive.get("status", "?"),
-        err=("｜" + str(massive["last_error"])) if massive.get("last_error") else "",
+    alpaca = results.get("alpaca") or {}
+    lines.append("**Alpaca 行情**: {status} feed={feed} {err}".format(
+        status=alpaca.get("status", "?"), feed=alpaca.get("feed", "?"),
+        err=("｜" + str(alpaca["last_error"])) if alpaca.get("last_error") else "",
     ))
     deepseek = results.get("deepseek") or {}
     lines.append("**DeepSeek**: {status} {detail}".format(
@@ -126,7 +126,7 @@ def render_summary(results: Dict[str, Any]) -> str:
 
     real = results.get("backtest_real") or []
     if real:
-        lines.append("**真实K线回放**（Massive EOD，昨日top3合约）:")
+        lines.append("**真实K线回放**（Alpaca，昨日top3合约）:")
         for item in real:
             pnl = item.get("pnl_pct")
             lines.append("- {contract} bars={bars} 最新收盘={last_close} {status} pnl={pnl}%".format(
@@ -187,15 +187,16 @@ def main() -> None:
 
     service = OptionsRadarService(str(config_path), str(config_path.parent / "data-local"))
     try:
-        # ---- Probe: Massive ----
-        section("PROBE: Massive")
-        massive_health = safe(lambda: service.massive.health(check_remote=True)) or {}
-        results["massive"] = {
-            "status": massive_health.get("status"),
-            "last_error": massive_health.get("last_error"),
-            "last_success_at": massive_health.get("last_success_at"),
+        # ---- Probe: Alpaca ----
+        section("PROBE: Alpaca")
+        alpaca_health = safe(lambda: service.alpaca.health()) or {}
+        results["alpaca"] = {
+            "status": alpaca_health.get("status"),
+            "feed": getattr(service.alpaca, "feed", "indicative"),
+            "last_error": alpaca_health.get("last_error"),
+            "last_success_at": alpaca_health.get("last_success_at"),
         }
-        print(json.dumps(results["massive"], ensure_ascii=False, indent=2), flush=True)
+        print(json.dumps(results["alpaca"], ensure_ascii=False, indent=2), flush=True)
 
         # ---- Probe: DeepSeek ----
         section("PROBE: DeepSeek")
@@ -283,18 +284,17 @@ def main() -> None:
             }
         print(json.dumps(results["backtest"], ensure_ascii=False, indent=2), flush=True)
 
-        # ---- Real bars replay for yesterday's top contracts (Massive EOD) ----
-        section("BACKTEST: real option bars replay (Massive EOD)")
+        # ---- Real bars replay for yesterday's top contracts (Alpaca) ----
+        section("BACKTEST: real option bars replay (Alpaca)")
         real_replay: List[Dict[str, Any]] = []
+        from options_radar.history_adapters import AlpacaHistoryAdapter
+        alpaca_history = AlpacaHistoryAdapter(service.alpaca)
         for item in recommendations[:3]:
             contract_key = item["contract"]
             try:
-                bars = service.massive.aggregate_bars(
-                    service.massive.occ_ticker(contract_key),
-                    target - timedelta(days=12), target, 1, "day",
-                )
+                bars = alpaca_history.aggregate_bars(contract_key, target - timedelta(days=12), target, 1, "day")
             except Exception as exc:
-                results["errors"].append(f"massive_bars:{contract_key}:{type(exc).__name__}")
+                results["errors"].append(f"alpaca_bars:{contract_key}:{type(exc).__name__}")
                 continue
             if not bars:
                 continue

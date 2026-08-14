@@ -145,3 +145,9 @@
     - 本地配置切换为 `market_priority: [alpaca]`
     - 增加 `AlpacaHistoryAdapter`
     - IBKR 保留为只读持仓源，Massive/Futu 不再参与行情主路由
+
+24. **Alpaca Phase A2 实测**
+    - Paper Trading 账户认证成功，options trading level=3
+    - 正股实时快照和期权 Indicative bid/ask 正常
+    - 期权历史 bars 返回 `OPRA agreement is not signed`，已记录为权限限制
+    - `live_test.py` 的真实回放入口改为 Alpaca，不再主动调用 Massive

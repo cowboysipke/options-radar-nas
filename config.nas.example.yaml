@@ -18,6 +18,13 @@ notifications:
   provider: feishu
   feishu_app_id: ""
 
+alpaca:
+  enabled: true
+  environment: paper
+  data_base_url: https://data.alpaca.markets
+  contracts_base_url: https://paper-api.alpaca.markets
+  feed: indicative
+
 futu:
   enabled: true
   host: 127.0.0.1
@@ -35,8 +42,8 @@ ibkr:
   readonly: true
 
 providers:
-  market_priority: [futu, ibkr, tradier, alpaca, massive, marketdata_app]
-  enabled: {futu: true, ibkr: false, tradier: false, alpaca: false, massive: true, marketdata_app: false}
+  market_priority: [alpaca]
+  enabled: {alpaca: true, futu: false, ibkr: false, tradier: false, massive: false, marketdata_app: false}
   portfolio: {aggregate_enabled_accounts: true}
   execution: {accepted_quality: [realtime], max_quote_age_seconds: 60, conflict_threshold_pct: 15}
 
