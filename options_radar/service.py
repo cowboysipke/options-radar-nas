@@ -46,6 +46,9 @@ from .timeutil import us_session_date_from_china_time
 
 
 RULE_CHANNELS = {"guide", "subscriptions", "rules", "concepts"}
+# News channels are collected and stored for context but never parsed into
+# flow events or analyst signals.
+NEWS_CHANNELS = {"newsfeed", "news", "news_feed"}
 
 
 def _iso(value: Any) -> Any:
@@ -330,26 +333,23 @@ class OptionsRadarService:
         self._last_optimization: Optional[Dict[str, Any]] = None
 
         discord = self.config.section("discord")
-        channels = dict(discord.get("channel_urls", {})) or dict(discord.get("channel_names", {}))
-        # Legacy configs store a name->role mapping. Normalize it to the
-        # collector's role->target form so every role is retained.
+        channels = dict(discord.get("channel_urls", {}))
+        # Legacy configs store a name->role mapping. Only fall back to it when
+        # no explicit channel URLs are configured; URLs let the browser
+        # navigate directly and are preferred.
         source_channels = discord.get("source_channels")
-        if isinstance(source_channels, dict):
+        if not channels and isinstance(source_channels, dict):
             channels = {str(role): str(name) for name, role in source_channels.items()}
+        elif isinstance(source_channels, dict):
+            for name, role in source_channels.items():
+                channels.setdefault(str(role), str(name))
         self.channel_roles = {str(role): str(role) for role in channels}
-        discord_token = read_token()
         if discord_source is not None:
             self.source = discord_source
-        elif discord_token:
-            # Official API pagination is the reliable default; the Playwright
-            # scraper remains the fallback when no token is supplied.
-            self.source = DiscordRestSource(
-                channel_targets=channels, token=discord_token,
-                timeout_ms=int(discord.get("timeout_ms", 30000)),
-                guild_id=str(discord.get("guild_id", "") or ""),
-                proxy_url=str(discord.get("proxy_url", "") or ""),
-            )
         else:
+            # Browser DOM collection is the primary channel: it reads the
+            # logged-in session's visible content, including subscription
+            # posts that the REST API cannot see.
             self.source = DiscordBrowserSource(
                 profile_dir=self.data_dir / "browser-profile",
                 evidence_dir=self.data_dir / "evidence",
@@ -470,6 +470,9 @@ class OptionsRadarService:
                 if created:
                     rule_messages.append(message)
                 continue
+            if message.analyst in NEWS_CHANNELS:
+                # Store for context; never parse into signals.
+                continue
             if not created:
                 continue
             if message.analyst == "flow":
@@ -493,25 +496,25 @@ class OptionsRadarService:
             cursor = self.database.get_source_cursor(channel_id)
             role = self.channel_roles.get(channel_id, channel_id)
             fetch_cursor = cursor
+            pages = 24
             if backfill:
                 fetch_cursor = SourceCursor(
                     channel_id=channel_id, last_message_id="0",
-                    last_timestamp=datetime.utcnow() - timedelta(hours=24),
+                    last_timestamp=datetime.utcnow() - timedelta(hours=96),
                 )
-            pages = 20 if backfill else (50 if cursor is None and role in RULE_CHANNELS else 0)
+                pages = 40
             try:
-                messages = self.source.fetch_since(channel_id, fetch_cursor, scroll_pages=pages)
+                # Per-channel timeout keeps one slow/hung channel from
+                # blocking the whole poll cycle.
+                messages = self.source.fetch_since(channel_id, fetch_cursor, scroll_pages=pages, timeout_ms=60000)
             except Exception as exc:
-                # Continue with other channels; one missing guide/subscription
-                # channel must not erase valid analyst messages.
+                # Continue with other channels; one unavailable channel must
+                # not erase valid analyst messages.
                 self._last_error = f"discord:{channel_id}:{type(exc).__name__}:{str(exc)[:120]}"
                 continue
             for message in messages:
                 message.analyst = role
                 output.append(self.source.as_raw_message(message))
-            # A single unavailable informational channel must not discard all
-            # analyst signals. Keep collecting remaining channels and expose
-            # the channel-specific error in health diagnostics.
             if messages and not backfill:
                 last = max(messages, key=lambda item: (item.created_at, item.message_id))
                 self.database.save_source_cursor(SourceCursor(
@@ -1230,9 +1233,9 @@ class OptionsRadarService:
             timezone=self.config.raw.get("timezone", "Asia/Shanghai"), daemon=True,
             executors={"default": ThreadPoolExecutor(1)},
         )
-        self._scheduler.add_job(self.collect, "interval", seconds=60, id="discord-poll", max_instances=1, coalesce=True)
+        self._scheduler.add_job(self.collect, "interval", minutes=6, id="discord-poll", max_instances=1, coalesce=True)
         self._scheduler.add_job(self.publish_top5, "interval", minutes=5, id="feishu-top5", max_instances=1, coalesce=True)
-        self._scheduler.add_job(self.backfill, "interval", minutes=10, id="discord-rescan", max_instances=1, coalesce=True)
+        self._scheduler.add_job(self.backfill, "interval", minutes=15, id="discord-rescan", max_instances=1, coalesce=True)
         self._scheduler.add_job(self.backfill, CronTrigger(hour=16, minute=30, timezone="America/New_York"), id="discord-close-backfill")
         self._scheduler.add_job(self.sync_broker, "interval", minutes=5, id="ibkr-sync", max_instances=1, coalesce=True)
         self._scheduler.add_job(self.publish_daily, CronTrigger(hour=17, minute=15, timezone="America/New_York"), id="daily-report")

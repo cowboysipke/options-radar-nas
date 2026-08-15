@@ -178,7 +178,9 @@ class DiscordBrowserSource(DiscordSource):
                 if self._page is None:
                     raise RuntimeError("Discord浏览器未启动")
                 self._page.goto("https://discord.com/channels/@me", wait_until="domcontentloaded")
-                self._page.wait_for_timeout(1500)
+                self._page.wait_for_timeout(2000)
+                self._dismiss_app_prompt()
+                self._page.wait_for_timeout(1000)
                 if self._logged_out():
                     self._capture_login()
                     return {**self.health(), "message": "Discord登录窗口已打开，请在弹出的浏览器中登录。"}
@@ -337,6 +339,49 @@ class DiscordBrowserSource(DiscordSource):
         self.channel_urls[channel_id] = href
         return href
 
+    def _dismiss_app_prompt(self) -> None:
+        """Dismiss Discord's 'open in app' interstitial so web content loads."""
+        if self._page is None:
+            return
+        try:
+            # 点击「在浏览器中继续」；若按钮文本是英文也兼容。
+            for selector in (
+                "button:has-text('在浏览器中继续')",
+                "button:has-text('Continue in Browser')",
+                "button:has-text('继续使用浏览器')",
+                "a:has-text('在浏览器中继续')",
+                "a:has-text('Continue in Browser')",
+            ):
+                locator = self._page.locator(selector).first
+                if locator.count():
+                    locator.click(timeout=3000)
+                    self._page.wait_for_timeout(1200)
+                    return
+        except Exception:
+            pass
+
+    def _goto_channel(self, channel_url: str) -> bool:
+        """Navigate to a channel, wait for hydration and scroll to the newest messages."""
+        if self._page is None:
+            return False
+        self._page.goto(channel_url, wait_until="domcontentloaded")
+        self._page.wait_for_timeout(1200)
+        self._dismiss_app_prompt()
+        self._wait_messages()
+        if self._logged_out():
+            self._capture_login()
+            return False
+        # Discord remembers the scroll position; force to the newest message so
+        # every poll sees the latest batch instead of wherever the list was left.
+        try:
+            self._page.keyboard.press("End")
+            self._page.wait_for_timeout(600)
+            self._page.keyboard.press("End")
+            self._page.wait_for_timeout(400)
+        except Exception:
+            pass
+        return True
+
     def _fetch_since_impl(
         self, channel_id: str, cursor: Optional[SourceCursor], scroll_pages: int = 0
     ) -> List[SourceMessage]:
@@ -349,18 +394,25 @@ class DiscordBrowserSource(DiscordSource):
                 channel_url = self._resolve_channel_url(channel_id)
                 if not channel_url:
                     return []
-                self._page.goto(channel_url, wait_until="domcontentloaded")
-                self._wait_messages()
-                if self._logged_out():
-                    self._capture_login()
+                if not self._goto_channel(channel_url):
                     return []
                 self._state = "ready"
                 messages = self._extract_dom(channel_id)
-                for _ in range(max(0, scroll_pages)):
-                    self._page.keyboard.press("PAGEUP")
-                    self._page.wait_for_timeout(250)
+                # Backfill older pages when needed.  The DOM only renders what
+                # is near the viewport, so keep scrolling up until we pass the
+                # stored cursor or hit a safe page budget.
+                max_pages = max(8, int(scroll_pages))
+                for _ in range(max_pages):
+                    if not messages:
+                        break
+                    oldest = min(item.created_at for item in messages)
+                    if cursor and oldest <= cursor.last_timestamp:
+                        break
+                    if not self._scrolled_older():
+                        break
+                    before = len(messages)
                     messages.extend(self._extract_dom(channel_id))
-                    if cursor and messages and min(item.created_at for item in messages) <= cursor.last_timestamp:
+                    if len(messages) == before:
                         break
                 messages = list({item.content_hash: item for item in messages}.values())
                 if cursor:
@@ -378,10 +430,25 @@ class DiscordBrowserSource(DiscordSource):
                 self._last_error = f"{type(exc).__name__}:{str(exc)[:120]}"
                 return []
 
+    def _scrolled_older(self) -> bool:
+        """Scroll up one page to reveal older messages; True if scroll happened."""
+        if self._page is None:
+            return False
+        try:
+            self._page.keyboard.press("PageUp")
+            self._page.wait_for_timeout(450)
+            return True
+        except Exception:
+            return False
+
     def fetch_since(
-        self, channel_id: str, cursor: Optional[SourceCursor], scroll_pages: int = 0
+        self, channel_id: str, cursor: Optional[SourceCursor], scroll_pages: int = 0,
+        timeout_ms: Optional[int] = None,
     ) -> List[SourceMessage]:
-        return self._executor.submit(self._fetch_since_impl, channel_id, cursor, scroll_pages).result(timeout=180)
+        timeout_ms = timeout_ms or self.timeout_ms
+        return self._executor.submit(self._fetch_since_impl, channel_id, cursor, scroll_pages).result(
+            timeout=max(30, timeout_ms / 1000 + 20)
+        )
 
     def health(self) -> Dict[str, object]:
         return {

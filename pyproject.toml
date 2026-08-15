@@ -15,6 +15,7 @@ dependencies = [
   "pystray>=0.19; platform_system == 'Windows'",
   "rapidocr-onnxruntime>=1.4,<2",
   "pydantic>=1.10,<2",
+  "playwright>=1.40,<2",
 ]
 
 [project.optional-dependencies]

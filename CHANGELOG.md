@@ -161,3 +161,13 @@
     - 手动刷新持仓时后台更新元数据，broker 同步失败不再中断元数据刷新
     - 持仓页表格新增中文名/行业/更新时间列
     - 修复 DeepSeek 文本操作对“只返回名称”非 JSON 输出的宽松解析
+
+### 2026-08-15 Phase C 前置：浏览器 DOM 采集
+
+26. **浏览器 DOM 采集替换 REST 为主通道**
+    - Playwright 持久化 profile 登录态读取全部频道，覆盖订阅/论坛正文
+    - 频道精简为 flow/pa/mr/qmr/fpd/newsfeed（移除 guide/subscriptions）
+    - newsfeed 只入库不解析；调度改为每 6 分钟
+    - 每频道 60 秒超时，单频道失败不阻塞整轮
+    - 处理 Discord「在浏览器中继续」深链拦截；修正 `_logged_out` 误判
+    - 实机验证：flow 实时采到当日卡片；分析师主频道 8/13 凌晨(UTC 8/12 16:15)消息已入库

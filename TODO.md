@@ -11,6 +11,7 @@
 - [x] Phase A1：Alpaca Trading API Paper 认证和期权快照探针
 - [x] Phase A2：Alpaca 主行情路由切换后的全链路验证
 - [x] Phase B：自选持仓证券元数据固化（instrument_metadata + 中文名翻译）
+- [x] 浏览器 DOM 采集替换 REST（登录态读订阅正文，6 分钟轮询，频道精简）
 - [ ] Phase A3：解决 Alpaca OPRA agreement / 历史期权 bars 权限
 - [ ] Phase C：回测 Phase 1（真实结束日 + 成熟 1/3/5 日结算）
 
