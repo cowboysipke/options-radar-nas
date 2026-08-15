@@ -1150,6 +1150,70 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                         '<tr><th>交易日</th><th>合约</th><th>持有(日)</th><th>状态</th><th>收益率</th><th>退出</th></tr>'
                         + "".join(detail_rows) + '</table></div></section>'
                     )
+            accuracy = data.get("analyst_accuracy") or {}
+            acc_summary = accuracy.get("summary") if isinstance(accuracy.get("summary"), list) else []
+            if acc_summary:
+                acc_rows = []
+                for item in acc_summary:
+                    trades = int(item.get("trades", 0) or 0)
+                    filled = int(item.get("filled", 0) or 0)
+                    direction_hits = int(item.get("direction_hits", 0) or 0)
+                    strategy_wins = int(item.get("strategy_wins", 0) or 0)
+                    direction_rate = f"{direction_hits / trades * 100:.1f}%" if trades else "—"
+                    strategy_rate = f"{strategy_wins / filled * 100:.1f}%" if filled else "—"
+                    avg_pnl = float(item.get("avg_pnl", 0) or 0)
+                    pnl_cls = "up" if avg_pnl >= 0 else "down"
+                    acc_rows.append(
+                        '<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class="{}">{:+.2f}%</td></tr>'.format(
+                            html.escape(str(item.get("analyst", ""))),
+                            item.get("horizon_days", ""),
+                            trades,
+                            direction_rate,
+                            strategy_rate,
+                            pnl_cls,
+                            avg_pnl * 100,
+                        )
+                    )
+                parts.append(
+                    '<section class="card"><h2>分析师准确度（TRADE 信号回测）</h2>'
+                    '<div class="table-wrap"><table>'
+                    '<tr><th>分析师</th><th>持有(日)</th><th>信号数</th><th>方向正确率</th><th>策略胜率</th><th>平均盈亏</th></tr>'
+                    + "".join(acc_rows) + '</table></div>'
+                    '<p class="muted">方向正确率基于正股涨跌；策略胜率基于做多对应期权（BULL→CALL，BEAR→PUT）。</p></section>'
+                )
+            elif accuracy.get("running"):
+                parts.append('<section class="card"><h2>分析师准确度</h2><p class="muted">正在回测 TRADE 信号（拉取期权历史行情），稍后刷新查看。</p></section>')
+
+            daily = accuracy.get("daily") if isinstance(accuracy.get("daily"), list) else []
+            if daily:
+                cal_rows = []
+                for item in daily:
+                    signals = int(item.get("signals", 0) or 0)
+                    direction_rated = int(item.get("direction_rated", 0) or 0)
+                    direction_hits = int(item.get("direction_hits", 0) or 0)
+                    filled = int(item.get("filled", 0) or 0)
+                    strategy_wins = int(item.get("strategy_wins", 0) or 0)
+                    direction_rate = f"{direction_hits / direction_rated * 100:.0f}%" if direction_rated else "—"
+                    strategy_rate = f"{strategy_wins / filled * 100:.0f}%" if filled else "—"
+                    avg_pnl = float(item.get("avg_pnl", 0) or 0)
+                    pnl_cls = "up" if avg_pnl >= 0 else "down"
+                    cal_rows.append(
+                        '<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class="{}">{:+.1f}%</td></tr>'.format(
+                            html.escape(str(item.get("session_date", ""))),
+                            signals,
+                            direction_rate,
+                            strategy_rate,
+                            pnl_cls,
+                            avg_pnl * 100,
+                        )
+                    )
+                parts.append(
+                    '<section class="card"><h2>信号日历（5 日结算）</h2><div class="table-wrap"><table>'
+                    '<tr><th>交易日</th><th>信号数</th><th>方向正确率</th><th>策略胜率</th><th>平均盈亏</th></tr>'
+                    + "".join(cal_rows) + '</table></div>'
+                    '<p class="muted">按信号产生日聚合，方向正确率与策略盈亏均为 5 日持有期结果。</p></section>'
+                )
+
             if breakdown:
                 br_rows = "".join(
                     '<tr><td>{}</td><td>{}</td><td>{}</td><td>{:.1f}%</td><td>{:+.2f}%</td></tr>'.format(

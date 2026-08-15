@@ -1,5 +1,33 @@
 # 变更日志
 
+## 2026-08-16 — 分析师信号回测引擎
+
+### 新增功能
+
+1. **分析师 TRADE 信号回测**（`analyst_backtest.py`）
+   - `AnalystBacktestCoordinator`：对全部 `decision=TRADE` 信号做确定性回放（0 token）
+   - 两层评估：**方向正确率**（正股日线：信号日收盘 → N 交易日收盘）与**策略盈亏**（做多对应期权：BULL→CALL、BEAR→PUT）
+   - 数据源为 Massive 期权/正股日线（非 5 分钟线），按 1/3/5 日三个持有期结算
+   - 前视偏差防护：策略入场用信号**次日**开盘（信号盘中产生，当日开盘属未来数据）
+   - 每信号仅 2 次请求（正股+期权各拉一次，覆盖最大持有期后按 horizon 切片），规避 Massive 5 req/min 限速
+
+2. **回测结果持久化**（`db.py`）
+   - 新增 `analyst_backtest_outcomes` 表（按 analyst + contract + horizon 幂等 upsert）
+   - `save_analyst_backtest_outcome` / `analyst_backtest_outcomes` / `analyst_backtest_summary`（按分析师×持有期聚合）
+
+3. **面板「分析师准确度」表**（`setup_server.py` `/backtest` 页）
+   - 展示每分析师每持有期的信号数、方向正确率、策略胜率、平均盈亏
+   - 后台回测任务由 `service.py` 触发（`_maybe_start_analyst_backtest`），首次访问自动启动，完成后缓存 1 小时
+
+4. **信号日历**（`db.py` + `setup_server.py` `/backtest` 页）
+   - `analyst_backtest_daily_summary()`：按交易日聚合 5 日持有期的方向正确率、策略胜率、平均盈亏
+   - 面板「信号日历」表展示每日信号质量，识别信号质量规律
+
+### 测试
+
+- 新增 `tests/test_analyst_backtest.py`（5 个用例：join/去重、BULL/BEAR 方向、前视偏差防护、幂等持久化）
+- 测试基线 **145 passed**（此前 140）
+
 ## 2026-08-12 — v2-local 重构版
 
 ### 新增功能

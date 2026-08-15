@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .ai_provider import DeepSeekProvider
+from .analyst_backtest import AnalystBacktestCoordinator
 from .analytics import update_analyst_weights_from_outcomes
 from .backtest_service import BacktestCoordinator
 from .backup_providers import AlpacaProvider
@@ -331,6 +332,7 @@ class OptionsRadarService:
         if bool(backtest_config.get("use_synthetic_when_unavailable", True)):
             self.history_market = SyntheticHistoryAdapter(self.history_market, enabled=True)
         self.backtests = BacktestCoordinator(self.database, self.history_market, self.config.section("paper"))
+        self.analyst_backtests = AnalystBacktestCoordinator(self.database, self.massive)
         self.rulebook = RulebookCompiler(self.database, self.config.section("analyst_families"))
         self._last_backtest: Optional[Dict[str, Any]] = None
         self._last_backtest_at: float = 0.0
@@ -338,6 +340,8 @@ class OptionsRadarService:
         self._backtest_lock = threading.Lock()
         self._backtest_running = False
         self._backtest_summary: Dict[str, Any] = {}
+        self._analyst_backtest_running = False
+        self._analyst_backtest_at: float = 0.0
 
         discord = self.config.section("discord")
         channels = dict(discord.get("channel_urls", {}))
@@ -1197,6 +1201,49 @@ class OptionsRadarService:
             with self._backtest_lock:
                 self._backtest_running = False
 
+    def _analyst_backtest_worker(self) -> None:
+        """Replay TRADE signals against Massive daily bars in the background."""
+        try:
+            self.analyst_backtests.run()
+            self._analyst_backtest_at = time.monotonic()
+        except Exception as exc:
+            self._last_error = f"analyst_backtest:{type(exc).__name__}:{str(exc)[:120]}"
+        finally:
+            with self._backtest_lock:
+                self._analyst_backtest_running = False
+
+    def _analyst_backtest_pending(self) -> int:
+        """Count TRADE signal groups that have no settled outcome yet."""
+        with self.database.connect() as conn:
+            signal_count = conn.execute(
+                """SELECT COUNT(*) FROM (
+                       SELECT p.analyst, f.contract_key
+                       FROM parsed_signals p
+                       JOIN flow_events f ON p.flow_event_key = f.event_key
+                       WHERE p.decision='TRADE' AND p.direction IN ('BULL','BEAR')
+                         AND f.session_date IS NOT NULL
+                       GROUP BY p.analyst, f.contract_key
+                   )"""
+            ).fetchone()[0]
+            done_count = conn.execute(
+                """SELECT COUNT(*) FROM (
+                       SELECT analyst, contract_key FROM analyst_backtest_outcomes
+                       GROUP BY analyst, contract_key
+                   )"""
+            ).fetchone()[0]
+        return max(0, signal_count - done_count)
+
+    def _maybe_start_analyst_backtest(self) -> None:
+        with self._backtest_lock:
+            running = self._analyst_backtest_running
+        pending = self._analyst_backtest_pending()
+        fresh = time.monotonic() - self._analyst_backtest_at < 3600
+        if running or fresh or pending == 0:
+            return
+        with self._backtest_lock:
+            self._analyst_backtest_running = True
+        threading.Thread(target=self._analyst_backtest_worker, daemon=True).start()
+
     def dashboard_backtest(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         # Kick a background replay when stale, then return cached results so the
         # page renders instantly. The first load may show partial data while
@@ -1223,6 +1270,8 @@ class OptionsRadarService:
                 summary = dict(self._backtest_summary) if self._backtest_summary else {}
             if not summary:
                 summary = {"status": "collecting", "note": "正在结算历史收益（拉取期权历史行情），稍后刷新页面查看。"}
+        self._maybe_start_analyst_backtest()
+        analyst_outcomes = self.database.analyst_backtest_outcomes()
         return {
             "paper": self.database.paper_stats(),
             "last_run": self._last_backtest,
@@ -1231,6 +1280,12 @@ class OptionsRadarService:
             "sessions_available": len(sessions),
             "replay": summary,
             "analyst_breakdown": self._analyst_backtest_breakdown(),
+            "analyst_accuracy": {
+                "summary": self.database.analyst_backtest_summary(),
+                "daily": self.database.analyst_backtest_daily_summary(),
+                "outcomes": analyst_outcomes,
+                "running": self._analyst_backtest_running,
+            },
         }
 
     def _analyst_backtest_breakdown(self) -> List[Dict[str, Any]]:

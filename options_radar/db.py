@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from .models import (
     AnalystVote,
@@ -188,6 +188,24 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     max_adverse REAL,
     observed_at TEXT NOT NULL,
     UNIQUE(recommendation_id, horizon_days)
+);
+
+CREATE TABLE IF NOT EXISTS analyst_backtest_outcomes (
+    id INTEGER PRIMARY KEY,
+    analyst TEXT NOT NULL,
+    analyst_family TEXT NOT NULL,
+    contract_key TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    session_date TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    option_type TEXT NOT NULL,
+    horizon_days INTEGER NOT NULL,
+    strategy_status TEXT NOT NULL,
+    strategy_pnl_pct REAL,
+    direction_correct INTEGER,
+    underlying_change_pct REAL,
+    observed_at TEXT NOT NULL,
+    UNIQUE(analyst, contract_key, horizon_days)
 );
 
 CREATE TABLE IF NOT EXISTS strategy_versions (
@@ -931,6 +949,78 @@ class Database:
             positions=dict(payload.get("positions", {})),
             source=str(row["source"]), quality=str(row["quality"]),
         )
+
+    def save_analyst_backtest_outcome(self, outcome: Mapping[str, object]) -> int:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO analyst_backtest_outcomes
+                (analyst, analyst_family, contract_key, symbol, session_date, direction,
+                 option_type, horizon_days, strategy_status, strategy_pnl_pct,
+                 direction_correct, underlying_change_pct, observed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(analyst, contract_key, horizon_days) DO UPDATE SET
+                analyst_family=excluded.analyst_family, symbol=excluded.symbol,
+                session_date=excluded.session_date, direction=excluded.direction,
+                option_type=excluded.option_type, strategy_status=excluded.strategy_status,
+                strategy_pnl_pct=excluded.strategy_pnl_pct,
+                direction_correct=excluded.direction_correct,
+                underlying_change_pct=excluded.underlying_change_pct,
+                observed_at=excluded.observed_at""",
+                (str(outcome["analyst"]), str(outcome["analyst_family"]),
+                 str(outcome["contract_key"]), str(outcome["symbol"]),
+                 str(outcome["session_date"]), str(outcome["direction"]),
+                 str(outcome["option_type"]), int(outcome["horizon_days"]),
+                 str(outcome["strategy_status"]), outcome.get("strategy_pnl_pct"),
+                 outcome.get("direction_correct"), outcome.get("underlying_change_pct"),
+                 str(outcome["observed_at"])),
+            )
+            row = connection.execute(
+                "SELECT id FROM analyst_backtest_outcomes WHERE analyst=? AND contract_key=? AND horizon_days=?",
+                (str(outcome["analyst"]), str(outcome["contract_key"]), int(outcome["horizon_days"])),
+            ).fetchone()
+        return int(row["id"])
+
+    def analyst_backtest_outcomes(self) -> List[Dict[str, object]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM analyst_backtest_outcomes ORDER BY session_date, analyst, horizon_days"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def analyst_backtest_summary(self) -> List[Dict[str, object]]:
+        """Per-analyst accuracy: direction hit-rate and strategy win-rate per horizon."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT analyst, horizon_days,
+                          COUNT(*) AS trades,
+                          SUM(CASE WHEN direction_correct=1 THEN 1 ELSE 0 END) AS direction_hits,
+                          SUM(CASE WHEN strategy_status='filled' THEN 1 ELSE 0 END) AS filled,
+                          SUM(CASE WHEN strategy_status='filled' AND strategy_pnl_pct>0 THEN 1 ELSE 0 END) AS strategy_wins,
+                          AVG(CASE WHEN strategy_status='filled' THEN strategy_pnl_pct ELSE NULL END) AS avg_pnl
+                   FROM analyst_backtest_outcomes
+                   GROUP BY analyst, horizon_days
+                   ORDER BY analyst, horizon_days"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def analyst_backtest_daily_summary(self, horizon_days: int = 5) -> List[Dict[str, object]]:
+        """Per-trading-day accuracy for the signal calendar (single horizon)."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT session_date,
+                          COUNT(*) AS signals,
+                          SUM(CASE WHEN direction_correct=1 THEN 1 ELSE 0 END) AS direction_hits,
+                          SUM(CASE WHEN direction_correct IS NOT NULL THEN 1 ELSE 0 END) AS direction_rated,
+                          SUM(CASE WHEN strategy_status='filled' THEN 1 ELSE 0 END) AS filled,
+                          SUM(CASE WHEN strategy_status='filled' AND strategy_pnl_pct>0 THEN 1 ELSE 0 END) AS strategy_wins,
+                          AVG(CASE WHEN strategy_status='filled' THEN strategy_pnl_pct ELSE NULL END) AS avg_pnl
+                   FROM analyst_backtest_outcomes
+                   WHERE horizon_days=?
+                   GROUP BY session_date
+                   ORDER BY session_date""",
+                (horizon_days,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def save_signal_outcome(self, outcome: SignalOutcome) -> int:
         with self.connect() as connection:
