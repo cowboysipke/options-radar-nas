@@ -903,7 +903,20 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                     return f"{float(value):.2f}"
                 except (TypeError, ValueError):
                     return "待行情"
-
+            def format_premium(value: Any) -> str:
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    return "-"
+                if number <= 0:
+                    return "-"
+                if number >= 1_000_000:
+                    text = f"{number / 1_000_000:.2f}".rstrip("0").rstrip(".")
+                    return f"${text}M"
+                if number >= 1_000:
+                    text = f"{number / 1_000:.1f}".rstrip("0").rstrip(".")
+                    return f"${text}K"
+                return f"${number:,.0f}"
             for item in data[:10]:
                 key = html.escape(str(item.get("contract_key", "")))
                 bid = format_price(item.get("bid"))
@@ -919,9 +932,10 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                 score = item.get("score")
                 score_html = f'{float(score):.1f}' if isinstance(score, (int, float)) else html.escape(str(score))
                 grade = html.escape(str(item.get("grade", "-")))
+                premium_text = format_premium(item.get("premium"))
                 cards.append(
                     '<section class="card">'
-                    f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:18px">{key}</h2>{badge}{source_badge}</div>'
+                    f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:18px">{key}</h2><span class="muted" style="font-size:13px">交易量 {premium_text}</span>{badge}{source_badge}</div>'
                     f'<div style="margin:8px 0 4px"><span style="font-size:24px;font-weight:700">{score_html}</span>'
                     f'<span class="muted" style="margin-left:8px">{grade}级</span></div>'
                     f'<p style="margin:2px 0" class="muted">bid/ask {bid} / {ask} · 数据 {html.escape(str(item.get("data_quality", item.get("market_status", "待行情"))))} · 执行 {html.escape(str(item.get("execution_status", "待行情")))}</p>'
@@ -931,15 +945,93 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                 )
             return '<div class="grid">' + "".join(cards) + '</div><details class="card" style="margin-top:16px"><summary>评价标准说明</summary><table><tr><th>维度</th><th>权重</th><th>说明</th></tr><tr><td>共识</td><td>40%</td><td>各分析家族（价格行为/动量反转/资金流向）方向一致性，跨家族冲突扣分封顶64</td></tr><tr><td>历史</td><td>20%</td><td>分析师过去推荐的盈亏表现（基于回测结果动态调整）</td></tr><tr><td>信号质量</td><td>15%</td><td>信号完整性×置信度×时效性</td></tr><tr><td>行情质量</td><td>15%</td><td>实时bid/ask、价差、Open Interest验证</td></tr><tr><td>组合适配</td><td>10%</td><td>标的是否在持仓/自选中、仓位集中度</td></tr></table><p>A级≥80分（飞书提醒）｜B级65-79（合格）｜C级50-64（观察榜）｜D级&lt;50（过滤）｜仅flow=无分析师确认的异常期权事件</p></details>'
         if path == "/signals" and isinstance(data, list):
+            def format_premium(value: Any) -> str:
+                try:
+                    number = float(value)
+                except (TypeError, ValueError):
+                    return "-"
+                if number <= 0:
+                    return "-"
+                if number >= 1_000_000:
+                    text = f"{number / 1_000_000:.2f}".rstrip("0").rstrip(".")
+                    return f"${text}M"
+                if number >= 1_000:
+                    text = f"{number / 1_000:.1f}".rstrip("0").rstrip(".")
+                    return f"${text}K"
+                return f"${number:,.0f}"
+
+            family_names = {
+                "price_action": "价格行为", "mean_reversion": "均值回归",
+                "quant_mean_reversion": "量化均值回归", "flow_price_divergence": "流价背离",
+                "pa": "价格行为", "mr": "均值回归",
+                "qmr": "量化均值回归", "fpd": "流价背离",
+            }
+            decision_names = {"TRADE": "交易", "WATCH": "观察", "NO_TRADE": "不交易"}
             rows = []
             for item in data:
-                n = len(item.get("signals", []))
+                signals = item.get("signals", [])
+                n = len(signals)
+                premium_text = format_premium(item.get("premium"))
+                bull_count = sum(1 for signal in signals if str(signal.get("direction", "")).upper() == "BULL")
+                bear_count = sum(1 for signal in signals if str(signal.get("direction", "")).upper() == "BEAR")
+                if signals and bull_count > bear_count:
+                    direction_html = '<span class="badge up">看多</span>'
+                elif signals and bear_count > bull_count:
+                    direction_html = '<span class="badge down">看空</span>'
+                elif signals:
+                    direction_html = '<span class="badge watch">中性</span>'
+                else:
+                    direction_html = '<span class="badge watch">—</span>'
                 badge = f'<span class="badge watch">分析师{n}</span>' if n else '<span class="badge watch">仅flow</span>'
-                rows.append('<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>'.format(
-                    html.escape(str(item.get("symbol", ""))), html.escape(str(item.get("contract_key", ""))),
-                    html.escape(str(item.get("observed_at", ""))), badge,
-                ))
-            return '<section class="card"><table><tr><th>标的</th><th>合约</th><th>时间</th><th>状态</th></tr>{}</table></section>'.format("".join(rows) or '<tr><td colspan="4">暂无信号</td></tr>')
+                detail_rows = []
+                for signal in signals:
+                    family = str(signal.get("analyst_family", "") or signal.get("analyst", ""))
+                    family_name = family_names.get(family, html.escape(str(family or signal.get("analyst", ""))))
+                    direction = str(signal.get("direction", "")).upper()
+                    if direction == "BULL":
+                        dir_html = '<span class="badge up">看多</span>'
+                    elif direction == "BEAR":
+                        dir_html = '<span class="badge down">看空</span>'
+                    elif direction == "NEUTRAL":
+                        dir_html = '<span class="badge watch">中性</span>'
+                    else:
+                        dir_html = '<span class="badge watch">未知</span>'
+                    decision = decision_names.get(str(signal.get("decision", "")).upper(), str(signal.get("decision", "")))
+                    confidence = signal.get("confidence")
+                    confidence_text = f"{float(confidence) * 100:.0f}%" if isinstance(confidence, (int, float)) else ""
+                    rationale = signal.get("rationale") or []
+                    reason = html.escape(str(rationale[0])) if rationale else ""
+                    detail_rows.append(
+                        f'<tr><td>{family_name}</td><td>{dir_html}</td>'
+                        f'<td>{html.escape(str(decision))}</td><td>{confidence_text}</td>'
+                        f'<td class="muted">{reason}</td></tr>'
+                    )
+                if detail_rows:
+                    detail_html = (
+                        '<details class="card" style="margin-top:6px"><summary>分析师明细</summary>'
+                        '<table><tr><th>分析家族</th><th>方向</th><th>决策</th><th>置信度</th><th>理由</th></tr>'
+                        + "".join(detail_rows) + '</table></details>'
+                    )
+                else:
+                    detail_html = '<p class="muted" style="margin:6px 0 0">暂无分析师解读</p>'
+                rows.append(
+                    '<tr><td>{}</td><td>{}</td><td class="muted">{}</td><td class="muted">{}</td>'
+                    '<td>{}</td><td>{}</td></tr>'
+                    '<tr class="signal-detail"><td colspan="6">{}</td></tr>'.format(
+                        html.escape(str(item.get("symbol", ""))),
+                        html.escape(str(item.get("contract_key", ""))),
+                        premium_text,
+                        html.escape(str(item.get("observed_at", ""))),
+                        direction_html,
+                        badge,
+                        detail_html,
+                    )
+                )
+            return (
+                '<section class="card"><table>'
+                '<tr><th>标的</th><th>合约</th><th>交易量</th><th>时间</th><th>方向</th><th>状态</th></tr>'
+                + "".join(rows) + '</table></section>'
+            )
         if path == "/portfolio" and isinstance(data, dict):
             rows = []
             for symbol, item in data.items():

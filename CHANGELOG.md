@@ -184,3 +184,19 @@
     - 首页卡片化候选：方向徽标（红涨绿跌）、评分等级、价格行、理由、状态徽标
     - 信号明细加状态徽标（分析师N/仅flow）；持仓涨跌红涨绿跌
     - 纯 inline CSS/JS，零外部依赖，保留文案以兼容测试
+
+### 2026-08-15 富途实时行情主源 + 信号明细增强
+
+29. **富途 OpenD 期权行情权限打通并设为主行情源**
+    - 用户开通富途美股期权行情权限后，OpenD `get_option_chain`/`get_market_snapshot` 返回真实 bid/ask/OI/IV/希腊字母
+    - 修复 `FutuUnifiedProvider.health()` 读取不存在的 `connected` 字段导致永远 `offline`（改为读 `ready`）
+    - `config.local.yaml`：`market_priority: [futu, alpaca]`、`enabled.futu: true`、`market.provider: futu`
+    - 候选卡 bid/ask/OI 填充富途 realtime 数据；alpaca indicative 兜底
+    - 富途历史 K 线（`request_history_kline`）仍会超时，回测继续走 Massive/Alpaca/合成兜底
+
+30. **信号明细增强**
+    - 表格扩为：标的/合约/交易量/时间/方向/状态 六列
+    - 交易量列显示 `$3.2M`/`$968K` 格式（新增 `_format_premium`）
+    - 方向列聚合分析师 BULL/BEAR/中性（红涨绿跌徽章）
+    - 每行可展开「分析师明细」：分析家族中文名（价格行为/均值回归/量化均值回归/流价背离）、方向、决策、置信度、理由
+    - 首页候选卡同步加交易量小字；推荐视图补 `direction`（从 `final_direction`）与 `premium`（从 flow_events 回填）

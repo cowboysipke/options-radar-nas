@@ -70,6 +70,23 @@ def _format_price(value: Any) -> str:
         return "待行情"
 
 
+def _format_premium(value: Any) -> str:
+    """Render option trade premium like the source feed does: $3.2M, $968K."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "-"
+    if number <= 0:
+        return "-"
+    if number >= 1_000_000:
+        text = f"{number / 1_000_000:.2f}".rstrip("0").rstrip(".")
+        return f"${text}M"
+    if number >= 1_000:
+        text = f"{number / 1_000:.1f}".rstrip("0").rstrip(".")
+        return f"${text}K"
+    return f"${number:,.0f}"
+
+
 def _to_float(value: Any) -> Optional[float]:
     try:
         return None if value in (None, "") else float(value)
@@ -861,6 +878,8 @@ class OptionsRadarService:
         result = dict(payload)
         result.update(dict(execution))
         result["execution"] = dict(execution)
+        if not result.get("direction") and result.get("final_direction"):
+            result["direction"] = result["final_direction"]
 
         votes = payload.get("votes") if isinstance(payload.get("votes"), list) else []
         vote_text = "、".join(
@@ -902,6 +921,14 @@ class OptionsRadarService:
             for row in self.database.recommendations_for_date(session)
         ]
         if views:
+            premium_by_key = {
+                str(event.contract_key): event.premium
+                for event in self.database.flow_events_for_date(session)
+            }
+            for view in views:
+                key = str(view.get("contract_key", ""))
+                if key in premium_by_key and not view.get("premium"):
+                    view["premium"] = premium_by_key[key]
             return sorted(views, key=lambda item: float(item.get("score", 0)), reverse=True)[:5]
         # No analyst confirmation for this session yet: surface recent flow
         # events as observation candidates so the dashboard updates as new
@@ -1092,6 +1119,7 @@ class OptionsRadarService:
                 "event_key": event.event_key,
                 "contract_key": event.contract_key,
                 "symbol": event.symbol,
+                "premium": event.premium,
                 "observed_at": event.observed_at.isoformat(),
                 "signals": [_as_jsonable(signal) for signal in self.database.signals_for_event(event.event_key)],
             })

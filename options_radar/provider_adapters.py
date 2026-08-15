@@ -46,7 +46,7 @@ class FutuUnifiedProvider:
                 endpoint=f"{self.client.host}:{self.client.port}",
             )
         value = self.client.health()
-        connected = bool(getattr(value, "connected", False))
+        connected = bool(getattr(value, "ready", False))
         return ProviderHealth(
             self.name, True, connected, "ready" if connected else "offline",
             message=str(getattr(value, "message", "")),
