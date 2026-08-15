@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import urllib.parse
 from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
@@ -390,6 +391,9 @@ class OptionsRadarService:
         self._started = False
         self._feishu_closed = False
         self._lock = threading.RLock()
+        self._health_cache: Optional[Dict[str, Any]] = None
+        self._health_cache_at: float = 0.0
+        self._health_cache_lock = threading.Lock()
         self.feishu = FeishuBot(
             callbacks=FeishuCallbacks(
                 today_recommendations=self.today_recommendations,
@@ -507,11 +511,17 @@ class OptionsRadarService:
         if rule_messages:
             self.rulebook.compile(rule_messages)
 
-    def _collect_messages(self, backfill: bool = False) -> List[RawMessage]:
+    def _collect_messages(self, backfill: bool = False, news_only: bool = False) -> List[RawMessage]:
         output: List[RawMessage] = []
         for channel_id in self.source.channel_urls:
-            cursor = self.database.get_source_cursor(channel_id)
             role = self.channel_roles.get(channel_id, channel_id)
+            is_news = role in NEWS_CHANNELS
+            if news_only and not is_news:
+                continue
+            if not news_only and is_news:
+                # Regular polls skip the newsfeed; a dedicated hourly job owns it.
+                continue
+            cursor = self.database.get_source_cursor(channel_id)
             fetch_cursor = cursor
             pages = 24
             if backfill:
@@ -697,11 +707,15 @@ class OptionsRadarService:
         source = "top5-" + datetime.utcnow().strftime("%Y%m%d%H%M")
         return self.feishu.enqueue_card(build_card("今日推荐 TOP5", body, "blue"), source_message_id=source)
 
-    def collect(self, backfill: bool = False) -> List[Dict[str, Any]]:
+    def collect(self, backfill: bool = False, news_only: bool = False) -> List[Dict[str, Any]]:
         with self._lock:
             try:
-                messages = self._collect_messages(backfill=backfill)
+                messages = self._collect_messages(backfill=backfill, news_only=news_only)
                 self._ingest(messages)
+                if news_only:
+                    self._last_collection = datetime.utcnow().isoformat()
+                    self._last_error = None
+                    return [{"news": len(messages)}]
                 results = self._evaluate(self._trade_date())
                 self._last_results = results
                 self._last_collection = datetime.utcnow().isoformat()
@@ -962,6 +976,23 @@ class OptionsRadarService:
             watch_symbols = {item.symbol for item in self.database.list_watchlist(enabled_only=True)}
         except Exception:
             pass
+        flow_symbols = set()
+        flow_by_symbol: Dict[str, List[str]] = {}
+        try:
+            with self.database.connect() as connection:
+                flow_symbols = {str(row[0]) for row in connection.execute(
+                    "SELECT DISTINCT symbol FROM flow_events WHERE symbol IS NOT NULL"
+                ).fetchall()}
+                flow_by_symbol = {}
+                for row in connection.execute(
+                    "SELECT symbol, contract_key, premium, observed_at FROM flow_events "
+                    "WHERE symbol IS NOT NULL ORDER BY observed_at DESC"
+                ).fetchall():
+                    flow_by_symbol.setdefault(str(row["symbol"]), []).append(
+                        f"{row['contract_key']} · ${float(row['premium']):,.0f}"
+                    )
+        except Exception:
+            pass
         symbols = set(self._portfolio.keys())
         if not symbols:
             symbols = watch_symbols | set(metadata.keys())
@@ -978,8 +1009,38 @@ class OptionsRadarService:
             item["current_price"] = meta.get("current_price")
             item["change_pct"] = meta.get("change_pct")
             item["updated_at"] = meta.get("updated_at") or ""
+            item["has_flow"] = symbol in flow_symbols
+            if item["has_flow"]:
+                item["flow_contracts"] = flow_by_symbol.get(symbol, [])[:6]
             result[symbol] = item
         return result
+
+    def dashboard_newsfeed(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
+        """Recent newsfeed messages with optional AI Chinese analysis.
+
+        Analysis is produced on demand and cached by the AI store (prompt digest),
+        so re-opening the page does not re-spend tokens.
+        """
+        limit = int(((_payload or {}).get("limit", 30)))
+        try:
+            watch = {item.symbol for item in self.database.list_watchlist(enabled_only=True)}
+        except Exception:
+            watch = set()
+        items = self.database.newsfeed_messages(limit=limit)
+        output = []
+        for item in items:
+            entry = dict(item)
+            if self.ai.enabled:
+                try:
+                    result = self.ai.analyze_news(str(item.get("content", "")), watch)
+                    entry["analysis"] = result.text if not result.ai_degraded else ""
+                    entry["analysis_cached"] = bool(result.cached)
+                except Exception:
+                    entry["analysis"] = ""
+            else:
+                entry["analysis"] = ""
+            output.append(entry)
+        return output
 
     def _refresh_stock_meta(self) -> None:
         """Populate company names, prices and change for portfolio symbols.
@@ -1057,6 +1118,16 @@ class OptionsRadarService:
                 prev_close = _to_float(prev.get("c"))
                 if price is not None and prev_close:
                     change_pct = (price - prev_close) / prev_close
+            if price is None:
+                # Futu provides a realtime stock quote when Alpaca's IEX feed is
+                # empty (for example a thinly covered symbol or market close).
+                try:
+                    futu_snap = self.futu.get_snapshots([f"US.{sym}"])
+                    stock = futu_snap.get(f"US.{sym}")
+                    if stock is not None and stock.last is not None:
+                        price = float(stock.last)
+                except Exception:
+                    pass
             name_en = names.get(sym) or sym
             if name_en == sym and sym not in names and asset_budget > 0:
                 found = _asset_name(sym)
@@ -1237,6 +1308,7 @@ class OptionsRadarService:
         return {
             "recommendations": self.dashboard_recommendations,
             "portfolio": self.dashboard_portfolio,
+            "newsfeed": self.dashboard_newsfeed,
             "portfolio_refresh": self.refresh_portfolio,
             "signals": self.dashboard_signals,
             "rules": self.dashboard_rules,
@@ -1299,15 +1371,37 @@ class OptionsRadarService:
             timezone=self.config.raw.get("timezone", "Asia/Shanghai"), daemon=True,
             executors={"default": ThreadPoolExecutor(1)},
         )
-        self._scheduler.add_job(self.collect, "interval", minutes=6, id="discord-poll", max_instances=1, coalesce=True)
-        self._scheduler.add_job(self.publish_top5, "interval", minutes=5, id="feishu-top5", max_instances=1, coalesce=True)
-        self._scheduler.add_job(self.backfill, "interval", minutes=15, id="discord-rescan", max_instances=1, coalesce=True)
+        # Poll the Discord flow/analyst channels only during the US cash session
+        # (Mon-Fri 09:30-16:00 ET). Outside that window the channels produce no
+        # new actionable cards, so polling is paused to keep resources idle.
+        cash_cron = dict(day_of_week="mon-fri", hour="9-15", timezone="America/New_York")
+        self._scheduler.add_job(
+            self.collect, CronTrigger(minute="*/6", **cash_cron),
+            id="discord-poll", max_instances=1, coalesce=True,
+        )
+        self._scheduler.add_job(
+            self.publish_top5, CronTrigger(minute="*/5", **cash_cron),
+            id="feishu-top5", max_instances=1, coalesce=True,
+        )
+        self._scheduler.add_job(
+            self.backfill, CronTrigger(minute="*/15", **cash_cron),
+            id="discord-rescan", max_instances=1, coalesce=True,
+        )
         self._scheduler.add_job(self.backfill, CronTrigger(hour=16, minute=30, timezone="America/New_York"), id="discord-close-backfill")
-        self._scheduler.add_job(self.sync_broker, "interval", minutes=5, id="ibkr-sync", max_instances=1, coalesce=True)
+        self._scheduler.add_job(
+            self.sync_broker, CronTrigger(minute="*/5", **cash_cron),
+            id="ibkr-sync", max_instances=1, coalesce=True,
+        )
         self._scheduler.add_job(self.publish_daily, CronTrigger(hour=17, minute=15, timezone="America/New_York"), id="daily-report")
         self._scheduler.add_job(self.run_backtests, CronTrigger(hour=18, minute=0, timezone="America/New_York"), id="daily-backtest")
         self._scheduler.add_job(self.run_optimizer, CronTrigger(day_of_week="sun", hour=9, minute=0, timezone="Asia/Shanghai"), id="weekly-optimizer")
         self._scheduler.add_job(self.check_ai_budget, "interval", hours=1, id="ai-budget")
+        # Newsfeed runs around the clock at 1h intervals; it is independent of
+        # the US cash-session poll for flow/analyst channels.
+        self._scheduler.add_job(
+            lambda: self.collect(news_only=True), "interval", hours=1,
+            id="newsfeed-poll", max_instances=1, coalesce=True,
+        )
         self._scheduler.start()
         self._feishu_thread = threading.Thread(target=self._run_feishu, name="feishu-websocket", daemon=True)
         self._feishu_thread.start()
@@ -1324,13 +1418,19 @@ class OptionsRadarService:
         self.ibkr.close()
         self._started = False
 
-    def health(self) -> Dict[str, Any]:
+    def health(self, force: bool = False) -> Dict[str, Any]:
+        """Aggregated system status with a short cache so the diagnostics page
+        and Feishu status commands never block on slow provider probes."""
+        with self._health_cache_lock:
+            if not force and self._health_cache is not None and time.monotonic() - self._health_cache_at < 30:
+                return dict(self._health_cache)
         broker = self.database.latest_broker_snapshot()
-        return {
+        result = {
             "status": "degraded" if self._last_error else ("ok" if self._started else "stopped"),
             "last_collection": self._last_collection, "last_sync": self._last_sync,
             "last_error": self._last_error, "discord": self.source.health(),
             "opend": {"status": "migration_only", "enabled": False},
+            "futu": self.providers.status("futu"),
             "ibkr": self.providers.status("ibkr"),
             "ai": self.ai.health(), "feishu": self.feishu.health(),
             "portfolio": {
@@ -1339,9 +1439,12 @@ class OptionsRadarService:
                 "positions": len(broker.positions) if broker else 0,
             },
             "watchlist_count": len(self._watch_symbols()),
-            "providers": self.providers.statuses(),
             "last_backtest": self._last_backtest, "last_optimization": self._last_optimization,
         }
+        with self._health_cache_lock:
+            self._health_cache = result
+            self._health_cache_at = time.monotonic()
+        return result
 
 
 def create_service(config_path: str, data_dir: str) -> OptionsRadarService:

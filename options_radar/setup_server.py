@@ -487,6 +487,7 @@ def secret_presence() -> Dict[str, bool]:
 PAGE_INFO = {
     "/": ("今日推荐", "recommendations", "按评分排序的前5张候选合约"),
     "/signals": ("信号明细", "signals", "Discord原文、分析师意见和融合过程"),
+    "/newsfeed": ("新闻速递", "newsfeed", "newsfeed 频道实时新闻、AI 翻译与市场影响"),
     "/portfolio": ("自选与持仓", "portfolio", "IBKR组合与富途一次性导入自选"),
     "/backtest": ("回测", "backtest", "模拟盘、回测结算与策略优化"),
     "/system": ("系统诊断", "status", "IB Gateway、Discord、Massive、DeepSeek和飞书"),
@@ -505,6 +506,7 @@ GET_APIS = {
     "/api/backtest": "backtest",
     "/api/providers": "providers",
     "/api/signals": "signals",
+    "/api/newsfeed": "newsfeed",
 }
 
 POST_APIS = {
@@ -777,7 +779,7 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _shell(title: str, content: str, active: str = "") -> str:
         links = (("/", "今日推荐"), ("/signals", "信号明细"),
-                  ("/portfolio", "自选与持仓"), ("/backtest", "回测"),
+                  ("/newsfeed", "新闻速递"), ("/portfolio", "自选与持仓"), ("/backtest", "回测"),
                   ("/system", "系统诊断"), ("/setup", "设置"))
         nav = "".join(
             f'<a class="{"active" if path == active else ""}" href="{path}">{label}</a>' for path, label in links
@@ -804,6 +806,8 @@ pre{{white-space:pre-wrap;word-break:break-word;background:#f0f0f2;color:#3a3a3c
 table{{width:100%;border-collapse:collapse}}th{{color:var(--muted);font-weight:500;text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.04em}}th,td{{padding:11px 12px;border-bottom:1px solid var(--line)}}tr:hover td{{background:#fafafa}}
 summary{{cursor:pointer;font-weight:600}}
 .badge{{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600}}.badge.up{{background:#fdecec;color:#d70015}}.badge.down{{background:#e9f9ef;color:#00a651}}.badge.watch{{background:#eef2ff;color:#0037c1}}
+ul.analyst-votes{{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-wrap:wrap;gap:6px}}ul.analyst-votes li{{background:#f0f0f2;border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:13px}}
+.card.risk{{background:#fff8f0;border-color:#f5d9b8;padding:10px 14px;border-radius:12px}} .card.risk h3{{margin:0 0 4px;font-size:14px}} .card.risk ul{{margin:0;padding-left:18px}}
 @media(max-width:640px){{header{{padding:10px 14px}}nav{{width:100%;margin-left:0;overflow-x:auto}}h1{{font-size:22px}}}}
 </style></head><body><header><span class="logo">Options Radar</span><small>版本 {html.escape(BUILD_VERSION)} · {html.escape(BUILD_SHA[:12])}</small><nav>{nav}</nav></header><main>{content}</main>
 <script>
@@ -933,17 +937,47 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                 score_html = f'{float(score):.1f}' if isinstance(score, (int, float)) else html.escape(str(score))
                 grade = html.escape(str(item.get("grade", "-")))
                 premium_text = format_premium(item.get("premium"))
+                data_quality = str(item.get("data_quality", item.get("market_status", "待行情")))
+                # 休市时行情时间戳必然过期，直接标注休市而不是 missing。
+                market_state = "休市"
+                if data_quality in {"native", "realtime", "ok"}:
+                    market_state = "实时"
+                elif data_quality in {"仅flow", "flow"}:
+                    market_state = "待采集"
+                quote_line = f'bid/ask {bid} / {ask} · 数据 {market_state} · 执行 {html.escape(str(item.get("execution_status", "待行情")))}'
+                # 分析师判断拆成可读的多行，而不是逗号拼接的方块字。
+                reason = str(item.get("reason", ""))
+                vote_segment = ""
+                if "分析师判断" in reason:
+                    vote_part = reason.split("评分组成", 1)[0].replace("分析师判断：", "").strip()
+                    vote_lines = []
+                    for vote in [part.strip().rstrip("；") for part in vote_part.split("、") if part.strip()]:
+                        vote_lines.append(f'<li>{html.escape(vote)}</li>')
+                    if vote_lines:
+                        vote_segment = '<ul class="analyst-votes">' + "".join(vote_lines) + '</ul>'
+                # 风险提示仅在数据异常时展示；正常/休市不刷屏。
+                risk_segment = ""
+                if "风险提示" in reason:
+                    risks = reason.split("风险提示：", 1)[1].split("；执行字段", 1)[0].split("；")
+                    risk_segment = '<div class="card risk"><h3>风险提示</h3><ul>' + "".join(
+                        f'<li>{html.escape(str(risk).strip())}</li>' for risk in risks if risk.strip()
+                    ) + '</ul></div>'
+                remaining = ""
+                if "评分组成" in reason:
+                    remaining = "评分组成：" + reason.split("评分组成：", 1)[1].split("风险提示", 1)[0]
                 cards.append(
                     '<section class="card">'
                     f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:18px">{key}</h2><span class="muted" style="font-size:13px">交易量 {premium_text}</span>{badge}{source_badge}</div>'
                     f'<div style="margin:8px 0 4px"><span style="font-size:24px;font-weight:700">{score_html}</span>'
                     f'<span class="muted" style="margin-left:8px">{grade}级</span></div>'
-                    f'<p style="margin:2px 0" class="muted">bid/ask {bid} / {ask} · 数据 {html.escape(str(item.get("data_quality", item.get("market_status", "待行情"))))} · 执行 {html.escape(str(item.get("execution_status", "待行情")))}</p>'
+                    f'<p style="margin:2px 0" class="muted">{quote_line}</p>'
+                    f'{vote_segment}'
                     f'<p style="margin:2px 0" class="muted">入场 {entry} · 止盈 {take_profit} · 止损 {stop_loss}</p>'
-                    f'<p style="margin:6px 0 0" class="muted">{html.escape(str(item.get("reason", "暂无理由")))}</p>'
+                    f'{risk_segment}'
+                    f'<p style="margin:6px 0 0" class="muted">{html.escape(remaining) if remaining else ""}</p>'
                     '</section>'
                 )
-            return '<div class="grid">' + "".join(cards) + '</div><details class="card" style="margin-top:16px"><summary>评价标准说明</summary><table><tr><th>维度</th><th>权重</th><th>说明</th></tr><tr><td>共识</td><td>40%</td><td>各分析家族（价格行为/动量反转/资金流向）方向一致性，跨家族冲突扣分封顶64</td></tr><tr><td>历史</td><td>20%</td><td>分析师过去推荐的盈亏表现（基于回测结果动态调整）</td></tr><tr><td>信号质量</td><td>15%</td><td>信号完整性×置信度×时效性</td></tr><tr><td>行情质量</td><td>15%</td><td>实时bid/ask、价差、Open Interest验证</td></tr><tr><td>组合适配</td><td>10%</td><td>标的是否在持仓/自选中、仓位集中度</td></tr></table><p>A级≥80分（飞书提醒）｜B级65-79（合格）｜C级50-64（观察榜）｜D级&lt;50（过滤）｜仅flow=无分析师确认的异常期权事件</p></details>'
+            return '<div class="grid">' + "".join(cards) + '</div><details class="card" style="margin-top:16px"><summary>评分体系说明（参考国际常用期权分析框架）</summary><p>候选从 Discord 异常期权/分析师频道采集（解析成交额、持仓、分析师卡片），再叠加以下五维评分。每个维度都用<strong>可验证的数据</strong>计算，不是主观打分：</p><table><tr><th>维度</th><th>权重</th><th>依据</th></tr><tr><td>方向共识</td><td>40%</td><td>四个分析家族（价格行为/均值回归/量化均值回归/流价背离）独立观点的方向与决策（TRADE/WATCH/NO_TRADE）加权一致度；家族间方向冲突直接扣分</td></tr><tr><td>历史胜率</td><td>20%</td><td>各分析师历史推荐的模拟盘盈亏（1/3/5日结算）动态校准权重，类似国际组合的“因子回测”权重</td></tr><tr><td>信号完整度</td><td>15%</td><td>分析师卡片是否给出方向、置信度、入场/止盈/止损、理由等字段的完整程度</td></tr><tr><td>行情质量</td><td>15%</td><td>富途实时 bid/ask、买卖价差、Open Interest、成交量、隐含波动率（IV）——对应流动性检验（类似 CBOE 盘口校验）</td></tr><tr><td>组合适配</td><td>10%</td><td>标的是否已在持仓/自选、仓位集中度是否过高——对应风控的集中度限制</td></tr></table><p>评级：A≥80（飞书提醒）｜B 65-79（合格）｜C 50-64（观察榜）｜D&lt;50（过滤）。仅flow=异常期权事件但分析师尚未确认。</p><p class="muted">数据来源：Discord 频道文本（成交额/分析师观点）、富途 OpenD 实时行情（盘口/OI/IV/希腊字母）、Alpaca/Massive 历史行情（回测）、DeepSeek 仅做翻译与文字整理，不参与任何数值决策。</p></details>'
         if path == "/signals" and isinstance(data, list):
             def format_premium(value: Any) -> str:
                 try:
@@ -1033,11 +1067,9 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                 + "".join(rows) + '</table></section>'
             )
         if path == "/portfolio" and isinstance(data, dict):
-            rows = []
-            for symbol, item in data.items():
+            def render_row(symbol, item):
                 if not isinstance(item, Mapping):
-                    rows.append(f'<tr><td>{html.escape(str(symbol))}</td><td colspan="8">{html.escape(str(item))}</td></tr>')
-                    continue
+                    return f'<tr><td>{html.escape(str(symbol))}</td><td colspan="8">{html.escape(str(item))}</td></tr>'
                 name = html.escape(str(item.get("company_name", "") or ""))
                 name_zh = html.escape(str(item.get("company_name_zh", "") or ""))
                 industry = html.escape(str(item.get("industry", "") or ""))
@@ -1051,12 +1083,25 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                     change_cls = "up" if float(change) >= 0 else "down"
                     change_str = f"{float(change)*100:+.2f}%"
                 display_name = f"{name_zh}（{name}）" if name_zh else name
-                rows.append('<tr><td>{}</td><td class="muted">{}</td><td class="muted">{}</td><td>{}</td><td>{}</td><td class="{}">{}</td><td>{}</td><td>{}</td></tr>'.format(
-                    html.escape(str(symbol)), display_name, industry,
+                flag = '<span class="badge up">异常期权</span>' if item.get("has_flow") else ""
+                row = '<tr><td>{}{}</td><td class="muted">{}</td><td class="muted">{}</td><td>{}</td><td>{}</td><td class="{}">{}</td><td>{}</td><td>{}</td></tr>'.format(
+                    html.escape(str(symbol)), flag, display_name, industry,
                     html.escape(str(item.get("held_quantity", 0))),
                     price_str, change_cls, change_str, float(item.get("concentration", 0) or 0), updated,
-                ))
-            return '<section class="card"><table><tr><th>标的</th><th>公司名称</th><th>行业</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>{}</table></section>'.format("".join(rows) or '<tr><td colspan="8">暂无组合快照</td></tr>')
+                )
+                contracts = item.get("flow_contracts") or []
+                if contracts:
+                    detail = "".join(f'<li>{html.escape(str(c))}</li>' for c in contracts)
+                    row += f'<tr class="flow-detail"><td colspan="8"><details><summary>相关异常期权事件</summary><ul>{detail}</ul></details></td></tr>'
+                return row
+            items = list(data.items())
+            flow_rows = [render_row(s, v) for s, v in items if isinstance(v, Mapping) and v.get("has_flow")]
+            other_rows = [render_row(s, v) for s, v in items if not (isinstance(v, Mapping) and v.get("has_flow"))]
+            sections = []
+            if flow_rows:
+                sections.append('<section class="card"><h2>异常期权相关</h2><table><tr><th>标的</th><th>公司名称</th><th>行业</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + "".join(flow_rows) + '</table></section>')
+            sections.append('<section class="card"><h2>全部自选</h2><table><tr><th>标的</th><th>公司名称</th><th>行业</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + ("".join(other_rows) or '<tr><td colspan="8">暂无组合快照</td></tr>') + '</table></section>')
+            return "".join(sections)
         if path == "/backtest" and isinstance(data, dict):
             replay = data.get("replay") or {}
             ranges = data.get("historical_range") or {}
@@ -1072,16 +1117,63 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
             if paper:
                 parts.append(f'<section class="card"><h2>模拟交易统计</h2><p>平仓: {paper.get("closed",0)} 笔　胜率: {round(paper.get("win_rate",0)*100,1)}%　损益: ${paper.get("realized_pnl",0):,.2f}</p></section>')
             return "".join(parts) if parts else '<section class="card"><p>暂无回测数据。等待系统积累足够交易日后再查看。</p></section>'
+        if path == "/newsfeed" and isinstance(data, list):
+            if not data:
+                return '<section class="card"><p>暂无新闻。newsfeed 频道每小时采集一次。</p></section>'
+            cards = []
+            for item in data:
+                content = html.escape(str(item.get("content", "")))
+                observed = html.escape(str((item.get("observed_at") or "")[:19]))
+                analysis = html.escape(str(item.get("analysis", "") or ""))
+                cached = '<span class="badge watch">AI 分析</span>' if item.get("analysis") else ''
+                cards.append(
+                    '<section class="card">'
+                    f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:16px">{observed}</h2>{cached}</div>'
+                    f'<p style="margin:8px 0 0;white-space:pre-wrap">{content}</p>'
+                    + (f'<div class="card risk" style="margin-top:10px;background:#f0f7ff;border-color:#cfe0f5"><h3>中文分析</h3><p style="margin:4px 0 0">{analysis}</p></div>' if analysis else '')
+                    + '</section>'
+                )
+            return '<div class="grid" style="grid-template-columns:1fr">' + "".join(cards) + '</div>'
         if path == "/system" and isinstance(data, dict):
-            statuses = []
-            for name in ("ibkr", "discord", "ai", "feishu"):
-                value = data.get(name, {})
-                if isinstance(value, dict):
-                    state = value.get("status", value.get("connected", "unknown"))
+            from options_radar.timeutil import us_cash_session_label
+            parts = []
+            overall = str(data.get("status", "unknown"))
+            session_label = us_cash_session_label()
+            parts.append(
+                '<section class="card"><div class="status">'
+                f'<div>系统状态</div><div class="metric">{html.escape(overall)}</div>'
+                f'<div>美股时段</div><div class="metric">{html.escape(session_label)}</div>'
+                f'<div>最近采集</div><div>{html.escape(str((data.get("last_collection") or "从未采集")[:19]))}</div>'
+                f'<div>最近同步</div><div>{html.escape(str((data.get("last_sync") or "从未同步")[:19]))}</div>'
+                '</div></section>'
+            )
+            if data.get("last_error"):
+                parts.append(f'<section class="card error"><h2>最近错误</h2><p>{html.escape(str(data["last_error"]))}</p></section>')
+            def provider_card(name, label, value):
+                if not isinstance(value, dict):
+                    state = "未知"
                 else:
-                    state = value
-                statuses.append('<section class="card"><h2>{}</h2><div class="metric">{}</div></section>'.format(html.escape(name.upper()), html.escape(str(state))))
-            return '<div class="grid">' + "".join(statuses) + '</div>'
+                    state = str(value.get("status", value.get("connected", "未知")))
+                    quality = str(value.get("quality", ""))
+                    if quality and quality not in ("missing", "unknown"):
+                        state = f"{state}（{quality}）"
+                return f'<section class="card"><h2>{label}</h2><div class="metric">{html.escape(state)}</div></section>'
+            grid = [provider_card("futu", "富途 OpenD", data.get("futu")),
+                    provider_card("ibkr", "IBKR", data.get("ibkr")),
+                    provider_card("discord", "Discord", data.get("discord")),
+                    provider_card("ai", "DeepSeek", data.get("ai")),
+                    provider_card("feishu", "飞书", data.get("feishu"))]
+            parts.append('<section class="card"><h2>数据源</h2><div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">' + "".join(grid) + '</div></section>')
+            portfolio = data.get("portfolio") or {}
+            parts.append(
+                '<section class="card"><div class="status">'
+                f'<div>持仓来源</div><div>{html.escape(str(portfolio.get("source", "无"))) }</div>'
+                f'<div>持仓数</div><div>{portfolio.get("positions", 0)}</div>'
+                f'<div>自选数</div><div>{data.get("watchlist_count", 0)}</div>'
+                f'<div>净值可用</div><div>{"是" if portfolio.get("nav_present") else "否"}</div>'
+                '</div></section>'
+            )
+            return "".join(parts)
         return '<section class="card"><p>数据已加载。展开下方“查看原始数据”查看完整内容。</p></section>'
 
     @staticmethod

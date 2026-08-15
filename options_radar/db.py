@@ -399,6 +399,27 @@ class Database:
                 ).fetchone()
                 return int(row["id"]), False
 
+    def newsfeed_messages(self, limit: int = 50, since: Optional[datetime] = None) -> List[Dict[str, object]]:
+        """Return recent raw newsfeed messages (analyst in news channel names)."""
+        import json as _json
+        sql = "SELECT * FROM raw_messages WHERE analyst IN ('newsfeed','news','news_feed')"
+        params: List[Any] = []
+        if since is not None:
+            sql += " AND observed_at >= ?"
+            params.append(since.isoformat())
+        sql += " ORDER BY observed_at DESC LIMIT ?"
+        params.append(max(1, int(limit)))
+        with self.connect() as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [{
+            "id": int(row["id"]), "channel": str(row["channel"]), "analyst": str(row["analyst"]),
+            "observed_at": str(row["observed_at"]), "source_timestamp": str(row["source_timestamp"] or ""),
+            "content": str(row["content"]), "screenshot_path": str(row["screenshot_path"] or ""),
+        } for row in rows]
+
+    def save_raw_message(self, message: RawMessage) -> Tuple[int, bool]:
+        return self.insert_raw_message(message)
+
     def insert_signal(self, signal: ParsedSignal) -> Tuple[int, bool]:
         with self.connect() as connection:
             try:

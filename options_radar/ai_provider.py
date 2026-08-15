@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Type
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Type
 
 from pydantic import BaseModel, Field, ValidationError, validator
 
@@ -364,6 +364,27 @@ class DeepSeekProvider(AIProvider):
         except (ValueError, TypeError):
             pass
         return result
+
+    def analyze_news(self, text: str, watch_symbols: Optional[Iterable[str]] = None) -> AITextResult:
+        """Translate a news item into Chinese and explain its market impact.
+
+        Returns plain Chinese prose (short).  The prompt asks for a translation,
+        the likely affected sectors/tickers, and any direct market impact.
+        """
+        if not text or not text.strip():
+            return AITextResult(ai_degraded=True, reason="empty_text")
+        context = {
+            "text": text.strip()[:4000],
+            "watchlist": sorted({s for s in (watch_symbols or []) if s})[:80],
+        }
+        prompt = {
+            "context": context,
+            "instruction": (
+                "把上面新闻用简体中文概括（不超过80字）；再给出可能受影响的市场/板块和具体标的"
+                "（若在自选列表中请标注）；最后一句说明可能的市场影响。总长不超过180字，简洁。"
+            ),
+        }
+        return self._text_operation("news_analysis", prompt, use_pro=False)
 
     def health(self, check_remote: bool = False) -> Dict[str, Any]:
         now = self._utc_now()
