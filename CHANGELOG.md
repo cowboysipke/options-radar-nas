@@ -228,3 +228,22 @@
 36. **系统诊断页优化**
     - 状态页改为结构化卡片：系统状态/美股时段/最近采集/数据源（富途/IBKR/Discord/AI/飞书）/持仓概览
     - `health()` 增加 30 秒缓存，去掉逐个 provider 的实时网络探测，打开不再卡
+
+### 2026-08-15 分析家族修正 + 功能精简
+
+37. **qmr/mr 分析家族区分**
+    - `qmr` 从 `momentum_reversal` 改为 `quant_mean_reversion`（量化均值回归），`mr` 改为 `mean_reversion`（均值回归）
+    - 修复「仅一个独立分析家族确认」误判：此前 mr/qmr 归为同一 family 导致 4 个分析师只剩 1 个 family，评分封顶 64
+    - 迁移 654 条历史信号的 analyst_family；修正后开市+富途实时行情下 NVDA 71.67 B 级、IWM 72.46 B 级（此前全部 64 分 C 级）
+    - 更新 parser.py / rulebook.py family 映射与对应测试
+
+38. **风险提示文案改进**
+    - 「行情缺失或服务异常」→ 区分「暂未取到实时行情」与「行情时间戳已过期（休市），需等开市后刷新」
+    - 「富途原生盘口或OI不完整」→ 区分「盘口与OI为过期数据（休市）」与「盘口或OI暂不完整」
+
+39. **功能精简**
+    - IBKR 仅保留持仓同步（`sync_broker`/`/api/ibkr/sync`/`ibkr-sync` 调度）；移除作为行情 provider 的所有入口
+    - 移除 `discover_ibkr` 接口、`/api/ibkr/discover` 路由与「检测IB Gateway」按钮
+    - provider registry 精简为 futu/alpaca/massive；移除 tradier/marketdata_app 构造与 secret 引用
+    - 历史行情仅走 Alpaca/Massive（移除 IBKR 历史适配）；`_resolve_contract`（遗留 ibkr 期权链）删除
+    - /providers 页只保留 futu/alpaca/massive 操作 + IBKR 持仓同步按钮

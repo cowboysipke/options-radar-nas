@@ -65,14 +65,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "ibkr": {"enabled": True, "host": "127.0.0.1", "port": 0, "client_id": 71,
              "readonly": True, "market_data_type": 3, "flex_query_id": ""},
     "providers": {
-        "market_priority": ["ibkr", "massive", "futu", "tradier", "alpaca", "marketdata_app"],
-        "enabled": {"futu": False, "ibkr": True, "tradier": False, "alpaca": False,
-                    "massive": True, "marketdata_app": False},
+        "market_priority": ["futu", "alpaca", "massive"],
+        "enabled": {"futu": True, "alpaca": True, "massive": False},
         "portfolio": {"aggregate_enabled_accounts": True},
         "execution": {"accepted_quality": ["realtime"], "max_quote_age_seconds": 60,
                       "conflict_threshold_pct": 15},
     },
-    "market": {"provider": "ibkr"},
+    "market": {"provider": "futu"},
     "ai": {
         "provider": "deepseek",
         "base_url": "https://api.deepseek.com",
@@ -106,12 +105,9 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "feishu_app_secret": "/data/secrets/feishu_app_secret",
         "feishu_webhook": "/data/secrets/feishu_webhook",
         "futu_login_password_md5": "/data/secrets/futu_login_password_md5",
-        "ibkr_flex_token": "/data/secrets/ibkr_flex_token",
         "massive_api_key": "/data/secrets/massive_api_key",
         "alpaca_api_key": "/data/secrets/alpaca_api_key",
         "alpaca_api_secret": "/data/secrets/alpaca_api_secret",
-        "marketdata_api_key": "/data/secrets/marketdata_api_key",
-        "tradier_token": "/data/secrets/tradier_token",
         "discord_user_token": "/data/secrets/discord_user_token",
     },
     "setup_completed": False,
@@ -520,7 +516,6 @@ POST_APIS = {
     "/api/actions/feishu-test": "feishu_test",
     "/api/actions/discord-login": "discord_login",
     "/api/actions/deepseek-test": "deepseek_test",
-    "/api/ibkr/discover": "ibkr_discover",
     "/api/ibkr/sync": "ibkr_sync",
     "/api/portfolio/refresh": "portfolio_refresh",
 }
@@ -864,7 +859,6 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
             action_cards = self._action_forms(csrf, (("/futu/import-watchlist", "从富途导入自选"), ("/api/portfolio/refresh", "手动刷新持仓")))
         elif path == "/system":
             action_cards = self._action_forms(csrf, (
-                ("/api/ibkr/discover", "检测IB Gateway"),
                 ("/api/providers/massive/test", "测试Massive"),
                 ("/api/actions/deepseek-test", "测试DeepSeek"),
                 ("/api/actions/feishu-test", "测试飞书"),
@@ -1180,12 +1174,8 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
     def _provider_actions(csrf: str) -> str:
         labels = (
             ("futu", "富途 OpenD"),
-            ("ibkr", "IBKR TWS/Gateway"),
-            ("ibkr_flex", "IBKR Flex"),
-            ("massive", "Massive"),
             ("alpaca", "Alpaca"),
-            ("marketdata_app", "MarketData.app"),
-            ("tradier", "Tradier"),
+            ("massive", "Massive"),
         )
         cards = []
         for provider, label in labels:
@@ -1202,13 +1192,13 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
             )
             cards.append(f'<section class="card"><h2>{html.escape(label)}</h2>{actions}{priority}</section>')
         ibkr = SetupRequestHandler._action_forms(
-            csrf, (("/api/ibkr/discover", "扫描本机 TWS/Gateway"), ("/api/ibkr/sync", "同步 IBKR")),
+            csrf, (("/api/ibkr/sync", "同步 IBKR 持仓"),),
         )
         return '<div class="card"><b>自动选择主数据源，或逐个调整优先级</b></div><div class="grid">' + "".join(cards) + "</div>" + ibkr
 
     @staticmethod
     def _action_forms(csrf: str, actions: Tuple[Tuple[str, str], ...]) -> str:
-        labels = {"/api/actions/collect":"立即采集并生成推荐","/api/actions/report":"生成日报","/api/actions/backup":"创建备份","/api/actions/feishu-test":"测试飞书","/api/actions/discord-login":"打开Discord登录","/api/actions/deepseek-test":"测试DeepSeek","/api/ibkr/discover":"检测IB Gateway","/api/ibkr/sync":"同步IBKR持仓","/api/providers/massive/test":"测试Massive","/futu/import-watchlist":"从富途导入自选"}
+        labels = {"/api/actions/collect":"立即采集并生成推荐","/api/actions/report":"生成日报","/api/actions/backup":"创建备份","/api/actions/feishu-test":"测试飞书","/api/actions/discord-login":"打开Discord登录","/api/actions/deepseek-test":"测试DeepSeek","/api/ibkr/sync":"同步IBKR持仓","/api/providers/massive/test":"测试Massive","/futu/import-watchlist":"从富途导入自选"}
         return '<div class="card"><b>快捷操作</b><div>' + "".join(f'<form data-ajax="1" style="display:inline" method="post" action="{path}"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button>{html.escape(labels.get(path, label))}</button></form>' for path, label in actions) + "</div></div>"
 
     def _setup_page(self, csrf: str, message: str = "") -> str:

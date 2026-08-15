@@ -14,8 +14,8 @@ from .models import RawMessage
 
 DEFAULT_FAMILIES = {
     "pa": "price_action",
-    "mr": "momentum_reversal",
-    "qmr": "momentum_reversal",
+    "mr": "mean_reversion",
+    "qmr": "quant_mean_reversion",
     "fpd": "flow_positioning",
     "fqd": "flow_positioning",
 }

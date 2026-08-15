@@ -45,7 +45,10 @@ def _family_trade_votes(signals: List[ParsedSignal], weights: Dict[str, float]) 
 
 def _market_quality(market: Optional[MarketSnapshot], risk_flags: List[str]) -> float:
     if market is None or market.data_status not in {"ok", "eod"}:
-        risk_flags.append("行情缺失或服务异常")
+        if market is not None and market.data_status == "stale":
+            risk_flags.append("行情时间戳已过期（休市或数据源延迟），需等开市后刷新")
+        else:
+            risk_flags.append("暂未取到实时行情，等待数据源恢复")
         return 30.0
     is_eod = market.data_status == "eod"
     score = 70.0 if is_eod else 100.0
@@ -199,7 +202,10 @@ def evaluate_consensus(
         and market.data_status == "ok"
     )
     if not native_execution_fields:
-        risk_flags.append("富途原生盘口或OI不完整，进入前等待实时数据恢复")
+        if market is not None and market.data_status == "stale":
+            risk_flags.append("盘口与OI为过期数据（休市），开市后自动恢复可执行行情")
+        elif market is None or market.data_status != "ok":
+            risk_flags.append("盘口或OI暂不完整，等待实时数据恢复")
 
     score = round(clamp(score), 2)
     if score >= 80 and active_families >= 2 and trade_count >= 2 and not disagreement:

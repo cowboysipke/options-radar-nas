@@ -24,7 +24,7 @@ class RulebookTests(unittest.TestCase):
                 ),
             ])
             self.assertTrue(result.version.startswith("20260811-"))
-            self.assertEqual(result.analyst_profiles["qmr"]["family"], "momentum_reversal")
+            self.assertEqual(result.analyst_profiles["qmr"]["family"], "quant_mean_reversion")
             self.assertEqual(result.terminology["入场"]["normalized_value"], "ENTRY")
             self.assertEqual(len(db.source_rules(active_only=True)), 2)
             self.assertEqual(len(db.analyst_profiles()), 2)

@@ -22,6 +22,9 @@
 - [x] 自选与持仓页：异常期权分组置顶高亮 + 富途正股行情兜底
 - [x] 新闻速递页（/newsfeed）：AI 中文翻译 + 市场影响 + 关联自选，1h 采集
 - [x] 系统诊断页优化（health 30s 缓存，打开不卡）
+- [x] qmr/mr 分析家族区分（修复「仅一个独立分析家族确认」封顶 64，开市后评分上 60+）
+- [x] 风险提示文案区分休市/缺失
+- [x] 功能精简：IBKR 仅持仓同步，移除 tradier/marketdata_app/ibkr 行情入口
 - [ ] BUG-001 最终验证：美股开盘时确认富途行情变 native（`_evaluate` 自动用富途实时数据）
 - [ ] Phase A3：解决 Alpaca OPRA agreement / 历史期权 bars 权限（富途历史 K 线仍超时，回测暂用 Massive/Alpaca/合成）
 

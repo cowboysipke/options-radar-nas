@@ -28,8 +28,8 @@ MONEY = re.compile(r"Premium\s*\$([\d,.]+)\s*([KMB])?", re.IGNORECASE)
 
 ANALYST_FAMILIES = {
     "pa": "price_action",
-    "mr": "momentum_reversal",
-    "qmr": "momentum_reversal",
+    "mr": "mean_reversion",
+    "qmr": "quant_mean_reversion",
     "fpd": "flow_positioning",
     "fqd": "flow_positioning",
 }

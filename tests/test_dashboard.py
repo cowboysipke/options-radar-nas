@@ -164,9 +164,13 @@ class DashboardHttpTests(unittest.TestCase):
         status, _, page = self.request("GET", "/providers", headers={"Cookie": self.cookie})
         self.assertEqual(status, 200)
         self.assertIn("数据源诊断", page)
-        self.assertIn("IBKR", page)
+        self.assertIn("富途 OpenD", page)
+        self.assertIn("Alpaca", page)
         self.assertIn("Massive", page)
-        self.assertIn('/api/providers/ibkr/test', page)
+        self.assertIn('/api/providers/futu/test', page)
+        # IBKR is kept only for position sync, not as a market-data provider.
+        self.assertNotIn('/api/providers/ibkr/test', page)
+        self.assertIn('/api/ibkr/sync', page)
         self.assertIn(("providers", {}), self.calls)
 
     def test_dynamic_provider_status_and_provenance_routes(self):
