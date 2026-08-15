@@ -48,7 +48,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "mr": "mr分析师",
             "qmr": "qmr分析师",
             "fpd": "fpd分析师",
-            "newsfeed": "newsfeed",
         },
     },
     "notifications": {"provider": "feishu", "feishu_app_id": ""},
@@ -201,7 +200,6 @@ FIELDS = (
     Field("mr_channel", "discord.channel_names.mr", "MR分析师频道", _plain),
     Field("qmr_channel", "discord.channel_names.qmr", "QMR分析师频道", _plain),
     Field("fpd_channel", "discord.channel_names.fpd", "FPD分析师频道", _plain),
-    Field("newsfeed_channel", "discord.channel_names.newsfeed", "新闻频道", _plain),
     Field("feishu_app_id", "notifications.feishu_app_id", "飞书 App ID", _plain),
     Field("flash_model", "ai.flash_model", "DeepSeek日常模型", _model),
     Field("pro_model", "ai.pro_model", "DeepSeek复核模型", _model),
@@ -291,7 +289,7 @@ class SetupConfigStore:
                 raise ValueError("Discord频道名称不可重复")
             data["discord"]["source_channels"] = {
                 channel_names[source]: source
-                for source in ("flow", "pa", "mr", "qmr", "fpd", "newsfeed")
+                for source in ("flow", "pa", "mr", "qmr", "fpd")
                 if source in channel_names
             }
             data["market"]["provider"] = "futu"
@@ -473,7 +471,6 @@ def secret_presence() -> Dict[str, bool]:
 PAGE_INFO = {
     "/": ("今日推荐", "recommendations", "按评分排序的前5张候选合约"),
     "/signals": ("信号明细", "signals", "Discord原文、分析师意见和融合过程"),
-    "/newsfeed": ("新闻速递", "newsfeed", "newsfeed 频道实时新闻、AI 翻译与市场影响"),
     "/portfolio": ("自选与持仓", "portfolio", "IBKR组合与富途一次性导入自选"),
     "/backtest": ("回测", "backtest", "模拟盘、回测结算与策略优化"),
     "/system": ("系统诊断", "status", "富途 OpenD、Discord、DeepSeek、飞书与持仓同步状态"),
@@ -492,7 +489,6 @@ GET_APIS = {
     "/api/backtest": "backtest",
     "/api/providers": "providers",
     "/api/signals": "signals",
-    "/api/newsfeed": "newsfeed",
 }
 
 POST_APIS = {
@@ -506,7 +502,6 @@ POST_APIS = {
     "/api/actions/feishu-test": "feishu_test",
     "/api/actions/discord-login": "discord_login",
     "/api/actions/deepseek-test": "deepseek_test",
-    "/api/actions/news-backfill": "news_backfill",
     "/api/ibkr/sync": "ibkr_sync",
     "/api/portfolio/refresh": "portfolio_refresh",
 }
@@ -765,7 +760,7 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
     @staticmethod
     def _shell(title: str, content: str, active: str = "") -> str:
         links = (("/", "今日推荐"), ("/signals", "信号明细"),
-                  ("/newsfeed", "新闻速递"), ("/portfolio", "自选与持仓"), ("/backtest", "回测"),
+                  ("/portfolio", "自选与持仓"), ("/backtest", "回测"),
                   ("/system", "系统诊断"), ("/setup", "设置"))
         nav = "".join(
             f'<a class="{"active" if path == active else ""}" href="{path}">{label}</a>' for path, label in links
@@ -858,8 +853,6 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                 ("/api/actions/feishu-test", "测试飞书"),
                 ("/api/actions/backup", "创建备份"),
             ))
-        elif path == "/newsfeed":
-            action_cards = self._action_forms(csrf, (("/api/actions/news-backfill", "回填最近7天新闻"),))
         elif path == "/providers":
             action_cards = self._provider_actions(csrf)
         content = f'<h1>{html.escape(title)}</h1><p class="sub">{html.escape(description)}</p>{self._date_selector(path, params)}<div id="action-result"></div>{action_cards}{self._visual_summary(path, data)}<details class="card"><summary>查看原始数据</summary><pre>{encoded}</pre></details>'
@@ -1174,33 +1167,6 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
             if paper:
                 parts.append(f'<section class="card"><h2>模拟交易统计</h2><p>平仓: {paper.get("closed",0)} 笔　胜率: {round(paper.get("win_rate",0)*100,1)}%　损益: ${paper.get("realized_pnl",0):,.2f}</p></section>')
             return "".join(parts) if parts else '<section class="card"><p>暂无回测数据。等待系统积累足够交易日后再查看。</p></section>'
-        if path == "/newsfeed" and isinstance(data, dict):
-            weekly = str(data.get("weekly", "") or "")
-            items = data.get("items") if isinstance(data.get("items"), list) else []
-            parts = []
-            if weekly:
-                parts.append(
-                    '<section class="card"><h2>最近 7 天新闻综述</h2>'
-                    f'<p style="white-space:pre-wrap;margin:8px 0 0">{html.escape(weekly)}</p></section>'
-                )
-            if not items:
-                parts.append('<section class="card"><p>暂无新闻。可点击右上角「回填最近7天新闻」采集历史，之后每小时自动更新。</p></section>')
-                return "".join(parts)
-            cards = []
-            for item in items:
-                content = html.escape(str(item.get("content", "")))
-                observed = html.escape(str((item.get("observed_at") or "")[:19]))
-                analysis = html.escape(str(item.get("analysis", "") or ""))
-                cached = '<span class="badge watch">中文</span>' if item.get("analysis") else ''
-                cards.append(
-                    '<section class="card">'
-                    f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:16px">{observed}</h2>{cached}</div>'
-                    f'<p style="margin:8px 0 0;white-space:pre-wrap">{content}</p>'
-                    + (f'<p style="margin:8px 0 0;color:#3a5d8f;background:#f0f7ff;border-radius:8px;padding:8px 12px">{analysis}</p>' if analysis else '')
-                    + '</section>'
-                )
-            parts.append('<div class="grid" style="grid-template-columns:1fr">' + "".join(cards) + '</div>')
-            return "".join(parts)
         if path == "/system" and isinstance(data, dict):
             from options_radar.timeutil import us_cash_session_label
             parts = []
@@ -1279,7 +1245,7 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
         return '<div class="card"><b>快捷操作</b><div>' + "".join(f'<form data-ajax="1" style="display:inline" method="post" action="{path}"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button>{html.escape(labels.get(path, label))}</button></form>' for path, label in actions) + "</div></div>"
 
     def _setup_page(self, csrf: str, message: str = "") -> str:
-        display_labels = {"timezone":"\u65f6\u533a","discord_server":"Discord\u670d\u52a1\u5668","flow_channel":"\u5f02\u5e38\u671f\u6743\u9891\u9053","pa_channel":"PA\u5206\u6790\u5e08\u9891\u9053","mr_channel":"MR\u5206\u6790\u5e08\u9891\u9053","qmr_channel":"QMR\u5206\u6790\u5e08\u9891\u9053","fpd_channel":"FPD\u5206\u6790\u5e08\u9891\u9053","newsfeed_channel":"\u65b0\u95fb\u9891\u9053","feishu_app_id":"\u98de\u4e66 App ID","flash_model":"DeepSeek\u65e5\u5e38\u6a21\u578b","pro_model":"DeepSeek\u590d\u6838\u6a21\u578b","report_delay":"\u6536\u76d8\u540e\u65e5\u62a5\u5ef6\u8fdf\uff08\u5206\u949f\uff09"}
+        display_labels = {"timezone":"\u65f6\u533a","discord_server":"Discord\u670d\u52a1\u5668","flow_channel":"\u5f02\u5e38\u671f\u6743\u9891\u9053","pa_channel":"PA\u5206\u6790\u5e08\u9891\u9053","mr_channel":"MR\u5206\u6790\u5e08\u9891\u9053","qmr_channel":"QMR\u5206\u6790\u5e08\u9891\u9053","fpd_channel":"FPD\u5206\u6790\u5e08\u9891\u9053","feishu_app_id":"\u98de\u4e66 App ID","flash_model":"DeepSeek\u65e5\u5e38\u6a21\u578b","pro_model":"DeepSeek\u590d\u6838\u6a21\u578b","report_delay":"\u6536\u76d8\u540e\u65e5\u62a5\u5ef6\u8fdf\uff08\u5206\u949f\uff09"}
         data = self.app.store.load()
         inputs = []
         for field in FIELDS:

@@ -27,7 +27,6 @@ class SetupConfigTests(unittest.TestCase):
             loaded = SetupConfigStore(path).load()
             self.assertEqual(loaded["discord"]["channel_names"]["flow"], "old-flow")
             self.assertEqual(loaded["discord"]["channel_names"]["fpd"], "old-fpd")
-            self.assertEqual(loaded["discord"]["channel_names"]["newsfeed"], "newsfeed")
 
     def test_initializes_and_updates_only_whitelisted_non_secret_fields(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -43,7 +42,6 @@ class SetupConfigTests(unittest.TestCase):
                 "mr_channel": "mr-room",
                 "qmr_channel": "qmr-room",
                 "fpd_channel": "fpd-room",
-                "newsfeed_channel": "newsfeed-room",
                 "feishu_app_id": "cli_123",
                 "ibkr_query_id": "456",
                 "flash_model": "deepseek-chat",
@@ -56,7 +54,6 @@ class SetupConfigTests(unittest.TestCase):
             self.assertTrue(saved["setup_completed"])
             self.assertEqual(saved["discord"]["source_channels"]["flow-room"], "flow")
             self.assertEqual(saved["discord"]["source_channels"]["fpd-room"], "fpd")
-            self.assertEqual(saved["discord"]["source_channels"]["newsfeed-room"], "newsfeed")
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("must-not-be-saved", text)
             self.assertNotIn("/tmp/attacker", text)
@@ -72,7 +69,7 @@ class SetupConfigTests(unittest.TestCase):
             form = {
                 "timezone": "Asia/Shanghai", "discord_server": "Alpha",
                 "flow_channel": "flow", "pa_channel": "pa", "mr_channel": "mr",
-                "qmr_channel": "qmr", "fpd_channel": "fpd", "newsfeed_channel": "newsfeed",
+                "qmr_channel": "qmr", "fpd_channel": "fpd",
                 "feishu_app_id": "cli_123",
                 "futu_user_id": "10001", "flash_model": "deepseek-chat",
                 "pro_model": "deepseek-reasoner", "report_delay": "75",
@@ -90,7 +87,6 @@ class SetupConfigTests(unittest.TestCase):
             store = SetupConfigStore(Path(directory) / "config.yaml")
             values = {field: "same" for field in (
                 "discord_server", "flow_channel", "pa_channel", "mr_channel", "qmr_channel", "fpd_channel",
-                "newsfeed_channel",
                 "feishu_app_id", "ibkr_query_id",
             )}
             values.update(timezone="UTC", flash_model="model-a", pro_model="model-b", report_delay="75")

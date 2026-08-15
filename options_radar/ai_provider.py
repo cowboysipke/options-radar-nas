@@ -11,7 +11,7 @@ from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Type
+from typing import Any, Callable, Dict, Iterator, List, Optional, Type
 
 from pydantic import BaseModel, Field, ValidationError, validator
 
@@ -364,42 +364,6 @@ class DeepSeekProvider(AIProvider):
         except (ValueError, TypeError):
             pass
         return result
-
-    def analyze_news(self, text: str, watch_symbols: Optional[Iterable[str]] = None) -> AITextResult:
-        """Translate a news item into concise Chinese.
-
-        Deliberately light: the per-item call only translates so weekly
-        analysis (summarize_news_week) carries the market-impact reasoning and
-        keeps token spend bounded.
-        """
-        if not text or not text.strip():
-            return AITextResult(ai_degraded=True, reason="empty_text")
-        prompt = {
-            "text": text.strip()[:4000],
-            "instruction": "把上面新闻翻译成简体中文，概括要点，不超过100字，不要补充分析或观点。",
-        }
-        return self._text_operation("news_translate", prompt, use_pro=False)
-
-    def summarize_news_week(self, items: Iterable[str], watch_symbols: Optional[Iterable[str]] = None) -> AITextResult:
-        """Aggregate the last 7 days of news into one Chinese weekly briefing.
-
-        One call per 7-day window (prompt-digest cached) covers market themes,
-        likely affected sectors, and anything relevant to the watchlist.
-        """
-        texts = [str(item).strip() for item in items if str(item).strip()]
-        if not texts:
-            return AITextResult(ai_degraded=True, reason="empty_items")
-        # Keep the payload bounded so one window never burns an outsized prompt.
-        joined = "\n---\n".join(text[:500] for text in texts)[:6000]
-        prompt = {
-            "news": joined,
-            "watchlist": sorted({s for s in (watch_symbols or []) if s})[:80],
-            "instruction": (
-                "以上是最近7天的财经新闻。请输出简体中文周报：1) 本周大事记（按主题归纳，最多5条，每条一句话）；"
-                "2) 市场主题与可能受影响板块；3) 与自选列表中重叠的标的及其潜在影响。总长不超过300字。"
-            ),
-        }
-        return self._text_operation("news_week", prompt, use_pro=False)
 
     def health(self, check_remote: bool = False) -> Dict[str, Any]:
         now = self._utc_now()

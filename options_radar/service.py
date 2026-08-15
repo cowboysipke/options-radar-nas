@@ -47,9 +47,6 @@ from .timeutil import us_session_date_from_china_time
 
 
 RULE_CHANNELS = {"guide", "subscriptions", "rules", "concepts"}
-# News channels are collected and stored for context but never parsed into
-# flow events or analyst signals.
-NEWS_CHANNELS = {"newsfeed", "news", "news_feed"}
 
 
 def _iso(value: Any) -> Any:
@@ -486,9 +483,6 @@ class OptionsRadarService:
                 if created:
                     rule_messages.append(message)
                 continue
-            if message.analyst in NEWS_CHANNELS:
-                # Store for context; never parse into signals.
-                continue
             if not created:
                 continue
             if message.analyst == "flow":
@@ -506,26 +500,17 @@ class OptionsRadarService:
         if rule_messages:
             self.rulebook.compile(rule_messages)
 
-    def _collect_messages(self, backfill: bool = False, news_only: bool = False) -> List[RawMessage]:
+    def _collect_messages(self, backfill: bool = False) -> List[RawMessage]:
         output: List[RawMessage] = []
         for channel_id in self.source.channel_urls:
             role = self.channel_roles.get(channel_id, channel_id)
-            is_news = role in NEWS_CHANNELS
-            if news_only and not is_news:
-                continue
-            if not news_only and is_news:
-                # Regular polls skip the newsfeed; a dedicated hourly job owns it.
-                continue
             cursor = self.database.get_source_cursor(channel_id)
             fetch_cursor = cursor
             pages = 24
             if backfill:
-                # News backfill pulls a week of history; the regular rescan
-                # only needs a few days to reconcile missed flow/analyst cards.
-                window_hours = 7 * 24 if news_only else 96
                 fetch_cursor = SourceCursor(
                     channel_id=channel_id, last_message_id="0",
-                    last_timestamp=datetime.utcnow() - timedelta(hours=window_hours),
+                    last_timestamp=datetime.utcnow() - timedelta(hours=96),
                 )
                 pages = 40
             try:
@@ -690,15 +675,11 @@ class OptionsRadarService:
         source = "top5-" + datetime.utcnow().strftime("%Y%m%d%H%M")
         return self.feishu.enqueue_card(build_card("今日推荐 TOP5", body, "blue"), source_message_id=source)
 
-    def collect(self, backfill: bool = False, news_only: bool = False) -> List[Dict[str, Any]]:
+    def collect(self, backfill: bool = False) -> List[Dict[str, Any]]:
         with self._lock:
             try:
-                messages = self._collect_messages(backfill=backfill, news_only=news_only)
+                messages = self._collect_messages(backfill=backfill)
                 self._ingest(messages)
-                if news_only:
-                    self._last_collection = datetime.utcnow().isoformat()
-                    self._last_error = None
-                    return [{"news": len(messages)}]
                 results = self._evaluate(self._trade_date())
                 self._last_results = results
                 self._last_collection = datetime.utcnow().isoformat()
@@ -1026,47 +1007,6 @@ class OptionsRadarService:
             self._group_cache_at = now
             return dict(mapping)
 
-    def dashboard_newsfeed(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
-        """Recent newsfeed messages with optional AI Chinese analysis.
-
-        Only a small batch of brand-new items is analysed per page view to bound
-        AI spend; previously analysed items are served from the prompt-digest
-        cache and cost nothing.
-        """
-        limit = min(50, int(((_payload or {}).get("limit", 10))))
-        try:
-            watch = {item.symbol for item in self.database.list_watchlist(enabled_only=True)}
-        except Exception:
-            watch = set()
-        items = self.database.newsfeed_messages(limit=limit)
-        output = []
-        analysed = 0
-        for item in items:
-            entry = dict(item)
-            if self.ai.enabled and analysed < 5:
-                try:
-                    result = self.ai.analyze_news(str(item.get("content", "")), watch)
-                    entry["analysis"] = result.text if not result.ai_degraded else ""
-                    entry["analysis_cached"] = bool(result.cached)
-                    if not result.cached and entry["analysis"]:
-                        analysed += 1
-                except Exception:
-                    entry["analysis"] = ""
-            else:
-                entry["analysis"] = ""
-            output.append(entry)
-        weekly = ""
-        try:
-            since = datetime.utcnow() - timedelta(days=7)
-            week_items = self.database.newsfeed_messages(limit=200, since=since)
-            if week_items and self.ai.enabled:
-                texts = [str(item.get("content", "")) for item in week_items]
-                result = self.ai.summarize_news_week(texts, watch)
-                weekly = result.text if not result.ai_degraded else ""
-        except Exception:
-            weekly = ""
-        return {"weekly": weekly, "items": output}
-
     def _refresh_stock_meta(self) -> None:
         """Populate company names, prices and change for portfolio symbols.
 
@@ -1392,8 +1332,6 @@ class OptionsRadarService:
         return {
             "recommendations": self.dashboard_recommendations,
             "portfolio": self.dashboard_portfolio,
-            "newsfeed": self.dashboard_newsfeed,
-            "news_backfill": lambda _payload: self.collect(news_only=True, backfill=True),
             "portfolio_refresh": self.refresh_portfolio,
             "signals": self.dashboard_signals,
             "rules": self.dashboard_rules,
@@ -1480,12 +1418,6 @@ class OptionsRadarService:
         self._scheduler.add_job(self.run_backtests, CronTrigger(hour=18, minute=0, timezone="America/New_York"), id="daily-backtest")
         self._scheduler.add_job(self.run_optimizer, CronTrigger(day_of_week="sun", hour=9, minute=0, timezone="Asia/Shanghai"), id="weekly-optimizer")
         self._scheduler.add_job(self.check_ai_budget, "interval", hours=1, id="ai-budget")
-        # Newsfeed runs around the clock at 1h intervals; it is independent of
-        # the US cash-session poll for flow/analyst channels.
-        self._scheduler.add_job(
-            lambda: self.collect(news_only=True), "interval", hours=1,
-            id="newsfeed-poll", max_instances=1, coalesce=True,
-        )
         self._scheduler.start()
         self._feishu_thread = threading.Thread(target=self._run_feishu, name="feishu-websocket", daemon=True)
         self._feishu_thread.start()
