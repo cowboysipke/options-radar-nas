@@ -785,13 +785,27 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
         return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title>
 <style>
-:root{{--ink:#172033;--muted:#64748b;--blue:#2563eb;--bg:#f3f6fb;--card:#fff;--line:#dbe3ef}}
-*{{box-sizing:border-box}}body{{font:15px system-ui,-apple-system,"Microsoft YaHei",sans-serif;margin:0;background:var(--bg);color:var(--ink)}}
-header{{background:#101827;color:white;padding:14px 20px;display:flex;align-items:center;gap:22px;overflow:auto}}header b{{white-space:nowrap}}nav{{display:flex;gap:5px}}nav a{{color:#cbd5e1;text-decoration:none;padding:8px 10px;border-radius:7px;white-space:nowrap}}nav a.active,nav a:hover{{color:white;background:#263754}}
-main{{max-width:1120px;margin:22px auto;padding:0 16px}}h1{{margin:0 0 6px}}h2{{margin-top:26px}}.sub{{color:var(--muted);margin-top:0}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}}.card{{background:var(--card);border:1px solid var(--line);padding:17px;border-radius:12px;box-shadow:0 5px 18px #1020400b}}.metric{{font-size:25px;font-weight:750}}.muted,small{{color:var(--muted)}}
-label{{display:block;margin:13px 0 5px;font-weight:650}}input{{width:100%;padding:10px;border:1px solid #c9d2e1;border-radius:7px}}button,.button{{display:inline-block;margin:9px 6px 0 0;padding:10px 15px;border:0;border-radius:7px;background:var(--blue);color:white;font-weight:700;text-decoration:none}}button.secondary{{background:#475569}}.ok,.error{{padding:10px;border-radius:7px}}.ok{{background:#e7f8ed}}.error{{background:#feecec}}pre{{white-space:pre-wrap;word-break:break-word;background:#0f172a;color:#dbeafe;padding:14px;border-radius:9px;max-height:520px;overflow:auto}}code{{background:#eef2f8;padding:2px 5px;border-radius:4px}}.status{{display:grid;grid-template-columns:1fr auto;gap:8px}}@media(max-width:620px){{header{{display:block}}nav{{margin-top:9px}}}}
-table{{width:100%;border-collapse:collapse}}th,td{{padding:10px;border-bottom:1px solid var(--line);text-align:left}}summary{{cursor:pointer;font-weight:700}}
-</style></head><body><header><b>Options Radar</b><small>版本 {html.escape(BUILD_VERSION)} · {html.escape(BUILD_SHA[:12])}</small><nav>{nav}</nav></header><main>{content}</main>
+:root{{--ink:#1d1d1f;--muted:#86868b;--bg:#f5f5f7;--card:#fff;--line:#e8e8ed;--up:#d70015;--down:#00a651;--accent:#0071e3}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}}
+header{{position:sticky;top:0;z-index:10;background:rgba(245,245,247,.82);backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid var(--line);padding:12px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}}
+.logo{{font-size:17px;font-weight:700;letter-spacing:-.01em;white-space:nowrap}}header small{{color:var(--muted);font-size:12px}}
+nav{{display:flex;gap:2px;margin-left:auto}}nav a{{color:var(--ink);text-decoration:none;padding:6px 12px;border-radius:20px;font-size:13px;white-space:nowrap}}nav a:hover{{background:#e5e5ea}}nav a.active{{background:var(--ink);color:#fff}}
+main{{max-width:960px;margin:0 auto;padding:28px 20px 60px}}
+h1{{font-size:28px;font-weight:700;letter-spacing:-.02em;margin:0 0 4px}}h2{{font-size:20px;font-weight:600;margin:26px 0 10px}}.sub{{color:var(--muted);margin:0 0 18px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}}
+.card{{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.04)}}
+.metric{{font-size:26px;font-weight:700;letter-spacing:-.02em}}
+.muted{{color:var(--muted)}}small{{color:var(--muted)}}
+label{{display:block;margin:13px 0 5px;font-weight:600}}input{{width:100%;padding:10px 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:14px}}
+button,.button{{display:inline-block;margin:9px 6px 0 0;padding:9px 18px;border:0;border-radius:20px;background:var(--accent);color:#fff;font-weight:600;font-size:14px;text-decoration:none;cursor:pointer}}button:hover{{opacity:.88}}button.secondary{{background:#e5e5ea;color:var(--ink)}}
+.ok,.error{{padding:10px 14px;border-radius:10px}} .ok{{background:#e9f9ef}} .error{{background:#fdecec}}
+pre{{white-space:pre-wrap;word-break:break-word;background:#f0f0f2;color:#3a3a3c;padding:14px;border-radius:12px;max-height:520px;overflow:auto;font-size:12px}}code{{background:#eef0f3;padding:2px 6px;border-radius:5px}}
+.status{{display:grid;grid-template-columns:1fr auto;gap:8px}}
+table{{width:100%;border-collapse:collapse}}th{{color:var(--muted);font-weight:500;text-align:left;font-size:12px;text-transform:uppercase;letter-spacing:.04em}}th,td{{padding:11px 12px;border-bottom:1px solid var(--line)}}tr:hover td{{background:#fafafa}}
+summary{{cursor:pointer;font-weight:600}}
+.badge{{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600}}.badge.up{{background:#fdecec;color:#d70015}}.badge.down{{background:#e9f9ef;color:#00a651}}.badge.watch{{background:#eef2ff;color:#0037c1}}
+@media(max-width:640px){{header{{padding:10px 14px}}nav{{width:100%;margin-left:0;overflow-x:auto}}h1{{font-size:22px}}}}
+</style></head><body><header><span class="logo">Options Radar</span><small>版本 {html.escape(BUILD_VERSION)} · {html.escape(BUILD_SHA[:12])}</small><nav>{nav}</nav></header><main>{content}</main>
 <script>
 document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
   form.addEventListener('submit', async function(event){{
@@ -880,7 +894,7 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
     def _visual_summary(path: str, data: Any) -> str:
         if path == "/" and isinstance(data, list):
             if not data:
-                return '<section class="card"><h2>今日暂无合格推荐</h2><p class="muted">点击“立即采集并生成推荐”，或先完成Discord与IBKR配置。</p></section>'
+                return '<section class="card"><h2>今日暂无候选</h2><p class="muted">点击“立即采集并生成推荐”，或等待新的异常期权事件。</p></section>'
             cards = []
             def format_price(value: Any) -> str:
                 if value is None:
@@ -890,31 +904,42 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                 except (TypeError, ValueError):
                     return "待行情"
 
-            for item in data[:5]:
+            for item in data[:10]:
                 key = html.escape(str(item.get("contract_key", "")))
                 bid = format_price(item.get("bid"))
                 ask = format_price(item.get("ask"))
                 entry = format_price(item.get("max_entry_price"))
                 take_profit = format_price(item.get("take_profit"))
                 stop_loss = format_price(item.get("stop_loss"))
-                cards.append('<section class="card"><h2>{} · {}分</h2><p><b>{}</b> · {} · {}</p><p>bid/ask: {} / {}　数据: {}　执行: {}</p><p>入场: {}　止盈: {}　止损: {}</p><p class="muted">理由：{}</p></section>'.format(
-                    html.escape(str(item.get("grade", "-"))), html.escape(str(item.get("score", "-"))), key,
-                    html.escape(str(item.get("direction", "-"))), html.escape(str(item.get("market_status", "-"))),
-                    html.escape(str(bid)), html.escape(str(ask)),
-                    html.escape(str(item.get("data_quality", item.get("market_status", "待行情")))),
-                    html.escape(str(item.get("execution_status", "待行情"))),
-                    html.escape(str(entry)), html.escape(str(take_profit)), html.escape(str(stop_loss)),
-                    html.escape(str(item.get("reason", "暂无理由"))),
-                ))
-            return '<div class="grid">' + "".join(cards) + '</div><details class="card" style="margin-top:16px"><summary>评价标准说明</summary><table><tr><th>维度</th><th>权重</th><th>说明</th></tr><tr><td>共识</td><td>40%</td><td>各分析家族（价格行为/动量反转/资金流向）方向一致性，跨家族冲突扣分封顶64</td></tr><tr><td>历史</td><td>20%</td><td>分析师过去推荐的盈亏表现（基于回测结果动态调整）</td></tr><tr><td>信号质量</td><td>15%</td><td>信号完整性×置信度×时效性</td></tr><tr><td>行情质量</td><td>15%</td><td>实时bid/ask、价差、Open Interest验证</td></tr><tr><td>组合适配</td><td>10%</td><td>标的是否在持仓/自选中、仓位集中度</td></tr></table><p>A级≥80分（飞书提醒）｜B级65-79（合格）｜C级50-64（观察榜）｜D级&lt;50（过滤）</p></details>'
+                direction = str(item.get("direction", "-"))
+                badge_cls = "up" if direction in {"BULL", "看多", "多"} else "down" if direction in {"BEAR", "看空", "空"} else "watch"
+                badge = f'<span class="badge {badge_cls}">{html.escape(direction)}</span>'
+                flow_only = str(item.get("data_quality", "")).startswith("仅") or item.get("analyst_count") is not None
+                source_badge = '<span class="badge watch">仅flow</span>' if flow_only else f'<span class="badge watch">分析师{n_html if (n_html := html.escape(str(item.get("analyst_count", ""))) if item.get("analyst_count") is not None else "") else ""}</span>'
+                score = item.get("score")
+                score_html = f'{float(score):.1f}' if isinstance(score, (int, float)) else html.escape(str(score))
+                grade = html.escape(str(item.get("grade", "-")))
+                cards.append(
+                    '<section class="card">'
+                    f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:18px">{key}</h2>{badge}{source_badge}</div>'
+                    f'<div style="margin:8px 0 4px"><span style="font-size:24px;font-weight:700">{score_html}</span>'
+                    f'<span class="muted" style="margin-left:8px">{grade}级</span></div>'
+                    f'<p style="margin:2px 0" class="muted">bid/ask {bid} / {ask} · 数据 {html.escape(str(item.get("data_quality", item.get("market_status", "待行情"))))} · 执行 {html.escape(str(item.get("execution_status", "待行情")))}</p>'
+                    f'<p style="margin:2px 0" class="muted">入场 {entry} · 止盈 {take_profit} · 止损 {stop_loss}</p>'
+                    f'<p style="margin:6px 0 0" class="muted">{html.escape(str(item.get("reason", "暂无理由")))}</p>'
+                    '</section>'
+                )
+            return '<div class="grid">' + "".join(cards) + '</div><details class="card" style="margin-top:16px"><summary>评价标准说明</summary><table><tr><th>维度</th><th>权重</th><th>说明</th></tr><tr><td>共识</td><td>40%</td><td>各分析家族（价格行为/动量反转/资金流向）方向一致性，跨家族冲突扣分封顶64</td></tr><tr><td>历史</td><td>20%</td><td>分析师过去推荐的盈亏表现（基于回测结果动态调整）</td></tr><tr><td>信号质量</td><td>15%</td><td>信号完整性×置信度×时效性</td></tr><tr><td>行情质量</td><td>15%</td><td>实时bid/ask、价差、Open Interest验证</td></tr><tr><td>组合适配</td><td>10%</td><td>标的是否在持仓/自选中、仓位集中度</td></tr></table><p>A级≥80分（飞书提醒）｜B级65-79（合格）｜C级50-64（观察榜）｜D级&lt;50（过滤）｜仅flow=无分析师确认的异常期权事件</p></details>'
         if path == "/signals" and isinstance(data, list):
             rows = []
             for item in data:
+                n = len(item.get("signals", []))
+                badge = f'<span class="badge watch">分析师{n}</span>' if n else '<span class="badge watch">仅flow</span>'
                 rows.append('<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>'.format(
                     html.escape(str(item.get("symbol", ""))), html.escape(str(item.get("contract_key", ""))),
-                    html.escape(str(item.get("observed_at", ""))), len(item.get("signals", [])),
+                    html.escape(str(item.get("observed_at", ""))), badge,
                 ))
-            return '<section class="card"><table><tr><th>标的</th><th>合约</th><th>时间</th><th>分析师意见数</th></tr>{}</table></section>'.format("".join(rows) or '<tr><td colspan="4">暂无信号</td></tr>')
+            return '<section class="card"><table><tr><th>标的</th><th>合约</th><th>时间</th><th>状态</th></tr>{}</table></section>'.format("".join(rows) or '<tr><td colspan="4">暂无信号</td></tr>')
         if path == "/portfolio" and isinstance(data, dict):
             rows = []
             for symbol, item in data.items():
@@ -928,12 +953,16 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                 change = item.get("change_pct")
                 updated = html.escape(str((item.get("updated_at") or "")[:19]))
                 price_str = f"{float(price):.2f}" if price is not None else "-"
-                change_str = f"{float(change)*100:+.2f}%" if change is not None else "-"
+                change_cls = ""
+                change_str = "-"
+                if change is not None:
+                    change_cls = "up" if float(change) >= 0 else "down"
+                    change_str = f"{float(change)*100:+.2f}%"
                 display_name = f"{name_zh}（{name}）" if name_zh else name
-                rows.append('<tr><td>{}</td><td class="muted">{}</td><td class="muted">{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>'.format(
+                rows.append('<tr><td>{}</td><td class="muted">{}</td><td class="muted">{}</td><td>{}</td><td>{}</td><td class="{}">{}</td><td>{}</td><td>{}</td></tr>'.format(
                     html.escape(str(symbol)), display_name, industry,
                     html.escape(str(item.get("held_quantity", 0))),
-                    price_str, change_str, float(item.get("concentration", 0) or 0), updated,
+                    price_str, change_cls, change_str, float(item.get("concentration", 0) or 0), updated,
                 ))
             return '<section class="card"><table><tr><th>标的</th><th>公司名称</th><th>行业</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>{}</table></section>'.format("".join(rows) or '<tr><td colspan="8">暂无组合快照</td></tr>')
         if path == "/backtest" and isinstance(data, dict):

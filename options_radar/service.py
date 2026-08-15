@@ -827,15 +827,26 @@ class OptionsRadarService:
 
     # Dashboard callbacks -------------------------------------------------
     def _dashboard_date(self) -> date:
-        """Return the most recent US session date that has stored recommendations.
+        """Return the most recent US session date with data.
 
-        Falls back to today's session only when no historical data exists at all.
+        Prefers a session with stored recommendations; otherwise falls back to
+        the most recent session that produced flow events so the dashboard
+        updates as soon as new flow arrives, even before analysts confirm.
         """
         today = self._trade_date()
         try:
             with self.database.connect() as connection:
                 row = connection.execute(
                     "SELECT session_date FROM recommendations WHERE session_date IS NOT NULL ORDER BY session_date DESC LIMIT 1"
+                ).fetchone()
+            if row and row["session_date"]:
+                return date.fromisoformat(str(row["session_date"]))
+        except Exception:
+            pass
+        try:
+            with self.database.connect() as connection:
+                row = connection.execute(
+                    "SELECT session_date FROM flow_events WHERE session_date IS NOT NULL ORDER BY session_date DESC LIMIT 1"
                 ).fetchone()
             if row and row["session_date"]:
                 return date.fromisoformat(str(row["session_date"]))
@@ -890,7 +901,32 @@ class OptionsRadarService:
             self._recommendation_view(json.loads(str(row["payload_json"])))
             for row in self.database.recommendations_for_date(session)
         ]
-        return sorted(views, key=lambda item: float(item.get("score", 0)), reverse=True)[:5]
+        if views:
+            return sorted(views, key=lambda item: float(item.get("score", 0)), reverse=True)[:5]
+        # No analyst confirmation for this session yet: surface recent flow
+        # events as observation candidates so the dashboard updates as new
+        # flow arrives.
+        flow_only = []
+        for event in self.database.flow_events_for_date(session):
+            signals = self.database.signals_for_event(event.event_key)
+            flow_only.append({
+                "contract_key": event.contract_key,
+                "symbol": event.symbol,
+                "grade": "-",
+                "score": 0.0,
+                "direction": "观察",
+                "final_direction": "观察",
+                "market_status": "flow",
+                "eligible": False,
+                "data_quality": "仅flow",
+                "execution_status": "待分析师确认",
+                "analyst_count": len(signals),
+                "premium": event.premium,
+                "observed_at": event.observed_at.isoformat(),
+                "reason": "异常期权事件（无分析师确认）",
+            })
+        flow_only.sort(key=lambda item: float(item.get("premium", 0) or 0), reverse=True)
+        return flow_only[:10]
 
     def dashboard_portfolio(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         metadata = self.database.all_instrument_metadata()
@@ -1068,11 +1104,13 @@ class OptionsRadarService:
         return self.database.analyst_rows()
 
     def dashboard_dates(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
-        """Return all distinct session dates with stored recommendations, newest first."""
+        """Return all distinct session dates with flow or recommendations, newest first."""
         try:
             with self.database.connect() as connection:
                 rows = connection.execute(
-                    "SELECT DISTINCT session_date FROM recommendations WHERE session_date IS NOT NULL ORDER BY session_date DESC LIMIT 60"
+                    "SELECT session_date FROM flow_events WHERE session_date IS NOT NULL "
+                    "UNION SELECT session_date FROM recommendations WHERE session_date IS NOT NULL "
+                    "ORDER BY session_date DESC LIMIT 60"
                 ).fetchall()
             return [str(row["session_date"]) for row in rows]
         except Exception:
