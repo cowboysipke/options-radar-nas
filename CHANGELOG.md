@@ -275,3 +275,22 @@
     - 休市类风险（行情时间戳过期 / 盘口OI过期）不再逐条显示在候选卡，改由页面顶部 `market-banner` 统一备注「当前周末休市，行情为最近收盘快照」
     - 候选卡风险区从大红框改为紧凑行内 `risk-inline` + `risk-chip` 小标签（12px/11.5px），只显示该合约独有风险（如 DTE 超范围、Delta 缺失、价差过大）
     - 原始数据 JSON 仍保留完整 risk_flags 供审计
+
+### 2026-08-15 布局平铺 + newsfeed 周报 + 回测启动
+
+46. **页面布局平铺 + 多终端适配**
+    - 主容器 960px → 1280px，大屏候选卡 3-4 列平铺（`grid: repeat(auto-fill,minmax(240px,1fr))`）
+    - 响应式断点：≤900px 两列、≤640px 单列并收缩 padding
+    - 信号明细/持仓/回测表格外层包 `.table-wrap`（手机横向滑动）
+
+47. **newsfeed 最近 7 天综述 + 单条仅翻译**
+    - `ai.analyze_news` 改为仅中文翻译（不再做市场影响，省 token）
+    - 新增 `ai.summarize_news_week`：聚合最近 7 天新闻产出中文周报（大事记 + 市场主题 + 自选关联），prompt-digest 缓存
+    - `/newsfeed` 页顶部「最近 7 天新闻综述」+ 下方单条中文列表
+    - 新增「回填最近7天新闻」按钮（`/api/actions/news-backfill`，浏览器滚 40 页拉历史）
+
+48. **回测启动（Massive 真实历史）**
+    - 历史行情数据源切换为 Massive（`CompositeHistoryAdapter(massive, None)`），已验证返回真实期权日线（NVDA 217.5C 8/10-8/14）
+    - `replay(8/11,8/11)` 跑通：7 条成交 / 8 条未成交，真实收益率（META +30.8%、QQQ +6.6% 等）
+    - `/backtest` 页增强：统计卡（结算笔数/胜率/平均收益率/最大回撤）+ 逐笔结算明细表 + 分析师胜率拆分（mr 40%、qmr 33%）
+    - replay 改后台线程执行，页面不阻塞（修复页面断连：`parts.append(...).format` 绑定到 None 的 bug）

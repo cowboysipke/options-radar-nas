@@ -31,7 +31,7 @@ from .futu_provider import (
     FutuOptionContract,
     FutuProvider,
 )
-from .history_adapters import AlpacaHistoryAdapter, CompositeHistoryAdapter, SyntheticHistoryAdapter
+from .history_adapters import CompositeHistoryAdapter, SyntheticHistoryAdapter
 from .ibkr_flex import IBKRFlexClient
 from .ibkr_provider import IBKRProvider
 from .massive_client import MassiveClient
@@ -325,20 +325,22 @@ class OptionsRadarService:
             conflict_threshold_pct=float(execution_config.get("conflict_threshold_pct", 15)),
         )
         market_priority = list(provider_config.get("market_priority", default_priority))
-        # Historical option bars for back-test/replay come from Alpaca or
-        # Massive. IBKR is intentionally excluded: its only role left is the
-        # read-only position sync, not market data.
-        if market_priority and market_priority[0] in {"alpaca", "futu"}:
-            self.history_market = AlpacaHistoryAdapter(self.alpaca)
-        else:
-            self.history_market = CompositeHistoryAdapter(self.massive, None)
+        # Historical option bars for back-test/replay come from Massive (its
+        # OCC aggregates are verified working). Alpaca's /v1beta1/options/bars
+        # still requires the paid OPRA agreement, so it is not a reliable
+        # replay source. IBKR is excluded: it only syncs positions.
+        self.history_market = CompositeHistoryAdapter(self.massive, None)
         backtest_config = self.config.section("backtest")
         if bool(backtest_config.get("use_synthetic_when_unavailable", True)):
             self.history_market = SyntheticHistoryAdapter(self.history_market, enabled=True)
         self.backtests = BacktestCoordinator(self.database, self.history_market, self.config.section("paper"))
         self.rulebook = RulebookCompiler(self.database, self.config.section("analyst_families"))
         self._last_backtest: Optional[Dict[str, Any]] = None
+        self._last_backtest_at: float = 0.0
         self._last_optimization: Optional[Dict[str, Any]] = None
+        self._backtest_lock = threading.Lock()
+        self._backtest_running = False
+        self._backtest_summary: Dict[str, Any] = {}
 
         discord = self.config.section("discord")
         channels = dict(discord.get("channel_urls", {}))
@@ -518,9 +520,12 @@ class OptionsRadarService:
             fetch_cursor = cursor
             pages = 24
             if backfill:
+                # News backfill pulls a week of history; the regular rescan
+                # only needs a few days to reconcile missed flow/analyst cards.
+                window_hours = 7 * 24 if news_only else 96
                 fetch_cursor = SourceCursor(
                     channel_id=channel_id, last_message_id="0",
-                    last_timestamp=datetime.utcnow() - timedelta(hours=96),
+                    last_timestamp=datetime.utcnow() - timedelta(hours=window_hours),
                 )
                 pages = 40
             try:
@@ -721,6 +726,7 @@ class OptionsRadarService:
 
     def run_backtests(self) -> Dict[str, int]:
         self._last_backtest = self.backtests.record_daily(self._trade_date())
+        self._last_backtest_at = time.monotonic()
         update_analyst_weights_from_outcomes(self.database)
         return self._last_backtest
 
@@ -1049,7 +1055,17 @@ class OptionsRadarService:
             else:
                 entry["analysis"] = ""
             output.append(entry)
-        return output
+        weekly = ""
+        try:
+            since = datetime.utcnow() - timedelta(days=7)
+            week_items = self.database.newsfeed_messages(limit=200, since=since)
+            if week_items and self.ai.enabled:
+                texts = [str(item.get("content", "")) for item in week_items]
+                result = self.ai.summarize_news_week(texts, watch)
+                weekly = result.text if not result.ai_degraded else ""
+        except Exception:
+            weekly = ""
+        return {"weekly": weekly, "items": output}
 
     def _refresh_stock_meta(self) -> None:
         """Populate company names, prices and change for portfolio symbols.
@@ -1226,8 +1242,25 @@ class OptionsRadarService:
         except Exception:
             return []
 
+    def _backtest_worker(self, start: date, end: date) -> None:
+        """Run replay in the background so the page never blocks on slow bars."""
+        try:
+            self.backtests.replay(start, end)
+            with self._backtest_lock:
+                self._backtest_summary = self.backtests.replay_summary(start, end)
+                self._last_backtest = datetime.utcnow().isoformat()
+                self._last_backtest_at = time.monotonic()
+        except Exception:
+            with self._backtest_lock:
+                self._backtest_summary = {"error": "replay_failed"}
+        finally:
+            with self._backtest_lock:
+                self._backtest_running = False
+
     def dashboard_backtest(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
-        # Replay on whatever sessions have recommendations in the DB.
+        # Kick a background replay when stale, then return cached results so the
+        # page renders instantly. The first load may show partial data while
+        # historical bars are fetched; later loads are complete.
         try:
             with self.database.connect() as conn:
                 sessions = [row[0] for row in conn.execute(
@@ -1237,13 +1270,19 @@ class OptionsRadarService:
             sessions = []
         summary = {}
         if sessions:
-            try:
-                start = date.fromisoformat(sessions[0])
-                end = date.fromisoformat(sessions[-1])
-                settlement = self.backtests.replay(start, end)
-                summary = self.backtests.replay_summary(start, end)
-            except Exception:
-                summary = {"error": "replay_failed"}
+            start = date.fromisoformat(sessions[0])
+            end = date.fromisoformat(sessions[-1])
+            fresh = self._last_backtest and (time.monotonic() - self._last_backtest_at) < 3600
+            with self._backtest_lock:
+                running = self._backtest_running
+            if not fresh and not running:
+                with self._backtest_lock:
+                    self._backtest_running = True
+                threading.Thread(target=self._backtest_worker, args=(start, end), daemon=True).start()
+            with self._backtest_lock:
+                summary = dict(self._backtest_summary) if self._backtest_summary else {}
+            if not summary:
+                summary = {"status": "collecting", "note": "正在结算历史收益（拉取期权历史行情），稍后刷新页面查看。"}
         return {
             "paper": self.database.paper_stats(),
             "last_run": self._last_backtest,
@@ -1251,7 +1290,50 @@ class OptionsRadarService:
             "historical_range": {"start": sessions[0] if sessions else None, "end": sessions[-1] if sessions else None},
             "sessions_available": len(sessions),
             "replay": summary,
+            "analyst_breakdown": self._analyst_backtest_breakdown(),
         }
+
+    def _analyst_backtest_breakdown(self) -> List[Dict[str, Any]]:
+        """Per-analyst win-rate for the longest settled horizon per recommendation."""
+        # Prefer 5-day outcomes; fall back to whatever horizon has settled so the
+        # panel is informative before a full week of data accumulates.
+        outcomes = {
+            item.recommendation_id: item for item in self.database.signal_outcomes()
+        }
+        best: Dict[int, Any] = {}
+        for item in outcomes.values():
+            if item.status != "filled":
+                continue
+            current = best.get(item.recommendation_id)
+            if current is None or item.horizon_days > current.horizon_days:
+                best[item.recommendation_id] = item
+        by_analyst: Dict[str, List[float]] = {}
+        for row in self.database.recommendations_since(date.today() - timedelta(days=300)):
+            outcome = best.get(int(row["id"]))
+            if outcome is None:
+                continue
+            try:
+                payload = json.loads(str(row["payload_json"]))
+            except Exception:
+                continue
+            votes = payload.get("votes") if isinstance(payload.get("votes"), list) else []
+            for vote in votes:
+                if not isinstance(vote, Mapping) or vote.get("decision") != "TRADE":
+                    continue
+                analyst = str(vote.get("analyst", ""))
+                if analyst:
+                    by_analyst.setdefault(analyst, []).append(float(outcome.pnl_pct or 0.0))
+        rows = []
+        for analyst, returns in sorted(by_analyst.items()):
+            wins = sum(1 for value in returns if value > 0)
+            rows.append({
+                "analyst": analyst,
+                "trades": len(returns),
+                "wins": wins,
+                "win_rate": round(wins / len(returns), 3) if returns else 0.0,
+                "avg_return": round(sum(returns) / len(returns), 4) if returns else 0.0,
+            })
+        return rows
 
     def dashboard_contracts(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         return self.dashboard_recommendations({})
@@ -1311,6 +1393,7 @@ class OptionsRadarService:
             "recommendations": self.dashboard_recommendations,
             "portfolio": self.dashboard_portfolio,
             "newsfeed": self.dashboard_newsfeed,
+            "news_backfill": lambda _payload: self.collect(news_only=True, backfill=True),
             "portfolio_refresh": self.refresh_portfolio,
             "signals": self.dashboard_signals,
             "rules": self.dashboard_rules,

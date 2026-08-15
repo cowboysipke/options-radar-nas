@@ -506,6 +506,7 @@ POST_APIS = {
     "/api/actions/feishu-test": "feishu_test",
     "/api/actions/discord-login": "discord_login",
     "/api/actions/deepseek-test": "deepseek_test",
+    "/api/actions/news-backfill": "news_backfill",
     "/api/ibkr/sync": "ibkr_sync",
     "/api/portfolio/refresh": "portfolio_refresh",
 }
@@ -777,9 +778,10 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
 header{{position:sticky;top:0;z-index:10;background:rgba(245,245,247,.82);backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid var(--line);padding:12px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}}
 .logo{{font-size:17px;font-weight:700;letter-spacing:-.01em;white-space:nowrap}}header small{{color:var(--muted);font-size:12px}}
 nav{{display:flex;gap:2px;margin-left:auto}}nav a{{color:var(--ink);text-decoration:none;padding:6px 12px;border-radius:20px;font-size:13px;white-space:nowrap}}nav a:hover{{background:#e5e5ea}}nav a.active{{background:var(--ink);color:#fff}}
-main{{max-width:960px;margin:0 auto;padding:28px 20px 60px}}
+main{{max-width:1280px;margin:0 auto;padding:28px 20px 60px}}
 h1{{font-size:28px;font-weight:700;letter-spacing:-.02em;margin:0 0 4px}}h2{{font-size:20px;font-weight:600;margin:26px 0 10px}}.sub{{color:var(--muted);margin:0 0 18px}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}}
+.table-wrap{{overflow-x:auto;-webkit-overflow-scrolling:touch}} .table-wrap table{{min-width:640px}}
 .card{{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.04)}}
 .metric{{font-size:26px;font-weight:700;letter-spacing:-.02em}}
 .muted{{color:var(--muted)}}small{{color:var(--muted)}}
@@ -794,7 +796,8 @@ summary{{cursor:pointer;font-weight:600}}
 ul.analyst-votes{{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-wrap:wrap;gap:6px}}ul.analyst-votes li{{background:#f0f0f2;border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:13px}}
 .market-banner{{background:#eef2ff;color:#0037c1;border:1px solid #d6e0f5;border-radius:10px;padding:8px 14px;font-size:13px;margin-bottom:14px}}
 .risk-inline{{margin:6px 0 0;font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px;align-items:center}}.risk-inline strong{{color:#b25000;font-size:12px}}.risk-chip{{background:#fff8f0;border:1px solid #f0dcc8;color:#8a5a2b;border-radius:6px;padding:2px 8px;font-size:11.5px;white-space:nowrap}}
-@media(max-width:640px){{header{{padding:10px 14px}}nav{{width:100%;margin-left:0;overflow-x:auto}}h1{{font-size:22px}}}}
+@media(max-width:900px){{.grid{{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}}h1{{font-size:24px}}}}
+@media(max-width:640px){{header{{padding:10px 14px}}nav{{width:100%;margin-left:0;overflow-x:auto}}h1{{font-size:22px}}.grid{{grid-template-columns:1fr}}main{{padding:16px 12px 48px}}.card{{padding:14px}}}}
 </style></head><body><header><span class="logo">Options Radar</span><small>版本 {html.escape(BUILD_VERSION)} · {html.escape(BUILD_SHA[:12])}</small><nav>{nav}</nav></header><main>{content}</main>
 <script>
 document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
@@ -855,6 +858,8 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                 ("/api/actions/feishu-test", "测试飞书"),
                 ("/api/actions/backup", "创建备份"),
             ))
+        elif path == "/newsfeed":
+            action_cards = self._action_forms(csrf, (("/api/actions/news-backfill", "回填最近7天新闻"),))
         elif path == "/providers":
             action_cards = self._provider_actions(csrf)
         content = f'<h1>{html.escape(title)}</h1><p class="sub">{html.escape(description)}</p>{self._date_selector(path, params)}<div id="action-result"></div>{action_cards}{self._visual_summary(path, data)}<details class="card"><summary>查看原始数据</summary><pre>{encoded}</pre></details>'
@@ -1061,9 +1066,9 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                     )
                 )
             return (
-                '<section class="card"><table>'
+                '<section class="card"><div class="table-wrap"><table>'
                 '<tr><th>标的</th><th>合约</th><th>交易量</th><th>时间</th><th>方向</th><th>状态</th></tr>'
-                + "".join(rows) + '</table></section>'
+                + "".join(rows) + '</table></div></section>'
             )
         if path == "/portfolio" and isinstance(data, dict):
             def render_row(symbol, item):
@@ -1099,41 +1104,103 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
             other_rows = [render_row(s, v) for s, v in items if not (isinstance(v, Mapping) and v.get("has_flow"))]
             sections = []
             if flow_rows:
-                sections.append('<section class="card"><h2>异常期权相关</h2><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + "".join(flow_rows) + '</table></section>')
-            sections.append('<section class="card"><h2>全部自选</h2><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + ("".join(other_rows) or '<tr><td colspan="8">暂无组合快照</td></tr>') + '</table></section>')
+                sections.append('<section class="card"><h2>异常期权相关</h2><div class="table-wrap"><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + "".join(flow_rows) + '</table></div></section>')
+            sections.append('<section class="card"><h2>全部自选</h2><div class="table-wrap"><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + ("".join(other_rows) or '<tr><td colspan="8">暂无组合快照</td></tr>') + '</table></div></section>')
             return "".join(sections)
         if path == "/backtest" and isinstance(data, dict):
             replay = data.get("replay") or {}
             ranges = data.get("historical_range") or {}
             paper = data.get("paper") or {}
+            breakdown = data.get("analyst_breakdown") if isinstance(data.get("analyst_breakdown"), list) else []
             parts = []
             if ranges.get("start"):
-                parts.append(f'<section class="card"><h2>历史回放（{ranges["start"]} ~ {ranges["end"]}，共 {data.get("sessions_available",0)} 个交易日）</h2>')
-                parts.append(f'<p>结算笔数: {replay.get("filled",0)} 成交 / {replay.get("no_fill",0)} 未成交</p>')
-                parts.append(f'<p>平均收益率: <b>{round(replay.get("avg_net_return",0)*100,2)}%</b>　最大回撤: <b>{round(replay.get("max_drawdown",0)*100,2)}%</b></p>')
-                parts.append('<p class="muted">注：基于当前数据库中的信号（不含完整 30 天历史），只反映已有数据。</p>')
-                parts.append(f'<details><summary>逐笔明细</summary><pre>{html.escape(json.dumps(replay.get("outcomes",[])[-30:], ensure_ascii=False, indent=2, default=str))}</pre></details>')
-                parts.append('</section>')
+                filled = replay.get("filled", 0)
+                no_fill = replay.get("no_fill", 0)
+                avg = round(float(replay.get("avg_net_return", 0) or 0) * 100, 2)
+                dd = round(float(replay.get("max_drawdown", 0) or 0) * 100, 2)
+                total = filled + no_fill
+                win_rate = "—"
+                if filled:
+                    wins = sum(1 for item in (replay.get("outcomes") or []) if item.get("status") == "filled" and float(item.get("pnl_pct") or 0) > 0)
+                    win_rate = f"{round(wins / filled * 100, 1)}%"
+                parts.append((
+                    '<section class="card"><h2>历史回放（{} ~ {}，{} 个交易日）</h2>'
+                    '<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">'
+                    f'<div class="card"><div class="muted">结算笔数</div><div class="metric">{filled}</div><div class="muted">未成交 {no_fill}</div></div>'
+                    f'<div class="card"><div class="muted">胜率</div><div class="metric">{html.escape(win_rate)}</div></div>'
+                    f'<div class="card"><div class="muted">平均收益率</div><div class="metric">{avg}%</div></div>'
+                    f'<div class="card"><div class="muted">最大回撤</div><div class="metric">{dd}%</div></div>'
+                    '</div><p class="muted">基于当前数据库中的信号；5 日结算需交易日满 5 天，样本随运行自动积累。</p></section>'
+                ).format(html.escape(str(ranges["start"])), html.escape(str(ranges["end"])), data.get("sessions_available", 0)))
+                outcomes = replay.get("outcomes") or []
+                if outcomes:
+                    detail_rows = []
+                    for item in outcomes:
+                        pnl = float(item.get("pnl_pct") or 0.0) if item.get("status") == "filled" else None
+                        pnl_html = "—"
+                        if pnl is not None:
+                            cls = "up" if pnl >= 0 else "down"
+                            pnl_html = f'<span class="{cls}">{pnl * 100:+.2f}%</span>'
+                        status_label = {"filled": "成交", "no-fill": "未成交"}.get(str(item.get("status")), str(item.get("status")))
+                        detail_rows.append(
+                            '<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>'.format(
+                                html.escape(str(item.get("session_date", ""))),
+                                html.escape(str(item.get("contract_key", ""))),
+                                item.get("horizon_days", ""),
+                                html.escape(status_label),
+                                pnl_html,
+                                html.escape(str(item.get("exit_reason", ""))),
+                            )
+                        )
+                    parts.append(
+                        '<section class="card"><h2>逐笔结算明细</h2><div class="table-wrap"><table>'
+                        '<tr><th>交易日</th><th>合约</th><th>持有(日)</th><th>状态</th><th>收益率</th><th>退出</th></tr>'
+                        + "".join(detail_rows) + '</table></div></section>'
+                    )
+            if breakdown:
+                br_rows = "".join(
+                    '<tr><td>{}</td><td>{}</td><td>{}</td><td>{:.1f}%</td><td>{:+.2f}%</td></tr>'.format(
+                        html.escape(str(item.get("analyst", ""))),
+                        item.get("trades", 0), item.get("wins", 0),
+                        float(item.get("win_rate", 0) or 0) * 100,
+                        float(item.get("avg_return", 0) or 0) * 100,
+                    ) for item in breakdown
+                )
+                parts.append(
+                    '<section class="card"><h2>分析师胜率（5日结算）</h2><div class="table-wrap"><table>'
+                    '<tr><th>分析师</th><th>成交笔数</th><th>盈利笔数</th><th>胜率</th><th>平均收益</th></tr>'
+                    + br_rows + '</table></div></section>'
+                )
             if paper:
                 parts.append(f'<section class="card"><h2>模拟交易统计</h2><p>平仓: {paper.get("closed",0)} 笔　胜率: {round(paper.get("win_rate",0)*100,1)}%　损益: ${paper.get("realized_pnl",0):,.2f}</p></section>')
             return "".join(parts) if parts else '<section class="card"><p>暂无回测数据。等待系统积累足够交易日后再查看。</p></section>'
-        if path == "/newsfeed" and isinstance(data, list):
-            if not data:
-                return '<section class="card"><p>暂无新闻。newsfeed 频道每小时采集一次。</p></section>'
+        if path == "/newsfeed" and isinstance(data, dict):
+            weekly = str(data.get("weekly", "") or "")
+            items = data.get("items") if isinstance(data.get("items"), list) else []
+            parts = []
+            if weekly:
+                parts.append(
+                    '<section class="card"><h2>最近 7 天新闻综述</h2>'
+                    f'<p style="white-space:pre-wrap;margin:8px 0 0">{html.escape(weekly)}</p></section>'
+                )
+            if not items:
+                parts.append('<section class="card"><p>暂无新闻。可点击右上角「回填最近7天新闻」采集历史，之后每小时自动更新。</p></section>')
+                return "".join(parts)
             cards = []
-            for item in data:
+            for item in items:
                 content = html.escape(str(item.get("content", "")))
                 observed = html.escape(str((item.get("observed_at") or "")[:19]))
                 analysis = html.escape(str(item.get("analysis", "") or ""))
-                cached = '<span class="badge watch">AI 分析</span>' if item.get("analysis") else ''
+                cached = '<span class="badge watch">中文</span>' if item.get("analysis") else ''
                 cards.append(
                     '<section class="card">'
                     f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:16px">{observed}</h2>{cached}</div>'
                     f'<p style="margin:8px 0 0;white-space:pre-wrap">{content}</p>'
-                    + (f'<div class="card risk" style="margin-top:10px;background:#f0f7ff;border-color:#cfe0f5"><h3>中文分析</h3><p style="margin:4px 0 0">{analysis}</p></div>' if analysis else '')
+                    + (f'<p style="margin:8px 0 0;color:#3a5d8f;background:#f0f7ff;border-radius:8px;padding:8px 12px">{analysis}</p>' if analysis else '')
                     + '</section>'
                 )
-            return '<div class="grid" style="grid-template-columns:1fr">' + "".join(cards) + '</div>'
+            parts.append('<div class="grid" style="grid-template-columns:1fr">' + "".join(cards) + '</div>')
+            return "".join(parts)
         if path == "/system" and isinstance(data, dict):
             from options_radar.timeutil import us_cash_session_label
             parts = []
