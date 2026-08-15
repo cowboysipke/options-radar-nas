@@ -308,6 +308,7 @@ CREATE TABLE IF NOT EXISTS instrument_metadata (
     name_en TEXT,
     name_zh TEXT,
     industry TEXT,
+    group_name TEXT,
     current_price REAL,
     change_pct REAL,
     source TEXT NOT NULL,
@@ -350,6 +351,9 @@ class Database:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(recommendations)").fetchall()}
             if "session_date" not in columns:
                 connection.execute("ALTER TABLE recommendations ADD COLUMN session_date TEXT")
+            meta_columns = {row[1] for row in connection.execute("PRAGMA table_info(instrument_metadata)").fetchall()}
+            if "group_name" not in meta_columns:
+                connection.execute("ALTER TABLE instrument_metadata ADD COLUMN group_name TEXT")
             # Provider retries can return the same field and exchange timestamp.
             # Keep one canonical point before enforcing idempotent cache writes.
             connection.execute(
@@ -855,23 +859,26 @@ class Database:
 
     def save_instrument_metadata(
         self, symbol: str, *, name_en: Optional[str] = None, name_zh: Optional[str] = None,
-        industry: Optional[str] = None, current_price: Optional[float] = None,
+        industry: Optional[str] = None, group_name: Optional[str] = None,
+        current_price: Optional[float] = None,
         change_pct: Optional[float] = None, source: str = "unknown",
     ) -> None:
         now = datetime.utcnow().isoformat()
         with self.connect() as connection:
             connection.execute(
                 """INSERT INTO instrument_metadata
-                   (symbol, name_en, name_zh, industry, current_price, change_pct, source, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   (symbol, name_en, name_zh, industry, group_name, current_price, change_pct, source, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(symbol) DO UPDATE SET
                      name_en=COALESCE(excluded.name_en, instrument_metadata.name_en),
                      name_zh=COALESCE(excluded.name_zh, instrument_metadata.name_zh),
                      industry=COALESCE(excluded.industry, instrument_metadata.industry),
+                     group_name=COALESCE(excluded.group_name, instrument_metadata.group_name),
                      current_price=COALESCE(excluded.current_price, instrument_metadata.current_price),
                      change_pct=COALESCE(excluded.change_pct, instrument_metadata.change_pct),
                      source=excluded.source, updated_at=excluded.updated_at""",
-                (str(symbol).upper(), name_en, name_zh, industry, current_price, change_pct, str(source), now),
+                (str(symbol).upper(), name_en, name_zh, industry, group_name,
+                 current_price, change_pct, str(source), now),
             )
 
     def instrument_metadata(self, symbol: str) -> Optional[Dict[str, object]]:

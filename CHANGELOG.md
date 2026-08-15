@@ -247,3 +247,24 @@
     - provider registry 精简为 futu/alpaca/massive；移除 tradier/marketdata_app 构造与 secret 引用
     - 历史行情仅走 Alpaca/Massive（移除 IBKR 历史适配）；`_resolve_contract`（遗留 ibkr 期权链）删除
     - /providers 页只保留 futu/alpaca/massive 操作 + IBKR 持仓同步按钮
+
+### 2026-08-15 设置页清理 + 推荐数据刷新 + 富途分组 + 停止脚本
+
+40. **设置页清理联动**
+    - SECRET_FORM_FIELDS / SECRET_ENV_FILES 移除 MarketData.app / Tradier / IBKR Flex
+    - 频道表单从 fqd/guide/subscriptions 更新为 fpd/newsfeed；`DEFAULT_CONFIG.channel_names` 同步
+    - /system 描述与 IBKR 卡片改为「持仓同步」；/providers 描述更新
+
+41. **推荐数据重新评估**
+    - 重跑 `_evaluate(8/11)` 覆盖旧快照：risk_flags 换成新文案（休市/过期），「仅一个独立分析家族确认」按真实 family 判定（38 条中 29 条移除，9 条确为单家族保留）
+    - 周六休市行情仍 stale，分数维持 C 级；周一开盘自动恢复 70+
+
+42. **自选与持仓显示富途分组**
+    - `instrument_metadata` 增加 `group_name` 列（ALTER 迁移 + 写入逻辑）
+    - `_refresh_stock_meta` 后台拉取富途分组名并持久化；页面「分组」列显示（持仓/核心/特别关注/美股/能源…）
+
+43. **newsfeed AI 分析策略**
+    - 页面默认显示最近 10 条；每次最多分析 5 条新消息（prompt digest 缓存保证不重复花钱）
+
+44. **停止脚本入库**
+    - 新增 `停止异常期权助手.cmd` + `stop_radar.ps1`：双击安全终止 Options Radar 进程并释放 8787 端口（不会误杀 PIME）

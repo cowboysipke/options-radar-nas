@@ -47,9 +47,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
             "pa": "pa分析师",
             "mr": "mr分析师",
             "qmr": "qmr分析师",
-            "fqd": "fqd分析师",
-            "guide": "使用指南",
-            "subscriptions": "分析师订阅面板",
+            "fpd": "fpd分析师",
+            "newsfeed": "newsfeed",
         },
     },
     "notifications": {"provider": "feishu", "feishu_app_id": ""},
@@ -120,8 +119,6 @@ SECRET_ENV_FILES = {
     "Massive API Key": "MASSIVE_API_KEY_FILE",
     "Alpaca API Key": "ALPACA_API_KEY_FILE",
     "Alpaca API Secret": "ALPACA_API_SECRET_FILE",
-    "MarketData.app API Key": "MARKETDATA_API_KEY_FILE",
-    "Tradier Token": "TRADIER_TOKEN_FILE",
     "Discord 用户 Token": "DISCORD_USER_TOKEN_FILE",
 }
 
@@ -132,8 +129,6 @@ SECRET_FORM_FIELDS = {
     "massive_api_key": ("Massive API Key", "massive_api_key"),
     "alpaca_api_key": ("Alpaca API Key", "alpaca_api_key"),
     "alpaca_api_secret": ("Alpaca API Secret", "alpaca_api_secret"),
-    "marketdata_api_key": ("MarketData.app API Key", "marketdata_api_key"),
-    "tradier_token": ("Tradier Token", "tradier_token"),
     "discord_user_token": ("Discord 用户 Token", "discord_user_token"),
 }
 
@@ -202,12 +197,11 @@ FIELDS = (
     Field("timezone", "timezone", "时区", _plain),
     Field("discord_server", "discord.source_server", "Discord服务器", _plain),
     Field("flow_channel", "discord.channel_names.flow", "异常期权频道", _plain),
-    Field("pa_channel", "discord.channel_names.pa", "PA频道", _plain),
-    Field("mr_channel", "discord.channel_names.mr", "MR频道", _plain),
-    Field("qmr_channel", "discord.channel_names.qmr", "QMR频道", _plain),
-    Field("fqd_channel", "discord.channel_names.fqd", "FQD频道", _plain),
-    Field("guide_channel", "discord.channel_names.guide", "使用指南频道", _plain),
-    Field("subscriptions_channel", "discord.channel_names.subscriptions", "分析师订阅面板频道", _plain),
+    Field("pa_channel", "discord.channel_names.pa", "PA分析师频道", _plain),
+    Field("mr_channel", "discord.channel_names.mr", "MR分析师频道", _plain),
+    Field("qmr_channel", "discord.channel_names.qmr", "QMR分析师频道", _plain),
+    Field("fpd_channel", "discord.channel_names.fpd", "FPD分析师频道", _plain),
+    Field("newsfeed_channel", "discord.channel_names.newsfeed", "新闻频道", _plain),
     Field("feishu_app_id", "notifications.feishu_app_id", "飞书 App ID", _plain),
     Field("flash_model", "ai.flash_model", "DeepSeek日常模型", _model),
     Field("pro_model", "ai.pro_model", "DeepSeek复核模型", _model),
@@ -271,8 +265,6 @@ class SetupConfigStore:
             "Massive API Key": "massive_api_key",
             "Alpaca API Key": "alpaca_api_key",
             "Alpaca API Secret": "alpaca_api_secret",
-            "MarketData.app API Key": "marketdata_api_key",
-            "Tradier Token": "tradier_token",
             "Discord 用户 Token": "discord_user_token",
         }
         result: Dict[str, bool] = {}
@@ -299,14 +291,12 @@ class SetupConfigStore:
                 raise ValueError("Discord频道名称不可重复")
             data["discord"]["source_channels"] = {
                 channel_names[source]: source
-                for source in ("flow", "pa", "mr", "qmr", "fqd", "fpd", "guide", "subscriptions")
+                for source in ("flow", "pa", "mr", "qmr", "fpd", "newsfeed")
                 if source in channel_names
             }
-            data["market"]["provider"] = "ibkr"
-            data["ibkr"]["enabled"] = True
-            data["providers"]["market_priority"] = ["ibkr", "massive", "futu", "tradier", "alpaca", "marketdata_app"]
-            data["providers"]["enabled"]["ibkr"] = True
-            data["providers"]["enabled"]["futu"] = False
+            data["market"]["provider"] = "futu"
+            data["providers"]["market_priority"] = ["futu", "alpaca", "massive"]
+            data["providers"]["enabled"]["futu"] = True
             data["setup_completed"] = True
             data["secret_refs"] = self.fixed_secret_refs()
             self._save_secrets(values, data["secret_refs"])
@@ -486,9 +476,9 @@ PAGE_INFO = {
     "/newsfeed": ("新闻速递", "newsfeed", "newsfeed 频道实时新闻、AI 翻译与市场影响"),
     "/portfolio": ("自选与持仓", "portfolio", "IBKR组合与富途一次性导入自选"),
     "/backtest": ("回测", "backtest", "模拟盘、回测结算与策略优化"),
-    "/system": ("系统诊断", "status", "IB Gateway、Discord、Massive、DeepSeek和飞书"),
+    "/system": ("系统诊断", "status", "富途 OpenD、Discord、DeepSeek、飞书与持仓同步状态"),
     "/setup": ("设置", "status", "首次配置和连接测试"),
-    "/providers": ("数据源诊断", "providers", "IBKR主源与Massive历史复核"),
+    "/providers": ("数据源诊断", "providers", "富途主源、Alpaca/Massive 历史复核"),
 }
 
 GET_APIS = {
@@ -1066,7 +1056,8 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                     return f'<tr><td>{html.escape(str(symbol))}</td><td colspan="8">{html.escape(str(item))}</td></tr>'
                 name = html.escape(str(item.get("company_name", "") or ""))
                 name_zh = html.escape(str(item.get("company_name_zh", "") or ""))
-                industry = html.escape(str(item.get("industry", "") or ""))
+                group = html.escape(str(item.get("group_name", "") or ""))
+                industry = group or html.escape(str(item.get("industry", "") or ""))
                 price = item.get("current_price")
                 change = item.get("change_pct")
                 updated = html.escape(str((item.get("updated_at") or "")[:19]))
@@ -1093,8 +1084,8 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
             other_rows = [render_row(s, v) for s, v in items if not (isinstance(v, Mapping) and v.get("has_flow"))]
             sections = []
             if flow_rows:
-                sections.append('<section class="card"><h2>异常期权相关</h2><table><tr><th>标的</th><th>公司名称</th><th>行业</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + "".join(flow_rows) + '</table></section>')
-            sections.append('<section class="card"><h2>全部自选</h2><table><tr><th>标的</th><th>公司名称</th><th>行业</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + ("".join(other_rows) or '<tr><td colspan="8">暂无组合快照</td></tr>') + '</table></section>')
+                sections.append('<section class="card"><h2>异常期权相关</h2><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + "".join(flow_rows) + '</table></section>')
+            sections.append('<section class="card"><h2>全部自选</h2><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + ("".join(other_rows) or '<tr><td colspan="8">暂无组合快照</td></tr>') + '</table></section>')
             return "".join(sections)
         if path == "/backtest" and isinstance(data, dict):
             replay = data.get("replay") or {}
@@ -1147,10 +1138,14 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                 if not isinstance(value, dict):
                     state = "未知"
                 else:
-                    state = str(value.get("status", value.get("connected", "未知")))
-                    quality = str(value.get("quality", ""))
-                    if quality and quality not in ("missing", "unknown"):
-                        state = f"{state}（{quality}）"
+                    note = str(value.get("note", "") or "")
+                    if note:
+                        state = str(value.get("status", "未知")) + "（" + note + "）"
+                    else:
+                        state = str(value.get("status", value.get("connected", "未知")))
+                        quality = str(value.get("quality", ""))
+                        if quality and quality not in ("missing", "unknown"):
+                            state = f"{state}（{quality}）"
                 return f'<section class="card"><h2>{label}</h2><div class="metric">{html.escape(state)}</div></section>'
             grid = [provider_card("futu", "富途 OpenD", data.get("futu")),
                     provider_card("ibkr", "IBKR", data.get("ibkr")),
@@ -1202,7 +1197,7 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
         return '<div class="card"><b>快捷操作</b><div>' + "".join(f'<form data-ajax="1" style="display:inline" method="post" action="{path}"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button>{html.escape(labels.get(path, label))}</button></form>' for path, label in actions) + "</div></div>"
 
     def _setup_page(self, csrf: str, message: str = "") -> str:
-        display_labels = {"timezone":"\u65f6\u533a","discord_server":"Discord\u670d\u52a1\u5668","flow_channel":"\u5f02\u5e38\u671f\u6743\u9891\u9053","pa_channel":"PA\u5206\u6790\u5e08\u9891\u9053","mr_channel":"MR\u5206\u6790\u5e08\u9891\u9053","qmr_channel":"QMR\u5206\u6790\u5e08\u9891\u9053","fqd_channel":"FQD\u5206\u6790\u5e08\u9891\u9053","guide_channel":"\u4f7f\u7528\u6307\u5357\u9891\u9053","subscriptions_channel":"\u5206\u6790\u5e08\u8ba2\u9605\u9762\u677f\u9891\u9053","feishu_app_id":"\u98de\u4e66 App ID","flash_model":"DeepSeek\u65e5\u5e38\u6a21\u578b","pro_model":"DeepSeek\u590d\u6838\u6a21\u578b","report_delay":"\u6536\u76d8\u540e\u65e5\u62a5\u5ef6\u8fdf\uff08\u5206\u949f\uff09"}
+        display_labels = {"timezone":"\u65f6\u533a","discord_server":"Discord\u670d\u52a1\u5668","flow_channel":"\u5f02\u5e38\u671f\u6743\u9891\u9053","pa_channel":"PA\u5206\u6790\u5e08\u9891\u9053","mr_channel":"MR\u5206\u6790\u5e08\u9891\u9053","qmr_channel":"QMR\u5206\u6790\u5e08\u9891\u9053","fpd_channel":"FPD\u5206\u6790\u5e08\u9891\u9053","newsfeed_channel":"\u65b0\u95fb\u9891\u9053","feishu_app_id":"\u98de\u4e66 App ID","flash_model":"DeepSeek\u65e5\u5e38\u6a21\u578b","pro_model":"DeepSeek\u590d\u6838\u6a21\u578b","report_delay":"\u6536\u76d8\u540e\u65e5\u62a5\u5ef6\u8fdf\uff08\u5206\u949f\uff09"}
         data = self.app.store.load()
         inputs = []
         for field in FIELDS:

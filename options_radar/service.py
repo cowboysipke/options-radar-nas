@@ -384,6 +384,9 @@ class OptionsRadarService:
         self._health_cache: Optional[Dict[str, Any]] = None
         self._health_cache_at: float = 0.0
         self._health_cache_lock = threading.Lock()
+        self._group_cache: Optional[Dict[str, str]] = None
+        self._group_cache_at: float = 0.0
+        self._group_cache_lock = threading.Lock()
         self.feishu = FeishuBot(
             callbacks=FeishuCallbacks(
                 today_recommendations=self.today_recommendations,
@@ -971,6 +974,7 @@ class OptionsRadarService:
         symbols = set(self._portfolio.keys())
         if not symbols:
             symbols = watch_symbols | set(metadata.keys())
+        group_by_symbol = self._futu_group_cache()
         result = {}
         for symbol in sorted(symbols):
             context = self._portfolio.get(symbol) or PortfolioContext(
@@ -981,6 +985,7 @@ class OptionsRadarService:
             item["company_name"] = meta.get("name_en") or self._stock_meta.get(symbol, {}).get("name", "")
             item["company_name_zh"] = meta.get("name_zh") or ""
             item["industry"] = meta.get("industry") or ""
+            item["group_name"] = meta.get("group_name") or group_by_symbol.get(symbol) or ""
             item["current_price"] = meta.get("current_price")
             item["change_pct"] = meta.get("change_pct")
             item["updated_at"] = meta.get("updated_at") or ""
@@ -990,26 +995,55 @@ class OptionsRadarService:
             result[symbol] = item
         return result
 
+    def _futu_group_cache(self, force: bool = False) -> Dict[str, str]:
+        """Map symbol -> Futu watchlist group name, refreshed at most every 10 min."""
+        futu_client = getattr(self, "futu", None)
+        if futu_client is None:
+            return {}
+        lock = getattr(self, "_group_cache_lock", None)
+        if lock is None:
+            return {}
+        now = time.monotonic()
+        with lock:
+            if not force and self._group_cache is not None and now - self._group_cache_at < 600:
+                return dict(self._group_cache)
+            mapping: Dict[str, str] = {}
+            try:
+                snapshot = futu_client.sync_watchlists()
+                for group_name, codes in snapshot.groups.items():
+                    for code in codes:
+                        symbol = str(code).split(".", 1)[-1].upper()
+                        mapping.setdefault(symbol, str(group_name))
+            except Exception:
+                pass
+            self._group_cache = mapping
+            self._group_cache_at = now
+            return dict(mapping)
+
     def dashboard_newsfeed(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         """Recent newsfeed messages with optional AI Chinese analysis.
 
-        Analysis is produced on demand and cached by the AI store (prompt digest),
-        so re-opening the page does not re-spend tokens.
+        Only a small batch of brand-new items is analysed per page view to bound
+        AI spend; previously analysed items are served from the prompt-digest
+        cache and cost nothing.
         """
-        limit = int(((_payload or {}).get("limit", 30)))
+        limit = min(50, int(((_payload or {}).get("limit", 10))))
         try:
             watch = {item.symbol for item in self.database.list_watchlist(enabled_only=True)}
         except Exception:
             watch = set()
         items = self.database.newsfeed_messages(limit=limit)
         output = []
+        analysed = 0
         for item in items:
             entry = dict(item)
-            if self.ai.enabled:
+            if self.ai.enabled and analysed < 5:
                 try:
                     result = self.ai.analyze_news(str(item.get("content", "")), watch)
                     entry["analysis"] = result.text if not result.ai_degraded else ""
                     entry["analysis_cached"] = bool(result.cached)
+                    if not result.cached and entry["analysis"]:
+                        analysed += 1
                 except Exception:
                     entry["analysis"] = ""
             else:
@@ -1032,6 +1066,7 @@ class OptionsRadarService:
         symbols = list(set(self._portfolio.keys()) | watch)
         if not symbols:
             return
+        group_by_symbol = self._futu_group_cache()
         # Holdings first, then watchlist; cap per-symbol asset lookups so one
         # manual refresh finishes quickly and fills the rest on later refreshes.
         symbols = sorted(
@@ -1122,7 +1157,8 @@ class OptionsRadarService:
             self._stock_meta[sym] = {"name": name_en, "price": price, "change_pct": change_pct}
             self.database.save_instrument_metadata(
                 sym, name_en=name_en, name_zh=name_zh or None,
-                industry=None, current_price=price, change_pct=change_pct, source="manual_refresh",
+                industry=None, group_name=group_by_symbol.get(sym), current_price=price,
+                change_pct=change_pct, source="manual_refresh",
             )
 
     def _portfolio_refresh_worker(self) -> None:
