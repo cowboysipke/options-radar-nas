@@ -91,9 +91,31 @@ class AnalystBacktestCoordinator:
         # the horizon (look-ahead bias).
         return [bar for bar in bars if bar.observed_at.date() <= end]
 
+    def _prefetch_stocks(self, signals: List[Dict[str, Any]]) -> Dict[str, Dict[date, OptionBar]]:
+        """One aggregate_bars call per symbol covering every session it appears in."""
+        grouped: Dict[str, List[date]] = {}
+        for signal in signals:
+            session = date.fromisoformat(str(signal["session_date"]))
+            grouped.setdefault(str(signal["symbol"]), []).append(session)
+        cache: Dict[str, Dict[date, OptionBar]] = {}
+        for symbol, sessions in grouped.items():
+            start = min(sessions)
+            end = add_business_days(max(sessions), max(self.horizons))
+            bars = self._daily_bars(symbol, start, end)
+            cache[symbol] = {bar.observed_at.date(): bar for bar in bars}
+        return cache
+
+    def _stock_bars(self, symbol: str, session: date, max_end: date,
+                    stock_cache: Optional[Dict[str, Dict[date, OptionBar]]]) -> List[OptionBar]:
+        if stock_cache is not None and symbol in stock_cache:
+            by_day = stock_cache[symbol]
+            return [by_day[day] for day in sorted(by_day) if session <= day <= max_end]
+        return self._daily_bars(symbol, session, max_end)
+
     # -- per-signal settlement ----------------------------------------------
 
-    def _settle(self, signal: Dict[str, Any]) -> List[Dict[str, object]]:
+    def _settle(self, signal: Dict[str, Any],
+                stock_cache: Optional[Dict[str, Dict[date, OptionBar]]] = None) -> List[Dict[str, object]]:
         session = date.fromisoformat(str(signal["session_date"]))
         symbol = str(signal["symbol"])
         contract = str(signal["contract_key"])
@@ -107,7 +129,7 @@ class AnalystBacktestCoordinator:
         # Fetch each series once (covering the widest horizon) and slice per
         # horizon to keep the request count at 2 per signal instead of 6.
         max_end = add_business_days(session, max(self.horizons))
-        underlying_all = self._daily_bars(symbol, session, max_end)
+        underlying_all = self._stock_bars(symbol, session, max_end, stock_cache)
         entry_day = add_business_days(session, 1)
 
         # ATM contract for the sell-side leg: BULL sells an ATM PUT, BEAR sells
@@ -180,12 +202,13 @@ class AnalystBacktestCoordinator:
     def run(self) -> Dict[str, int]:
         """Settle unsettled TRADE signals; idempotent (ON CONFLICT updates)."""
         settled = self._settled_keys()
+        pending = [signal for signal in self.trade_signals()
+                   if (str(signal["analyst"]), str(signal["contract_key"])) not in settled]
+        stock_cache = self._prefetch_stocks(pending) if pending else {}
         saved = 0
         no_fill = 0
-        for signal in self.trade_signals():
-            if (str(signal["analyst"]), str(signal["contract_key"])) in settled:
-                continue
-            for outcome in self._settle(signal):
+        for signal in pending:
+            for outcome in self._settle(signal, stock_cache=stock_cache):
                 self.database.save_analyst_backtest_outcome(outcome)
                 saved += 1
                 no_fill += int(outcome["strategy_status"] == "no-fill")

@@ -293,6 +293,7 @@ class OptionsRadarService:
         )
         self.ibkr_flex = IBKRFlexClient()
         self.massive = MassiveClient()
+        self.massive_backtest = MassiveClient(requests_per_minute=60)
         def secret_value(direct: str, file_var: str) -> str:
             value = os.getenv(direct, "").strip()
             path = os.getenv(file_var, "").strip()
@@ -332,7 +333,7 @@ class OptionsRadarService:
         if bool(backtest_config.get("use_synthetic_when_unavailable", True)):
             self.history_market = SyntheticHistoryAdapter(self.history_market, enabled=True)
         self.backtests = BacktestCoordinator(self.database, self.history_market, self.config.section("paper"))
-        self.analyst_backtests = AnalystBacktestCoordinator(self.database, self.massive)
+        self.analyst_backtests = AnalystBacktestCoordinator(self.database, self.massive_backtest)
         self.rulebook = RulebookCompiler(self.database, self.config.section("analyst_families"))
         self._last_backtest: Optional[Dict[str, Any]] = None
         self._last_backtest_at: float = 0.0
