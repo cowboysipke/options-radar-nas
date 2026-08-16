@@ -24,11 +24,10 @@
 - **本轮诊断**：纽约时间 15:50 时，额外诊断连接在账户初始化阶段超时，未能把 10089/10091 与实时盘口请求重新关联；面板现已记录对应 IBKR 市场错误码。
 
 ### BUG-011: Alpaca Paper 期权历史接口受 OPRA agreement 限制
-- **状态**：已确认，待账户协议/套餐处理
-- **现象**：期权快照可返回 Indicative bid/ask，但历史 bars 返回 HTTP 403：`OPRA agreement is not signed`
-- **影响**：实时观察可用；真实历史期权回测暂时不可用
-- **根因**：Paper Trading API 当前未完成 Alpaca OPRA agreement/完整期权历史权限
-- **临时措施**：Indicative 快照可用于观察；保留合成 K 线兜底；不把 Indicative 标记为可执行实时行情
+- **状态**：已解决（2026-08-16）
+- **根因**：历史期权 bars（`/v1beta1/options/bars`）**无需 OPRA**；之前的 403 是 `end` 参数设在未来日期（`end>=今天`）触发的边界检查，误判为「OPRA 未签」
+- **修复**：`AlpacaProvider.aggregate_bars` 将 `end` clamp 到昨天、`limit` 上限 10000；历史期权数据成为回测主源（~200 req/min，覆盖率 97.5%，提速 40 倍）
+- **保留限制**：实时期权快照（snapshot）仍需 OPRA；`end>=今天` 的请求仍会 403
 
 ### BUG-012: Alpaca 批量股票快照遇非法符号返回 400
 - **状态**：已解决
