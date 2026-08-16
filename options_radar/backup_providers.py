@@ -12,7 +12,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .provider_types import (
@@ -373,6 +373,48 @@ class AlpacaProvider(_HttpMarketProvider):
     def get_underlying_bars(self, symbol: str, start: datetime, end: datetime, interval: str = "1Day") -> List[HistoryBar]:
         payload = self._get(f"/v2/stocks/{symbol.upper()}/bars", {"timeframe": interval, "start": start.isoformat(), "end": end.isoformat(), "feed": "iex"})
         return self._bars(symbol.upper(), payload.get("bars") or [], interval, "delayed")
+
+    def aggregate_bars(
+        self, ticker: str, start: date, end: date, multiplier: int = 1, timespan: str = "day"
+    ) -> List[Dict[str, object]]:
+        """Massive-compatible historical bars for the back-test coordinator.
+
+        ``ticker`` is either a stock symbol ("NVDA") or an option OCC symbol
+        prefixed with "O:" ("O:MU260814P00881000"). Historical option bars are
+        available without an OPRA subscription; only real-time quotes need it.
+        """
+        timeframe = "1Day" if timespan == "day" else f"{multiplier}Min"
+        # Alpaca option bars reject an ``end`` at or beyond "today" with a 403
+        # (OPRA agreement); future bars do not exist yet, so clamp to yesterday.
+        end = min(end, date.today() - timedelta(days=1))
+        if end < start:
+            return []
+        start_dt = f"{start.isoformat()}T00:00:00Z"
+        end_dt = f"{end.isoformat()}T23:59:59Z"
+        if ticker.startswith("O:"):
+            occ = ticker[2:]
+            payload = self._get("/v1beta1/options/bars", {
+                "symbols": occ, "timeframe": timeframe, "start": start_dt, "end": end_dt, "limit": 10000,
+            })
+            rows = payload.get("bars", {}) if isinstance(payload, dict) else {}
+            rows = rows.get(occ, []) if isinstance(rows, Mapping) else rows
+        else:
+            payload = self._get(f"/v2/stocks/{ticker.upper()}/bars", {
+                "timeframe": timeframe, "start": start_dt, "end": end_dt, "limit": 10000,
+            })
+            rows = payload.get("bars", []) if isinstance(payload, dict) else []
+        output: List[Dict[str, object]] = []
+        for row in rows:
+            ts = _timestamp(_coalesce(row.get("t"), row.get("timestamp"))) if isinstance(row, Mapping) else None
+            if ts is None:
+                continue
+            output.append({
+                "t": int(ts.timestamp() * 1000),
+                "o": _float(row.get("o")), "h": _float(row.get("h")),
+                "l": _float(row.get("l")), "c": _float(row.get("c")),
+                "v": _float(row.get("v") or 0),
+            })
+        return output
 
     def _bars(self, key: str, rows: Any, interval: str, quality: str) -> List[HistoryBar]:
         return [HistoryBar(key, ts, _float(row.get("o")), _float(row.get("h")), _float(row.get("l")), _float(row.get("c")), _float(row.get("v")), self.name, _quality(quality), interval)

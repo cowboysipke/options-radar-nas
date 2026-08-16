@@ -59,6 +59,29 @@ def _atm_ticker(symbol: str, expiry: date, spot: float, option_type: str) -> str
     return f"O:{symbol.replace('.', '')}{expiry:%y%m%d}{option_type.upper()}{strike_code}"
 
 
+class CompositeBarsSource:
+    """Try the primary bars source, fall back to a secondary one."""
+
+    def __init__(self, primary: Any, fallback: Any = None):
+        self.primary = primary
+        self.fallback = fallback
+
+    def aggregate_bars(self, ticker: str, start: date, end: date,
+                       multiplier: int = 1, timespan: str = "day") -> List[Dict[str, object]]:
+        try:
+            bars = self.primary.aggregate_bars(ticker, start, end, multiplier, timespan)
+        except Exception:
+            bars = []
+        if bars:
+            return bars
+        if self.fallback is not None:
+            try:
+                return self.fallback.aggregate_bars(ticker, start, end, multiplier, timespan)
+            except Exception:
+                return []
+        return []
+
+
 class AnalystBacktestCoordinator:
     """Replay TRADE signals against Massive daily bars and persist outcomes."""
 

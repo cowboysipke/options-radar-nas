@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .ai_provider import DeepSeekProvider
-from .analyst_backtest import AnalystBacktestCoordinator
+from .analyst_backtest import AnalystBacktestCoordinator, CompositeBarsSource
 from .analytics import update_analyst_weights_from_outcomes
 from .backtest_service import BacktestCoordinator
 from .backup_providers import AlpacaProvider
@@ -309,6 +309,13 @@ class OptionsRadarService:
             contracts_base_url=str(alpaca_config.get("contracts_base_url", "https://paper-api.alpaca.markets")),
             feed=str(alpaca_config.get("feed", "indicative")),
         )
+        self.alpaca_history = AlpacaProvider(
+            secret_value("ALPACA_API_KEY", "ALPACA_API_KEY_FILE"),
+            secret_value("ALPACA_API_SECRET", "ALPACA_API_SECRET_FILE"),
+            base_url=str(alpaca_config.get("data_base_url", "https://data.alpaca.markets")),
+            contracts_base_url=str(alpaca_config.get("contracts_base_url", "https://paper-api.alpaca.markets")),
+            feed=str(alpaca_config.get("feed", "indicative")),
+        )
         execution_config = dict(provider_config.get("execution", {}))
         enabled_config = dict(provider_config.get("enabled", {}))
         default_priority = ["futu", "alpaca", "massive"]
@@ -324,16 +331,18 @@ class OptionsRadarService:
             conflict_threshold_pct=float(execution_config.get("conflict_threshold_pct", 15)),
         )
         market_priority = list(provider_config.get("market_priority", default_priority))
-        # Historical option bars for back-test/replay come from Massive (its
-        # OCC aggregates are verified working). Alpaca's /v1beta1/options/bars
-        # still requires the paid OPRA agreement, so it is not a reliable
-        # replay source. IBKR is excluded: it only syncs positions.
+        # Consensus-recommendation replay uses Massive 5-minute bars (its OCC
+        # aggregates are verified). Analyst signal back-test uses Alpaca daily
+        # bars below: /v1beta1/options/bars serves history without the paid
+        # OPRA agreement (only real-time option quotes need OPRA).
         self.history_market = CompositeHistoryAdapter(self.massive, None)
         backtest_config = self.config.section("backtest")
         if bool(backtest_config.get("use_synthetic_when_unavailable", True)):
             self.history_market = SyntheticHistoryAdapter(self.history_market, enabled=True)
         self.backtests = BacktestCoordinator(self.database, self.history_market, self.config.section("paper"))
-        self.analyst_backtests = AnalystBacktestCoordinator(self.database, self.massive_backtest)
+        self.analyst_backtests = AnalystBacktestCoordinator(
+            self.database, CompositeBarsSource(self.alpaca_history, self.massive),
+        )
         self.rulebook = RulebookCompiler(self.database, self.config.section("analyst_families"))
         self._last_backtest: Optional[Dict[str, Any]] = None
         self._last_backtest_at: float = 0.0
