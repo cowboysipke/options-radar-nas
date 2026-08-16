@@ -203,11 +203,32 @@ CREATE TABLE IF NOT EXISTS analyst_backtest_outcomes (
     horizon_days INTEGER NOT NULL,
     strategy_status TEXT NOT NULL,
     strategy_pnl_pct REAL,
+    strategy_premium_pct REAL,
     stock_pnl_pct REAL,
     direction_correct INTEGER,
     underlying_change_pct REAL,
+    atm_ticker TEXT,
+    strategy_exit_reason TEXT,
     observed_at TEXT NOT NULL,
     UNIQUE(analyst, contract_key, horizon_days)
+);
+
+CREATE TABLE IF NOT EXISTS analyst_backtest_series (
+    analyst TEXT NOT NULL,
+    analyst_family TEXT NOT NULL,
+    contract_key TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    session_date TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    option_type TEXT NOT NULL,
+    expiry TEXT NOT NULL,
+    entry_day TEXT NOT NULL,
+    atm_strike REAL NOT NULL,
+    atm_ticker TEXT NOT NULL,
+    underlying_bars_json TEXT NOT NULL,
+    option_bars_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    PRIMARY KEY(analyst, contract_key)
 );
 
 CREATE TABLE IF NOT EXISTS strategy_versions (
@@ -377,6 +398,12 @@ class Database:
             abt_columns = {row[1] for row in connection.execute("PRAGMA table_info(analyst_backtest_outcomes)").fetchall()}
             if "stock_pnl_pct" not in abt_columns:
                 connection.execute("ALTER TABLE analyst_backtest_outcomes ADD COLUMN stock_pnl_pct REAL")
+            if "strategy_premium_pct" not in abt_columns:
+                connection.execute("ALTER TABLE analyst_backtest_outcomes ADD COLUMN strategy_premium_pct REAL")
+            if "atm_ticker" not in abt_columns:
+                connection.execute("ALTER TABLE analyst_backtest_outcomes ADD COLUMN atm_ticker TEXT")
+            if "strategy_exit_reason" not in abt_columns:
+                connection.execute("ALTER TABLE analyst_backtest_outcomes ADD COLUMN strategy_exit_reason TEXT")
             so_columns = {row[1] for row in connection.execute("PRAGMA table_info(signal_outcomes)").fetchall()}
             if "exit_reason" not in so_columns:
                 connection.execute("ALTER TABLE signal_outcomes ADD COLUMN exit_reason TEXT")
@@ -986,25 +1013,30 @@ class Database:
             connection.execute(
                 """INSERT INTO analyst_backtest_outcomes
                 (analyst, analyst_family, contract_key, symbol, session_date, direction,
-                 option_type, horizon_days, strategy_status, strategy_pnl_pct, stock_pnl_pct,
-                 direction_correct, underlying_change_pct, observed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 option_type, horizon_days, strategy_status, strategy_pnl_pct, strategy_premium_pct,
+                 stock_pnl_pct, direction_correct, underlying_change_pct, atm_ticker, strategy_exit_reason,
+                 observed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(analyst, contract_key, horizon_days) DO UPDATE SET
                 analyst_family=excluded.analyst_family, symbol=excluded.symbol,
                 session_date=excluded.session_date, direction=excluded.direction,
                 option_type=excluded.option_type, strategy_status=excluded.strategy_status,
                 strategy_pnl_pct=excluded.strategy_pnl_pct,
+                strategy_premium_pct=excluded.strategy_premium_pct,
                 stock_pnl_pct=excluded.stock_pnl_pct,
                 direction_correct=excluded.direction_correct,
                 underlying_change_pct=excluded.underlying_change_pct,
+                atm_ticker=excluded.atm_ticker,
+                strategy_exit_reason=excluded.strategy_exit_reason,
                 observed_at=excluded.observed_at""",
                 (str(outcome["analyst"]), str(outcome["analyst_family"]),
                  str(outcome["contract_key"]), str(outcome["symbol"]),
                  str(outcome["session_date"]), str(outcome["direction"]),
                  str(outcome["option_type"]), int(outcome["horizon_days"]),
                  str(outcome["strategy_status"]), outcome.get("strategy_pnl_pct"),
-                 outcome.get("stock_pnl_pct"),
+                 outcome.get("strategy_premium_pct"), outcome.get("stock_pnl_pct"),
                  outcome.get("direction_correct"), outcome.get("underlying_change_pct"),
+                 outcome.get("atm_ticker"), outcome.get("strategy_exit_reason"),
                  str(outcome["observed_at"])),
             )
             row = connection.execute(
@@ -1012,6 +1044,49 @@ class Database:
                 (str(outcome["analyst"]), str(outcome["contract_key"]), int(outcome["horizon_days"])),
             ).fetchone()
         return int(row["id"])
+
+    def save_analyst_backtest_series(self, series: Mapping[str, object]) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO analyst_backtest_series
+                (analyst, analyst_family, contract_key, symbol, session_date, direction, option_type, expiry, entry_day,
+                 atm_strike, atm_ticker, underlying_bars_json, option_bars_json, observed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(analyst, contract_key) DO UPDATE SET
+                analyst_family=excluded.analyst_family, symbol=excluded.symbol,
+                session_date=excluded.session_date, direction=excluded.direction,
+                option_type=excluded.option_type,
+                expiry=excluded.expiry, entry_day=excluded.entry_day, atm_strike=excluded.atm_strike,
+                atm_ticker=excluded.atm_ticker, underlying_bars_json=excluded.underlying_bars_json,
+                option_bars_json=excluded.option_bars_json, observed_at=excluded.observed_at""",
+                (str(series["analyst"]), str(series.get("analyst_family", "")), str(series["contract_key"]),
+                 str(series["symbol"]), str(series["session_date"]), str(series["direction"]),
+                 str(series.get("option_type", "")), str(series["expiry"]),
+                 str(series["entry_day"]), float(series["atm_strike"]), str(series["atm_ticker"]),
+                 str(series["underlying_bars_json"]), str(series["option_bars_json"]),
+                 str(series["observed_at"])),
+            )
+
+    def analyst_backtest_series(self, analyst: str, contract_key: str) -> Optional[Dict[str, object]]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM analyst_backtest_series WHERE analyst=? AND contract_key=?",
+                (analyst, contract_key),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def analyst_backtest_series_all(self) -> List[Dict[str, object]]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM analyst_backtest_series ORDER BY session_date, analyst").fetchall()
+        return [dict(row) for row in rows]
+
+    def analyst_backtest_outcomes_for_analyst(self, analyst: str, horizon_days: int) -> List[Dict[str, object]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM analyst_backtest_outcomes WHERE analyst=? AND horizon_days=? ORDER BY session_date, contract_key",
+                (analyst, horizon_days),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def analyst_backtest_outcomes(self) -> List[Dict[str, object]]:
         with self.connect() as connection:
@@ -1036,6 +1111,27 @@ class Database:
                    FROM analyst_backtest_outcomes
                    GROUP BY analyst, horizon_days
                    ORDER BY analyst, horizon_days"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def analyst_backtest_summary_for_horizon(self, horizon_days: int) -> List[Dict[str, object]]:
+        """One row per analyst for a single holding period (incl. premium capture rate)."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT analyst,
+                          COUNT(*) AS trades,
+                          SUM(CASE WHEN direction_correct=1 THEN 1 ELSE 0 END) AS direction_hits,
+                          SUM(CASE WHEN direction_correct IS NOT NULL THEN 1 ELSE 0 END) AS direction_rated,
+                          AVG(stock_pnl_pct) AS avg_stock_pnl,
+                          SUM(CASE WHEN strategy_status='filled' THEN 1 ELSE 0 END) AS filled,
+                          SUM(CASE WHEN strategy_status='filled' AND strategy_pnl_pct>0 THEN 1 ELSE 0 END) AS strategy_wins,
+                          AVG(CASE WHEN strategy_status='filled' THEN strategy_pnl_pct ELSE NULL END) AS avg_pnl,
+                          AVG(CASE WHEN strategy_status='filled' THEN strategy_premium_pct ELSE NULL END) AS avg_premium_pct
+                   FROM analyst_backtest_outcomes
+                   WHERE horizon_days=?
+                   GROUP BY analyst
+                   ORDER BY analyst""",
+                (horizon_days,),
             ).fetchall()
         return [dict(row) for row in rows]
 

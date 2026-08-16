@@ -3,9 +3,13 @@ import unittest
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from options_radar.analyst_backtest import AnalystBacktestCoordinator
+from options_radar.analyst_backtest import (
+    EXPIRY_HORIZON,
+    AnalystBacktestCoordinator,
+)
 from options_radar.db import Database
 from options_radar.models import FlowEvent, ParsedSignal
+from options_radar.optimizer import OptionBar
 
 
 def _bar(day, open_, high, low, close):
@@ -64,35 +68,38 @@ class AnalystBacktestTests(unittest.TestCase):
             underlying.append(_bar(day, close - 1.0, close + 1.0, close - 2.0, close))
         return underlying
 
+    def _settle_one(self, direction, option_type, underlying, option_bars, ticker):
+        self._seed(direction=direction, option_type=option_type)
+        market = FakeMarket({"TEST": underlying, ticker: option_bars})
+        coordinator = AnalystBacktestCoordinator(self.db, market)
+        coordinator.build_series()
+        coordinator.settle_horizon(1)
+        rows = self.db.analyst_backtest_outcomes_for_analyst("mr", 1)
+        return coordinator, rows
+
     def test_trade_signals_joins_flow_and_dedupes(self):
         self._seed()
         coordinator = AnalystBacktestCoordinator(self.db, FakeMarket({}))
         self.assertEqual(len(coordinator.trade_signals()), 1)
 
     def test_bull_sells_atm_put_and_stock_leg(self):
-        self._seed(direction="BULL", option_type="C")
         underlying = self._rising_underlying()
-        # Signal-day close = 100 -> ATM strike 100 -> O:TEST261016P00100000
         put_bars = [
             _bar(date(2026, 8, 4), 5.0, 5.5, 4.8, 4.5),
             _bar(date(2026, 8, 5), 4.5, 4.8, 4.2, 4.0),
             _bar(date(2026, 8, 6), 4.0, 4.4, 3.8, 3.6),
-            _bar(date(2026, 8, 7), 3.6, 3.9, 3.4, 3.2),
-            _bar(date(2026, 8, 10), 3.2, 3.5, 3.0, 2.8),
         ]
-        market = FakeMarket({"TEST": underlying, "O:TEST261016P00100000": put_bars})
-        coordinator = AnalystBacktestCoordinator(self.db, market)
-        outcomes = coordinator._settle(coordinator.trade_signals()[0])
-        by_horizon = {o["horizon_days"]: o for o in outcomes}
-        self.assertEqual(by_horizon[1]["direction_correct"], 1)
-        self.assertGreater(by_horizon[1]["stock_pnl_pct"], 0)
-        self.assertEqual(by_horizon[1]["strategy_status"], "filled")
-        # Underlying rises -> short put gains.
-        self.assertGreater(by_horizon[1]["strategy_pnl_pct"], 0)
+        _, rows = self._settle_one("BULL", "C", underlying, put_bars, "O:TEST261016P00100000")
+        self.assertEqual(len(rows), 1)
+        o = rows[0]
+        self.assertEqual(o["direction_correct"], 1)
+        self.assertGreater(o["stock_pnl_pct"], 0)
+        self.assertEqual(o["strategy_status"], "filled")
+        self.assertGreater(o["strategy_pnl_pct"], 0)
+        self.assertGreater(o["strategy_premium_pct"], 0)
+        self.assertEqual(o["atm_ticker"], "O:TEST261016P00100000")
 
     def test_bear_stock_flat_and_sells_atm_call(self):
-        self._seed(direction="BEAR", option_type="P")
-        # Underlying falls from 100 on the signal day; ATM CALL strike 100.
         underlying = [
             _bar(date(2026, 8, 3), 101, 102, 99, 100),
             _bar(date(2026, 8, 4), 99, 100, 98, 99),
@@ -102,36 +109,30 @@ class AnalystBacktestTests(unittest.TestCase):
         call_bars = [
             _bar(date(2026, 8, 4), 5.0, 5.2, 4.8, 4.6),
             _bar(date(2026, 8, 5), 4.6, 4.8, 4.3, 4.1),
-            _bar(date(2026, 8, 6), 4.1, 4.4, 3.9, 3.7),
         ]
-        market = FakeMarket({"TEST": underlying, "O:TEST261016C00100000": call_bars})
-        coordinator = AnalystBacktestCoordinator(self.db, market)
-        outcomes = coordinator._settle(coordinator.trade_signals()[0])
-        by_horizon = {o["horizon_days"]: o for o in outcomes}
-        self.assertEqual(by_horizon[1]["direction_correct"], 1)
-        # BEAR: stock leg stays flat at 0.
-        self.assertEqual(by_horizon[1]["stock_pnl_pct"], 0.0)
-        self.assertGreater(by_horizon[1]["strategy_pnl_pct"], 0)
+        _, rows = self._settle_one("BEAR", "P", underlying, call_bars, "O:TEST261016C00100000")
+        o = rows[0]
+        self.assertEqual(o["direction_correct"], 1)
+        self.assertEqual(o["stock_pnl_pct"], 0.0)
+        self.assertGreater(o["strategy_pnl_pct"], 0)
 
     def test_short_option_stops_out_when_premium_spikes(self):
-        self._seed(direction="BULL", option_type="C")
         underlying = [
             _bar(date(2026, 8, 3), 101, 102, 99, 100),
             _bar(date(2026, 8, 4), 98, 99, 95, 96),
             _bar(date(2026, 8, 5), 96, 97, 94, 95),
         ]
-        # Premium spikes far above +50% on day 1 -> stop-loss, not holding-limit.
         put_bars = [
             _bar(date(2026, 8, 4), 5.0, 9.0, 4.9, 8.5),
             _bar(date(2026, 8, 5), 8.5, 9.5, 8.0, 9.0),
         ]
-        market = FakeMarket({"TEST": underlying, "O:TEST261016P00100000": put_bars})
-        coordinator = AnalystBacktestCoordinator(self.db, market)
-        outcomes = coordinator._settle(coordinator.trade_signals()[0])
-        by_horizon = {o["horizon_days"]: o for o in outcomes}
-        self.assertLess(by_horizon[1]["strategy_pnl_pct"], 0)
+        _, rows = self._settle_one("BULL", "C", underlying, put_bars, "O:TEST261016P00100000")
+        o = rows[0]
+        self.assertLess(o["strategy_pnl_pct"], 0)
+        self.assertEqual(o["strategy_exit_reason"], "stop-loss")
+        self.assertAlmostEqual(o["strategy_premium_pct"], -0.5, delta=0.05)
 
-    def test_strategy_entry_uses_next_day_open_not_signal_day(self):
+    def test_run_builds_series_and_settles_default_horizons(self):
         self._seed(direction="BULL", option_type="C")
         underlying = self._rising_underlying()
         put_bars = [
@@ -141,30 +142,26 @@ class AnalystBacktestTests(unittest.TestCase):
         ]
         market = FakeMarket({"TEST": underlying, "O:TEST261016P00100000": put_bars})
         coordinator = AnalystBacktestCoordinator(self.db, market)
-        outcomes = coordinator._settle(coordinator.trade_signals()[0])
-        by_horizon = {o["horizon_days"]: o for o in outcomes}
-        self.assertEqual(by_horizon[1]["strategy_status"], "filled")
+        result = coordinator.run()
+        self.assertEqual(result["built"], 1)
+        # default horizons 1/3/5 + expiry(0) all settled
+        for horizon in (1, 3, 5, EXPIRY_HORIZON):
+            self.assertEqual(len(self.db.analyst_backtest_outcomes_for_analyst("mr", horizon)), 1)
+        # idempotent on second run
+        result2 = coordinator.run()
+        self.assertEqual(result2["built"], 0)
 
-    def test_run_persists_and_is_idempotent(self):
-        self._seed(direction="BULL", option_type="C")
-        underlying = self._rising_underlying()
-        put_bars = [
-            _bar(date(2026, 8, 4), 5.0, 5.5, 4.8, 4.5),
-            _bar(date(2026, 8, 5), 4.5, 4.8, 4.2, 4.0),
-            _bar(date(2026, 8, 6), 4.0, 4.4, 3.8, 3.6),
-        ]
-        market = FakeMarket({"TEST": underlying, "O:TEST261016P00100000": put_bars})
-        coordinator = AnalystBacktestCoordinator(self.db, market)
-        first = coordinator.run()
-        self.assertGreaterEqual(first["saved"], 3)
-        count = len(self.db.analyst_backtest_outcomes())
-        coordinator.run()
-        self.assertEqual(len(self.db.analyst_backtest_outcomes()), count)
-        summary = self.db.analyst_backtest_summary()
-        self.assertTrue(summary)
-        self.assertIn("direction_hits", summary[0])
-        self.assertIn("strategy_wins", summary[0])
-        self.assertIn("stock_wins", summary[0])
+    def test_horizon_bars_expiry_and_n_day(self):
+        coordinator = AnalystBacktestCoordinator(self.db, FakeMarket({}))
+        session = date(2026, 8, 3)
+        entry = date(2026, 8, 4)
+        expiry = date(2026, 8, 14)
+        bars = [OptionBar(datetime(2026, 8, day, 12), 5, 6, 4, 5) for day in range(4, 15)]
+        # N-day slice on option series -> first N bars
+        self.assertEqual(len(coordinator._horizon_bars(bars, session, entry, expiry, 3, is_option=True)), 3)
+        # expiry slice -> up to expiry - 3 days (8/11)
+        exp_bars = coordinator._horizon_bars(bars, session, entry, expiry, EXPIRY_HORIZON, is_option=True)
+        self.assertEqual(exp_bars[-1].observed_at.date(), date(2026, 8, 11))
 
 
 if __name__ == "__main__":

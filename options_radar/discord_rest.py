@@ -33,7 +33,7 @@ from .models import RawMessage, SourceCursor, SourceMessage
 DISCORD_API_BASE = "https://discord.com/api/v10"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
 PAGE_SIZE = 100
-MAX_PAGES = 20
+MAX_PAGES = 200
 RETRY_AFTER_429_SECONDS = 2.0
 
 

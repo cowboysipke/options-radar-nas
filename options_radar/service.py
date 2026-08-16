@@ -293,7 +293,7 @@ class OptionsRadarService:
         )
         self.ibkr_flex = IBKRFlexClient()
         self.massive = MassiveClient()
-        self.massive_backtest = MassiveClient(requests_per_minute=60)
+        self.massive_backtest = MassiveClient(requests_per_minute=5)
         def secret_value(direct: str, file_var: str) -> str:
             value = os.getenv(direct, "").strip()
             path = os.getenv(file_var, "").strip()
@@ -515,9 +515,9 @@ class OptionsRadarService:
             if backfill:
                 fetch_cursor = SourceCursor(
                     channel_id=channel_id, last_message_id="0",
-                    last_timestamp=datetime.utcnow() - timedelta(hours=96),
+                    last_timestamp=datetime.utcnow() - timedelta(days=30),
                 )
-                pages = 40
+                pages = 200
             try:
                 # Per-channel timeout keeps one slow/hung channel from
                 # blocking the whole poll cycle.
@@ -1214,7 +1214,7 @@ class OptionsRadarService:
                 self._analyst_backtest_running = False
 
     def _analyst_backtest_pending(self) -> int:
-        """Count TRADE signal groups that have no settled outcome yet."""
+        """Count TRADE signal groups that have no persisted bar series yet."""
         with self.database.connect() as conn:
             signal_count = conn.execute(
                 """SELECT COUNT(*) FROM (
@@ -1226,13 +1226,8 @@ class OptionsRadarService:
                        GROUP BY p.analyst, f.contract_key
                    )"""
             ).fetchone()[0]
-            done_count = conn.execute(
-                """SELECT COUNT(*) FROM (
-                       SELECT analyst, contract_key FROM analyst_backtest_outcomes
-                       GROUP BY analyst, contract_key
-                   )"""
-            ).fetchone()[0]
-        return max(0, signal_count - done_count)
+            series_count = conn.execute("SELECT COUNT(*) FROM analyst_backtest_series").fetchone()[0]
+        return max(0, signal_count - series_count)
 
     def _maybe_start_analyst_backtest(self) -> None:
         with self._backtest_lock:
@@ -1246,6 +1241,12 @@ class OptionsRadarService:
         threading.Thread(target=self._analyst_backtest_worker, daemon=True).start()
 
     def dashboard_backtest(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
+        payload = _payload if isinstance(_payload, Mapping) else {}
+        raw = payload.get("horizon_days")
+        try:
+            horizon = 5 if raw in (None, "") else int(raw)
+        except (TypeError, ValueError):
+            horizon = 5
         # Kick a background replay when stale, then return cached results so the
         # page renders instantly. The first load may show partial data while
         # historical bars are fetched; later loads are complete.
@@ -1272,7 +1273,7 @@ class OptionsRadarService:
             if not summary:
                 summary = {"status": "collecting", "note": "正在结算历史收益（拉取期权历史行情），稍后刷新页面查看。"}
         self._maybe_start_analyst_backtest()
-        analyst_outcomes = self.database.analyst_backtest_outcomes()
+        self._ensure_horizon_settled(horizon)
         return {
             "paper": self.database.paper_stats(),
             "last_run": self._last_backtest,
@@ -1282,11 +1283,30 @@ class OptionsRadarService:
             "replay": summary,
             "analyst_breakdown": self._analyst_backtest_breakdown(),
             "analyst_accuracy": {
-                "summary": self.database.analyst_backtest_summary(),
-                "daily": self.database.analyst_backtest_daily_summary(),
-                "outcomes": analyst_outcomes,
+                "summary": self.database.analyst_backtest_summary_for_horizon(horizon),
+                "daily": self.database.analyst_backtest_daily_summary(horizon),
+                "horizon_days": horizon,
                 "running": self._analyst_backtest_running,
             },
+        }
+
+    def _ensure_horizon_settled(self, horizon_days: int) -> None:
+        """Settle a requested holding period on demand (cached thereafter)."""
+        try:
+            self.analyst_backtests.settle_horizon(int(horizon_days))
+        except Exception:
+            pass
+
+    def analyst_backtest_detail(self, analyst: str = "", horizon_days: int = 5, **_kwargs: Any) -> Any:
+        horizon = int(horizon_days)
+        try:
+            self.analyst_backtests.settle_analyst_horizon(str(analyst), horizon)
+        except Exception:
+            pass
+        return {
+            "analyst": analyst,
+            "horizon_days": horizon,
+            "outcomes": self.database.analyst_backtest_outcomes_for_analyst(str(analyst), horizon),
         }
 
     def _analyst_backtest_breakdown(self) -> List[Dict[str, Any]]:
@@ -1407,6 +1427,7 @@ class OptionsRadarService:
             "market_compare": lambda payload: self.market_compare(**payload),
             "ibkr_sync": lambda payload: self.sync_ibkr(**payload),
             "collect": lambda payload: self.collect(bool(payload.get("backfill", False))),
+            "analyst_backtest_detail": lambda payload: self.analyst_backtest_detail(**payload),
             "report": lambda _payload: {"queue_id": self.publish_daily()},
             "feishu_test": lambda _payload: self.feishu.test_credentials(),
             "discord_login": lambda _payload: self.source.open_login(),

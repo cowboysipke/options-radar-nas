@@ -487,6 +487,7 @@ GET_APIS = {
     "/api/rules": "rules",
     "/api/analysts": "analysts",
     "/api/backtest": "backtest",
+    "/api/analyst-backtest-detail": "analyst_backtest_detail",
     "/api/providers": "providers",
     "/api/signals": "signals",
 }
@@ -851,6 +852,58 @@ function attachTableFilters(opts) {{
 }}
 attachTableFilters({{search:'signal-search',selects:['signal-dir','signal-status'],expand:'signal-expand',collapse:'signal-collapse'}});
 attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand:'portfolio-expand',collapse:'portfolio-collapse'}});
+(function(){{
+  const rows=document.querySelectorAll('tr.analyst-row');
+  if(!rows.length) return;
+  function abtHorizon(){{
+    const inp=document.querySelector('input[name="horizon_days"]');
+    if(!inp) return 5;
+    const v=inp.value.trim();
+    return v===''?0:(parseInt(v,10)||5);
+  }}
+  const exitNames={{'stop-loss':'止损','take-profit':'止盈','holding-limit':'持有到期','no-complete-bar':'无K线','no-fill':'未成交'}};
+  function esc(s){{ const d=document.createElement('div'); d.textContent=s==null?'':String(s); return d.innerHTML; }}
+  function renderDetail(detail,data){{
+    const items=(data&&data.outcomes)||[];
+    if(!items.length){{ detail.querySelector('div').innerHTML='<span class="muted">暂无逐笔数据</span>'; return; }}
+    let html='<div class="table-wrap"><table><tr><th>交易日</th><th>标的</th><th>信号合约</th><th>方向</th><th>ATM合约</th><th>正股盈亏</th><th>卖方盈亏</th><th>权利金</th><th>退出</th></tr>';
+    items.forEach(function(o){{
+      const sp=o.stock_pnl_pct; const pp=o.strategy_pnl_pct; const pr=o.strategy_premium_pct;
+      function cls(v){{ return v==null?'muted':(v>=0?'up':'down'); }}
+      function pct(v){{ return v==null?'—':'<span class="'+cls(v)+'">'+(v*100).toFixed(2)+'%</span>'; }}
+      function prem(v){{ return v==null?'—':'<span class="'+cls(v)+'">'+(v*100).toFixed(0)+'%</span>'; }}
+      const dir=o.direction==='BULL'?'<span class="badge up">看多</span>':(o.direction==='BEAR'?'<span class="badge down">看空</span>':esc(o.direction));
+      const exit=exitNames[o.strategy_exit_reason]||esc(o.strategy_exit_reason||'—');
+      html+='<tr><td>'+esc(o.session_date)+'</td><td>'+esc(o.symbol)+'</td><td class="muted">'+esc(o.contract_key)+'</td><td>'+dir+'</td><td class="muted">'+esc(o.atm_ticker)+'</td><td>'+pct(sp)+'</td><td>'+pct(pp)+'</td><td>'+prem(pr)+'</td><td>'+exit+'</td></tr>';
+    }});
+    html+='</table></div>';
+    detail.querySelector('div').innerHTML=html;
+  }}
+  rows.forEach(function(row){{
+    row.style.cursor='pointer';
+    row.addEventListener('click',async function(){{
+      const analyst=row.getAttribute('data-analyst');
+      const detail=document.getElementById('detail-'+analyst);
+      if(!detail) return;
+      if(detail.style.display!=='none'){{ detail.style.display='none'; return; }}
+      detail.style.display='';
+      if(detail.getAttribute('data-loaded')==='1') return;
+      detail.querySelector('div').textContent='加载中…';
+      try{{
+        const url='/api/analyst-backtest-detail?analyst='+encodeURIComponent(analyst)+'&horizon_days='+abtHorizon();
+        const resp=await fetch(url); const data=await resp.json();
+        renderDetail(detail,data);
+        detail.setAttribute('data-loaded','1');
+      }}catch(e){{ detail.querySelector('div').textContent='加载失败：'+e; }}
+    }});
+  }});
+  const expandAll=document.getElementById('analyst-expand');
+  const collapseAll=document.getElementById('analyst-collapse');
+  if(expandAll) expandAll.addEventListener('click',function(){{ rows.forEach(function(r){{ r.click(); }}); }});
+  if(collapseAll) collapseAll.addEventListener('click',function(){{
+    rows.forEach(function(r){{ const d=document.getElementById('detail-'+r.getAttribute('data-analyst')); if(d) d.style.display='none'; }});
+  }});
+}})();
 </script></body></html>'''
 
     def _login_page(self, message: str = "") -> str:
@@ -1231,41 +1284,57 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                         + "".join(detail_rows) + '</table></div></section>'
                     )
             accuracy = data.get("analyst_accuracy") or {}
+            horizon = int(accuracy.get("horizon_days", 5) or 5)
             acc_summary = accuracy.get("summary") if isinstance(accuracy.get("summary"), list) else []
             if acc_summary:
+                horizon_label = "持有到期" if horizon == 0 else f"{horizon} 日"
+                horizon_value = "" if horizon == 0 else str(horizon)
                 acc_rows = []
                 for item in acc_summary:
                     trades = int(item.get("trades", 0) or 0)
                     filled = int(item.get("filled", 0) or 0)
+                    direction_rated = int(item.get("direction_rated", 0) or 0)
                     direction_hits = int(item.get("direction_hits", 0) or 0)
                     strategy_wins = int(item.get("strategy_wins", 0) or 0)
-                    direction_rate = f"{direction_hits / trades * 100:.1f}%" if trades else "—"
+                    direction_rate = f"{direction_hits / direction_rated * 100:.1f}%" if direction_rated else "—"
                     strategy_rate = f"{strategy_wins / filled * 100:.1f}%" if filled else "—"
                     avg_pnl = float(item.get("avg_pnl", 0) or 0)
                     avg_stock = float(item.get("avg_stock_pnl", 0) or 0)
+                    avg_premium = float(item.get("avg_premium_pct", 0) or 0)
+                    analyst = str(item.get("analyst", ""))
                     pnl_cls = "up" if avg_pnl >= 0 else "down"
                     stock_cls = "up" if avg_stock >= 0 else "down"
+                    prem_cls = "up" if avg_premium >= 0 else "down"
                     acc_rows.append(
-                        '<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class="{}">{:+.2f}%</td><td>{}</td><td class="{}">{:+.2f}%</td></tr>'.format(
-                            html.escape(str(item.get("analyst", ""))),
-                            item.get("horizon_days", ""),
-                            trades,
-                            direction_rate,
-                            stock_cls,
-                            avg_stock * 100,
-                            strategy_rate,
-                            pnl_cls,
-                            avg_pnl * 100,
+                        '<tr class="analyst-row" data-analyst="{0}"><td><span class="muted">▸</span> {0}</td>'
+                        '<td>{1}</td><td>{2}</td><td class="{3}">{4:+.2f}%</td><td>{5}</td>'
+                        '<td class="{6}">{7:+.2f}%</td><td class="{8}">{9:+.0f}%</td></tr>'
+                        '<tr class="analyst-detail" id="detail-{0}" style="display:none"><td colspan="7">'
+                        '<div class="muted">展开中…</div></td></tr>'.format(
+                            analyst, trades, direction_rate, stock_cls, avg_stock * 100,
+                            strategy_rate, pnl_cls, avg_pnl * 100, prem_cls, avg_premium * 100,
                         )
                     )
                 parts.append(
+                    '<form method="get" class="card toolbar" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+                    '<label style="margin:0;font-weight:600;white-space:nowrap">持有期（交易日）</label>'
+                    '<input type="number" name="horizon_days" value="' + horizon_value + '" min="0" max="365" '
+                    'placeholder="到期" style="width:110px;display:inline-block;margin:0">'
+                    '<span class="muted">输入 0 = 持有到期前 3 天平仓</span>'
+                    '<button type="submit">更新</button>'
+                    '<button type="button" class="secondary" id="analyst-expand">全部展开</button>'
+                    '<button type="button" class="secondary" id="analyst-collapse">全部折叠</button>'
+                    '</form>'
+                )
+                parts.append(
                     '<section class="card"><h2>分析师信号回测（TRADE 信号，双口径）</h2>'
+                    f'<p class="muted">当前持有期：{html.escape(horizon_label)}。点击分析师行展开逐笔明细。</p>'
                     '<div class="table-wrap"><table>'
-                    '<tr><th>分析师</th><th>持有(日)</th><th>信号数</th><th>方向正确率</th><th>正股盈亏</th><th>卖方策略胜率</th><th>卖方平均盈亏</th></tr>'
+                    '<tr><th>分析师</th><th>信号数</th><th>方向正确率</th><th>正股盈亏</th><th>卖方胜率</th><th>卖方盈亏</th><th>权利金赚取率</th></tr>'
                     + "".join(acc_rows) + '</table></div>'
-                    '<p class="muted">每行 = 分析师 × 持有期。方向正确率基于正股涨跌；正股策略 = BULL 次日买正股持 N 日 / BEAR 空仓；'
+                    '<p class="muted">方向正确率基于正股涨跌；正股策略 = BULL 次日买正股 / BEAR 空仓；'
                     '卖方策略 = BULL 卖平值 PUT / BEAR 卖平值 CALL（次日开盘成交，3% 滑点，无止盈，权利金涨 50% 止损，收益率按 25% 保证金口径）。'
-                    '四个分析家族中当前有 TRADE 信号的都会纳入。</p></section>'
+                    '权利金赚取率 = 每笔赚/亏权利金的比例（如 +65% = 赚了 65% 权利金，-50% = 止损亏 50% 权利金）。</p></section>'
                 )
             elif accuracy.get("running"):
                 parts.append('<section class="card"><h2>分析师信号回测</h2><p class="muted">正在回测 TRADE 信号（拉取期权历史行情），稍后刷新查看。</p></section>')
@@ -1298,7 +1367,7 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                         )
                     )
                 parts.append(
-                    '<section class="card"><h2>信号日历（5 日结算，双口径）</h2><div class="table-wrap"><table>'
+                    '<section class="card"><h2>信号日历（' + horizon_label + '结算，双口径）</h2><div class="table-wrap"><table>'
                     '<tr><th>交易日</th><th>信号数</th><th>方向正确率</th><th>正股盈亏</th><th>卖方策略胜率</th><th>卖方平均盈亏</th></tr>'
                     + "".join(cal_rows) + '</table></div>'
                     '<p class="muted">按信号产生日聚合；正股 = BULL 买正股 / BEAR 空仓，卖方 = 卖平值期权（25% 保证金口径）。</p></section>'
