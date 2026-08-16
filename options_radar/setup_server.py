@@ -1235,61 +1235,14 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
             paper = data.get("paper") or {}
             breakdown = data.get("analyst_breakdown") if isinstance(data.get("analyst_breakdown"), list) else []
             parts = []
-            if ranges.get("start"):
-                filled = replay.get("filled", 0)
-                no_fill = replay.get("no_fill", 0)
-                avg = round(float(replay.get("avg_net_return", 0) or 0) * 100, 2)
-                dd = round(float(replay.get("max_drawdown", 0) or 0) * 100, 2)
-                total = filled + no_fill
-                win_rate = "—"
-                if filled:
-                    wins = sum(1 for item in (replay.get("outcomes") or []) if item.get("status") == "filled" and float(item.get("pnl_pct") or 0) > 0)
-                    win_rate = f"{round(wins / filled * 100, 1)}%"
-                parts.append((
-                    '<details class="card"><summary>共识推荐回放（{} ~ {}，{} 个交易日）</summary>'
-                    '<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">'
-                    f'<div class="card"><div class="muted">结算笔数</div><div class="metric">{filled}</div><div class="muted">未成交 {no_fill}</div></div>'
-                    f'<div class="card"><div class="muted">胜率</div><div class="metric">{html.escape(win_rate)}</div></div>'
-                    f'<div class="card"><div class="muted">平均收益率</div><div class="metric">{avg}%</div></div>'
-                    f'<div class="card"><div class="muted">最大回撤</div><div class="metric">{dd}%</div></div>'
-                    '</div><p class="muted">基于共识推荐记录（推荐按合约覆盖式更新，仅保留最近交易日）；5 日结算需交易日满 5 天，样本随运行自动积累。</p></details>'
-                ).format(html.escape(str(ranges["start"])), html.escape(str(ranges["end"])), data.get("sessions_available", 0)))
-                outcomes = replay.get("outcomes") or []
-                if outcomes:
-                    exit_names = {
-                        "stop-loss": "止损", "take-profit": "止盈", "holding-limit": "持有到期",
-                        "no-complete-bar": "无K线", "limit-exceeded": "超限价", "no-fill": "未成交",
-                    }
-                    detail_rows = []
-                    for item in outcomes:
-                        pnl = float(item.get("pnl_pct") or 0.0) if item.get("status") == "filled" else None
-                        pnl_html = "—"
-                        if pnl is not None:
-                            cls = "up" if pnl >= 0 else "down"
-                            pnl_html = f'<span class="{cls}">{pnl * 100:+.2f}%</span>'
-                        status_label = {"filled": "成交", "no-fill": "未成交"}.get(str(item.get("status")), str(item.get("status")))
-                        exit_label = exit_names.get(str(item.get("exit_reason")), str(item.get("exit_reason") or "—"))
-                        detail_rows.append(
-                            '<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>'.format(
-                                html.escape(str(item.get("session_date", ""))),
-                                html.escape(str(item.get("contract_key", ""))),
-                                item.get("horizon_days", ""),
-                                html.escape(status_label),
-                                pnl_html,
-                                html.escape(exit_label),
-                            )
-                        )
-                    parts.append(
-                        '<details class="card"><summary>逐笔结算明细</summary><div class="table-wrap"><table>'
-                        '<tr><th>交易日</th><th>合约</th><th>持有(日)</th><th>状态</th><th>收益率</th><th>退出</th></tr>'
-                        + "".join(detail_rows) + '</table></div></details>'
-                    )
+
+            # -- 1. 分析师信号回测（置顶，核心） --
             accuracy = data.get("analyst_accuracy") or {}
             horizon = int(accuracy.get("horizon_days", 5) or 5)
+            horizon_label = "持有到期" if horizon == 0 else f"{horizon} 日"
+            horizon_value = "" if horizon == 0 else str(horizon)
             acc_summary = accuracy.get("summary") if isinstance(accuracy.get("summary"), list) else []
             if acc_summary:
-                horizon_label = "持有到期" if horizon == 0 else f"{horizon} 日"
-                horizon_value = "" if horizon == 0 else str(horizon)
                 acc_rows = []
                 for item in acc_summary:
                     trades = int(item.get("trades", 0) or 0)
@@ -1317,7 +1270,9 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                         )
                     )
                 parts.append(
-                    '<form method="get" class="card toolbar" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+                    '<section class="card"><h2>分析师信号回测（TRADE 信号，双口径）</h2>'
+                    f'<p class="muted">当前持有期：{html.escape(horizon_label)}。点击分析师行展开逐笔明细。</p>'
+                    '<form method="get" class="toolbar" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">'
                     '<label style="margin:0;font-weight:600;white-space:nowrap">持有期（交易日）</label>'
                     '<input type="number" name="horizon_days" value="' + horizon_value + '" min="0" max="365" '
                     'placeholder="到期" style="width:110px;display:inline-block;margin:0">'
@@ -1326,10 +1281,6 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                     '<button type="button" class="secondary" id="analyst-expand">全部展开</button>'
                     '<button type="button" class="secondary" id="analyst-collapse">全部折叠</button>'
                     '</form>'
-                )
-                parts.append(
-                    '<section class="card"><h2>分析师信号回测（TRADE 信号，双口径）</h2>'
-                    f'<p class="muted">当前持有期：{html.escape(horizon_label)}。点击分析师行展开逐笔明细。</p>'
                     '<div class="table-wrap"><table>'
                     '<tr><th>分析师</th><th>信号数</th><th>方向正确率</th><th>正股盈亏</th><th>卖方胜率</th><th>卖方盈亏</th><th>权利金赚取率</th></tr>'
                     + "".join(acc_rows) + '</table></div>'
@@ -1340,6 +1291,7 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
             elif accuracy.get("running"):
                 parts.append('<section class="card"><h2>分析师信号回测</h2><p class="muted">正在回测 TRADE 信号（拉取期权历史行情），稍后刷新查看。</p></section>')
 
+            # -- 2. 信号日历（折叠） --
             daily = accuracy.get("daily") if isinstance(accuracy.get("daily"), list) else []
             if daily:
                 cal_rows = []
@@ -1374,6 +1326,56 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                     '<p class="muted">按信号产生日聚合；正股 = BULL 买正股 / BEAR 空仓，卖方 = 卖平值期权（25% 保证金口径）。</p></details>'
                 )
 
+            # -- 3. 共识推荐（合并折叠组） --
+            consensus_parts = []
+            if ranges.get("start"):
+                filled = replay.get("filled", 0)
+                no_fill = replay.get("no_fill", 0)
+                avg = round(float(replay.get("avg_net_return", 0) or 0) * 100, 2)
+                dd = round(float(replay.get("max_drawdown", 0) or 0) * 100, 2)
+                win_rate = "—"
+                if filled:
+                    wins = sum(1 for item in (replay.get("outcomes") or []) if item.get("status") == "filled" and float(item.get("pnl_pct") or 0) > 0)
+                    win_rate = f"{round(wins / filled * 100, 1)}%"
+                consensus_parts.append((
+                    '<h3 style="margin:14px 0 6px">回放（{} ~ {}，{} 个交易日）</h3>'
+                    '<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">'
+                    f'<div class="card"><div class="muted">结算笔数</div><div class="metric">{filled}</div><div class="muted">未成交 {no_fill}</div></div>'
+                    f'<div class="card"><div class="muted">胜率</div><div class="metric">{html.escape(win_rate)}</div></div>'
+                    f'<div class="card"><div class="muted">平均收益率</div><div class="metric">{avg}%</div></div>'
+                    f'<div class="card"><div class="muted">最大回撤</div><div class="metric">{dd}%</div></div>'
+                    '</div>'
+                ).format(html.escape(str(ranges["start"])), html.escape(str(ranges["end"])), data.get("sessions_available", 0)))
+                outcomes = replay.get("outcomes") or []
+                if outcomes:
+                    exit_names = {
+                        "stop-loss": "止损", "take-profit": "止盈", "holding-limit": "持有到期",
+                        "no-complete-bar": "无K线", "limit-exceeded": "超限价", "no-fill": "未成交",
+                    }
+                    detail_rows = []
+                    for item in outcomes:
+                        pnl = float(item.get("pnl_pct") or 0.0) if item.get("status") == "filled" else None
+                        pnl_html = "—"
+                        if pnl is not None:
+                            cls = "up" if pnl >= 0 else "down"
+                            pnl_html = f'<span class="{cls}">{pnl * 100:+.2f}%</span>'
+                        status_label = {"filled": "成交", "no-fill": "未成交"}.get(str(item.get("status")), str(item.get("status")))
+                        exit_label = exit_names.get(str(item.get("exit_reason")), str(item.get("exit_reason") or "—"))
+                        detail_rows.append(
+                            '<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>'.format(
+                                html.escape(str(item.get("session_date", ""))),
+                                html.escape(str(item.get("contract_key", ""))),
+                                item.get("horizon_days", ""),
+                                html.escape(status_label),
+                                pnl_html,
+                                html.escape(exit_label),
+                            )
+                        )
+                    consensus_parts.append(
+                        '<h3 style="margin:14px 0 6px">逐笔结算明细</h3><div class="table-wrap"><table>'
+                        '<tr><th>交易日</th><th>合约</th><th>持有(日)</th><th>状态</th><th>收益率</th><th>退出</th></tr>'
+                        + "".join(detail_rows) + '</table></div>'
+                    )
             if breakdown:
                 br_rows = "".join(
                     '<tr><td>{}</td><td>{}</td><td>{}</td><td>{:.1f}%</td><td>{:+.2f}%</td></tr>'.format(
@@ -1383,12 +1385,19 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                         float(item.get("avg_return", 0) or 0) * 100,
                     ) for item in breakdown
                 )
-                parts.append(
-                    '<details class="card"><summary>共识推荐分析师胜率（5日结算）</summary><div class="table-wrap"><table>'
+                consensus_parts.append(
+                    '<h3 style="margin:14px 0 6px">共识推荐分析师胜率（5日结算）</h3><div class="table-wrap"><table>'
                     '<tr><th>分析师</th><th>成交笔数</th><th>盈利笔数</th><th>胜率</th><th>平均收益</th></tr>'
                     + br_rows + '</table></div>'
-                    '<p class="muted">基于共识推荐中的分析师投票（覆盖式更新，仅最近交易日）。</p></details>'
                 )
+            if consensus_parts:
+                parts.append(
+                    '<details class="card"><summary>共识推荐（推荐级回放，样本少）</summary>'
+                    '<p class="muted">基于共识推荐记录（推荐按合约覆盖式更新，仅保留最近交易日）；5 日结算需交易日满 5 天，样本随运行自动积累。</p>'
+                    + "".join(consensus_parts) + '</details>'
+                )
+
+            # -- 4. 模拟交易统计 --
             if paper:
                 parts.append(f'<section class="card"><h2>模拟交易统计</h2><p>平仓: {paper.get("closed",0)} 笔　胜率: {round(paper.get("win_rate",0)*100,1)}%　损益: ${paper.get("realized_pnl",0):,.2f}</p></section>')
             return "".join(parts) if parts else '<section class="card"><p>暂无回测数据。等待系统积累足够交易日后再查看。</p></section>'
