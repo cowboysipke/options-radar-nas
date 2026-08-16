@@ -151,6 +151,25 @@ class AnalystBacktestTests(unittest.TestCase):
         result2 = coordinator.run()
         self.assertEqual(result2["built"], 0)
 
+    def test_backtest_weight_calibration(self):
+        from options_radar.analytics import update_analyst_weights_from_backtest
+        self._seed(direction="BULL", option_type="C")
+        underlying = self._rising_underlying()
+        put_bars = [
+            _bar(date(2026, 8, 4), 5.0, 5.5, 4.8, 4.5),
+            _bar(date(2026, 8, 5), 4.5, 4.8, 4.2, 4.0),
+            _bar(date(2026, 8, 6), 4.0, 4.4, 3.8, 3.6),
+        ]
+        market = FakeMarket({"TEST": underlying, "O:TEST261016P00100000": put_bars})
+        coordinator = AnalystBacktestCoordinator(self.db, market)
+        coordinator.run()
+        weights = update_analyst_weights_from_backtest(self.db, horizon_days=EXPIRY_HORIZON)
+        self.assertIn("mr", weights)
+        self.assertGreaterEqual(weights["mr"], 0.5)
+        self.assertLessEqual(weights["mr"], 1.5)
+        stored = self.db.get_weights(["mr"])
+        self.assertEqual(stored["mr"], weights["mr"])
+
     def test_horizon_bars_expiry_and_n_day(self):
         coordinator = AnalystBacktestCoordinator(self.db, FakeMarket({}))
         session = date(2026, 8, 3)

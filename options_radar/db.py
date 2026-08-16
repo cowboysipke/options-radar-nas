@@ -1088,6 +1088,21 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def analyst_backtest_samples(self, horizon_days: int = 0) -> List[Dict[str, object]]:
+        """Per-signal back-test samples (direction, sell pnl, confidence) for weight calibration."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT o.analyst, o.direction_correct, o.strategy_pnl_pct,
+                          (SELECT p.confidence FROM parsed_signals p
+                           WHERE p.analyst=o.analyst AND p.contract_key=o.contract_key
+                             AND p.decision='TRADE'
+                           ORDER BY p.observed_at DESC LIMIT 1) AS confidence
+                   FROM analyst_backtest_outcomes o
+                   WHERE o.horizon_days=? AND o.strategy_status='filled'""",
+                (horizon_days,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def analyst_backtest_outcomes(self) -> List[Dict[str, object]]:
         with self.connect() as connection:
             rows = connection.execute(

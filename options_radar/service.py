@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .ai_provider import DeepSeekProvider
 from .analyst_backtest import AnalystBacktestCoordinator, CompositeBarsSource
-from .analytics import update_analyst_weights_from_outcomes
+from .analytics import update_analyst_weights_from_backtest, update_analyst_weights_from_outcomes
 from .backtest_service import BacktestCoordinator
 from .backup_providers import AlpacaProvider
 from .config import AppConfig, load_config
@@ -1212,9 +1212,13 @@ class OptionsRadarService:
                 self._backtest_running = False
 
     def _analyst_backtest_worker(self) -> None:
-        """Replay TRADE signals against Massive daily bars in the background."""
+        """Replay TRADE signals against daily bars in the background."""
         try:
             self.analyst_backtests.run()
+            try:
+                update_analyst_weights_from_backtest(self.database, horizon_days=0)
+            except Exception:
+                pass
             self._analyst_backtest_at = time.monotonic()
         except Exception as exc:
             self._last_error = f"analyst_backtest:{type(exc).__name__}:{str(exc)[:120]}"

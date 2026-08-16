@@ -68,3 +68,44 @@ def update_analyst_weights_from_outcomes(
         database.save_weight(analyst, weight, len(items), metrics)
         updated[analyst] = weight
     return updated
+
+
+def update_analyst_weights_from_backtest(
+    database: Database, horizon_days: int = 0
+) -> Dict[str, float]:
+    """Calibrate analyst weights from the signal back-test.
+
+    Mixed metric: hit-rate uses the underlying direction (pure signal quality),
+    median return uses the sell-side option pnl (the operator's real strategy),
+    and calibration measures how well confidence matched the direction outcome.
+    """
+    samples = database.analyst_backtest_samples(horizon_days)
+    grouped: Dict[str, List[Dict[str, object]]] = defaultdict(list)
+    for item in samples:
+        grouped[str(item["analyst"])].append(item)
+    updated: Dict[str, float] = {}
+    for analyst, items in grouped.items():
+        rated = [
+            item for item in items
+            if item.get("direction_correct") is not None and item.get("confidence") is not None
+        ]
+        if not rated:
+            continue
+        hit_rate = sum(1 for item in rated if item["direction_correct"] == 1) / len(rated)
+        returns = [float(item["strategy_pnl_pct"] or 0.0) for item in rated]
+        calibration = [
+            1.0 - (float(item["confidence"]) - float(item["direction_correct"])) ** 2
+            for item in rated
+        ]
+        metrics = {
+            "hit_rate": hit_rate,
+            "median_return": statistics.median(returns),
+            "calibration": sum(calibration) / len(calibration),
+        }
+        weight = calibrated_weight(
+            metrics["hit_rate"], metrics["median_return"], metrics["calibration"], len(rated)
+        )
+        database.save_weight(analyst, weight, len(rated), metrics)
+        updated[analyst] = weight
+    return updated
+

@@ -1246,13 +1246,13 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                     wins = sum(1 for item in (replay.get("outcomes") or []) if item.get("status") == "filled" and float(item.get("pnl_pct") or 0) > 0)
                     win_rate = f"{round(wins / filled * 100, 1)}%"
                 parts.append((
-                    '<section class="card"><h2>共识推荐回放（{} ~ {}，{} 个交易日）</h2>'
+                    '<details class="card"><summary>共识推荐回放（{} ~ {}，{} 个交易日）</summary>'
                     '<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">'
                     f'<div class="card"><div class="muted">结算笔数</div><div class="metric">{filled}</div><div class="muted">未成交 {no_fill}</div></div>'
                     f'<div class="card"><div class="muted">胜率</div><div class="metric">{html.escape(win_rate)}</div></div>'
                     f'<div class="card"><div class="muted">平均收益率</div><div class="metric">{avg}%</div></div>'
                     f'<div class="card"><div class="muted">最大回撤</div><div class="metric">{dd}%</div></div>'
-                    '</div><p class="muted">基于共识推荐记录（推荐按合约覆盖式更新，仅保留最近交易日）；5 日结算需交易日满 5 天，样本随运行自动积累。</p></section>'
+                    '</div><p class="muted">基于共识推荐记录（推荐按合约覆盖式更新，仅保留最近交易日）；5 日结算需交易日满 5 天，样本随运行自动积累。</p></details>'
                 ).format(html.escape(str(ranges["start"])), html.escape(str(ranges["end"])), data.get("sessions_available", 0)))
                 outcomes = replay.get("outcomes") or []
                 if outcomes:
@@ -1280,9 +1280,9 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                             )
                         )
                     parts.append(
-                        '<section class="card"><h2>逐笔结算明细</h2><div class="table-wrap"><table>'
+                        '<details class="card"><summary>逐笔结算明细</summary><div class="table-wrap"><table>'
                         '<tr><th>交易日</th><th>合约</th><th>持有(日)</th><th>状态</th><th>收益率</th><th>退出</th></tr>'
-                        + "".join(detail_rows) + '</table></div></section>'
+                        + "".join(detail_rows) + '</table></div></details>'
                     )
             accuracy = data.get("analyst_accuracy") or {}
             horizon = int(accuracy.get("horizon_days", 5) or 5)
@@ -1368,10 +1368,10 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                         )
                     )
                 parts.append(
-                    '<section class="card"><h2>信号日历（' + horizon_label + '结算，双口径）</h2><div class="table-wrap"><table>'
+                    '<details class="card"><summary>信号日历（' + horizon_label + '结算，双口径）</summary><div class="table-wrap"><table>'
                     '<tr><th>交易日</th><th>信号数</th><th>方向正确率</th><th>正股盈亏</th><th>卖方策略胜率</th><th>卖方平均盈亏</th></tr>'
                     + "".join(cal_rows) + '</table></div>'
-                    '<p class="muted">按信号产生日聚合；正股 = BULL 买正股 / BEAR 空仓，卖方 = 卖平值期权（25% 保证金口径）。</p></section>'
+                    '<p class="muted">按信号产生日聚合；正股 = BULL 买正股 / BEAR 空仓，卖方 = 卖平值期权（25% 保证金口径）。</p></details>'
                 )
 
             if breakdown:
@@ -1384,10 +1384,10 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                     ) for item in breakdown
                 )
                 parts.append(
-                    '<section class="card"><h2>共识推荐分析师胜率（5日结算）</h2><div class="table-wrap"><table>'
+                    '<details class="card"><summary>共识推荐分析师胜率（5日结算）</summary><div class="table-wrap"><table>'
                     '<tr><th>分析师</th><th>成交笔数</th><th>盈利笔数</th><th>胜率</th><th>平均收益</th></tr>'
                     + br_rows + '</table></div>'
-                    '<p class="muted">基于共识推荐中的分析师投票（覆盖式更新，仅最近交易日）。</p></section>'
+                    '<p class="muted">基于共识推荐中的分析师投票（覆盖式更新，仅最近交易日）。</p></details>'
                 )
             if paper:
                 parts.append(f'<section class="card"><h2>模拟交易统计</h2><p>平仓: {paper.get("closed",0)} 笔　胜率: {round(paper.get("win_rate",0)*100,1)}%　损益: ${paper.get("realized_pnl",0):,.2f}</p></section>')
