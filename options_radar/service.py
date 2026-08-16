@@ -1431,6 +1431,7 @@ class OptionsRadarService:
             "report": lambda _payload: {"queue_id": self.publish_daily()},
             "feishu_test": lambda _payload: self.feishu.test_credentials(),
             "discord_login": lambda _payload: self.source.open_login(),
+            "discord_refresh_qr": lambda _payload: self.source.refresh_qr(),
             "deepseek_test": lambda _payload: self.ai.health(check_remote=True),
             "backup": lambda _payload: self.create_backup(),
             "futu_sync": lambda _payload: _as_jsonable(self.sync_broker(force=True)),

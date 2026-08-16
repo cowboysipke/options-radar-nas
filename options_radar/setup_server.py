@@ -502,6 +502,7 @@ POST_APIS = {
     "/api/actions/backup": "backup",
     "/api/actions/feishu-test": "feishu_test",
     "/api/actions/discord-login": "discord_login",
+    "/api/actions/discord-refresh-qr": "discord_refresh_qr",
     "/api/actions/deepseek-test": "deepseek_test",
     "/api/ibkr/sync": "ibkr_sync",
     "/api/portfolio/refresh": "portfolio_refresh",
@@ -1493,10 +1494,38 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
         )
         notice = f'<p class="{"error" if ("出错" in message or "失败" in message) else "ok"}">{html.escape(message)}</p>' if message else ""
         qr_path = Path(os.getenv("DATA_DIR", "/data")) / "evidence" / "discord-login.png"
-        qr_html = '<h2>Discord扫码登录</h2><img src="/discord-login.png" alt="Discord登录二维码" style="max-width:360px;width:100%">' if qr_path.is_file() else ""
+        local = os.getenv("OPTIONS_RADAR_LOCAL") == "1"
+        if local:
+            qr_html = (
+                '<p class="muted">点击“打开Discord登录”后，会在本机弹出 Discord 浏览器窗口，'
+                '请直接在那个窗口里用手机扫码或账号登录；登录状态自动保存，无需在本页操作。</p>'
+            )
+        else:
+            qr_html = ""
+            if qr_path.is_file():
+                qr_html = (
+                    '<h2>Discord扫码登录</h2>'
+                    '<p class="muted">二维码约 2 分钟过期，请及时扫码；过期后点“刷新二维码”。</p>'
+                    '<img id="discord-qr" src="/discord-login.png" alt="Discord登录二维码" style="max-width:320px;width:100%">'
+                    '<div><button type="button" class="secondary" onclick="refreshDiscordQr()">刷新二维码</button></div>'
+                )
+            qr_html += (
+                '<script>'
+                'async function refreshDiscordQr(){'
+                '  const btn=event.target; btn.disabled=true; btn.textContent="刷新中…";'
+                '  try{'
+                '    const r=await fetch("/api/actions/discord-refresh-qr",{method:"POST",body:new URLSearchParams({csrf:"' + html.escape(csrf) + '"})});'
+                '    const d=await r.json();'
+                '    const img=document.getElementById("discord-qr");'
+                '    if(img){img.src="/discord-login.png?t="+Date.now();}'
+                '    btn.textContent=(r.ok?"已刷新":"失败")+"，点击重试";'
+                '  }catch(e){btn.textContent="刷新失败";}'
+                '  btn.disabled=false;'
+                '}'
+                '</script>'
+            )
         captcha_path = Path(os.getenv("DATA_DIR", "/data")) / "opend-profile" / ".com.futunn.FutuOpenD" / "F3CNN" / "PicVerifyCode.png"
         captcha_html = '<h3>富途图形验证码</h3><img src="/futu-captcha.png" alt="富途图形验证码" style="max-width:360px;width:100%">' if captcha_path.is_file() else ""
-        local = os.getenv("OPTIONS_RADAR_LOCAL") == "1"
         location = "本机的 <code>data-local/secrets</code>" if local else "NAS的 <code>/data/secrets</code>"
         content = (
             f'<h1>一次性配置</h1><p class="sub">密钥只保存在{location}；交易解锁保持关闭。</p>'

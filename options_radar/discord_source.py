@@ -197,12 +197,62 @@ class DiscordBrowserSource(DiscordSource):
         return self._executor.submit(self._open_login_impl).result(timeout=max(60, self.timeout_ms / 1000 + 30))
 
     def _capture_login(self) -> None:
+        """Capture only the Discord QR-code element, not the whole page.
+
+        Discord renders the login QR inside a dedicated container that is
+        refreshed by the client every couple of minutes. A whole-viewport
+        screenshot shrinks the QR to an unscannable smudge and freezes an
+        expired code, so target the QR container and let the operator refresh
+        it via ``refresh_qr``.
+        """
         if self._page is None:
             return
         path = self.evidence_dir / "discord-login.png"
-        self._page.screenshot(path=str(path), full_page=False)
+        selectors = (
+            "[data-qr-code]",
+            "div[class*='qrCode']",
+            "div[class*='qr'] img",
+            "canvas",
+        )
+        captured = False
+        for selector in selectors:
+            try:
+                target = self._page.locator(selector)
+                if target.count():
+                    target.first.screenshot(path=str(path))
+                    captured = True
+                    break
+            except Exception:
+                continue
+        if not captured:
+            try:
+                self._page.screenshot(path=str(path), full_page=False)
+            except Exception:
+                pass
         self._qr_path = str(path)
         self._state = "login_required"
+
+    def refresh_qr(self) -> Dict[str, object]:
+        """Re-capture the Discord login QR code (it expires every ~2 minutes)."""
+        return self._executor.submit(self._refresh_qr_impl).result(timeout=60)
+
+    def _refresh_qr_impl(self) -> Dict[str, object]:
+        with self._lock:
+            if self._page is None:
+                return {**self.health(), "message": "浏览器未启动，请先点“打开Discord登录”。"}
+            if not self._logged_out():
+                self._state = "ready"
+                self._last_error = None
+                self._last_success = _utcnow().isoformat()
+                return {**self.health(), "message": "Discord已经登录。"}
+            try:
+                self._page.goto("https://discord.com/login", wait_until="domcontentloaded")
+                self._page.wait_for_timeout(2500)
+                self._dismiss_app_prompt()
+            except Exception:
+                pass
+            self._capture_login()
+            return {**self.health(), "message": "二维码已刷新，请扫码登录。"}
 
     def _logged_out(self) -> bool:
         if self._page is None:
