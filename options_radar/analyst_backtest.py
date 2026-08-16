@@ -1,10 +1,12 @@
 """Analyst signal accuracy back-test.
 
-Deterministic replay that answers two questions per TRADE signal:
+Deterministic replay that answers three questions per TRADE signal:
   1. direction hit-rate  — did the underlying move the way the analyst said?
-  2. strategy pnl        — would a long CALL (BULL) / long PUT (BEAR) have paid?
+  2. stock pnl           — buy the underlying next open (BULL) / stay flat (BEAR).
+  3. option-sell pnl     — sell an ATM PUT (BULL) or ATM CALL (BEAR) at the next
+                           open, buy back at the horizon close, 25% margin basis.
 
-Data comes from Massive daily bars (both the underlying and the option
+Data comes from Massive daily bars (the underlying and the ATM option
 contract). No AI is involved; every number is reproducible.
 """
 
@@ -15,7 +17,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from .db import Database
 from .massive_client import MassiveClient
-from .optimizer import OptionBar, simulate_long_option
+from .optimizer import OptionBar, simulate_short_option
 from .paper import add_business_days
 
 
@@ -30,17 +32,25 @@ def _bar(item: Dict[str, object]) -> Optional[OptionBar]:
         return None
 
 
+def _atm_ticker(symbol: str, expiry: date, spot: float, option_type: str) -> str:
+    strike_code = f"{int(round(spot * 1000)):08d}"
+    return f"O:{symbol.replace('.', '')}{expiry:%y%m%d}{option_type.upper()}{strike_code}"
+
+
 class AnalystBacktestCoordinator:
     """Replay TRADE signals against Massive daily bars and persist outcomes."""
 
     def __init__(
         self, database: Database, market: MassiveClient,
         horizons: Sequence[int] = (1, 3, 5),
-        take_profit_pct: float = 0.35, stop_loss_pct: float = 0.25,
+        margin_pct: float = 0.25,
+        take_profit_pct: Optional[float] = None,
+        stop_loss_pct: float = 0.50,
     ):
         self.database = database
         self.market = market
         self.horizons = tuple(horizons)
+        self.margin_pct = margin_pct
         self.take_profit_pct = take_profit_pct
         self.stop_loss_pct = stop_loss_pct
 
@@ -89,13 +99,31 @@ class AnalystBacktestCoordinator:
         contract = str(signal["contract_key"])
         option_type = str(signal["option_type"])
         direction = str(signal["direction"])
+        try:
+            expiry = date.fromisoformat(contract.split("|")[1])
+        except (IndexError, ValueError):
+            expiry = session
 
         # Fetch each series once (covering the widest horizon) and slice per
         # horizon to keep the request count at 2 per signal instead of 6.
         max_end = add_business_days(session, max(self.horizons))
         underlying_all = self._daily_bars(symbol, session, max_end)
         entry_day = add_business_days(session, 1)
-        contract_all = self._daily_bars(self.market.occ_ticker(contract), entry_day, max_end)
+
+        # ATM contract for the sell-side leg: BULL sells an ATM PUT, BEAR sells
+        # an ATM CALL. Strike = signal-day close rounded; fall back to $5 grid
+        # when the rounded strike has no data on Massive.
+        spot = underlying_all[0].close if underlying_all else None
+        sell_type = "P" if direction == "BULL" else "C"
+        contract_all: List[OptionBar] = []
+        atm_strike: Optional[float] = None
+        if spot:
+            for strike in (round(spot), round(spot / 5.0) * 5.0):
+                candidate = self._daily_bars(_atm_ticker(symbol, expiry, strike, sell_type), entry_day, max_end)
+                if candidate:
+                    contract_all = candidate
+                    atm_strike = float(strike)
+                    break
 
         outcomes: List[Dict[str, object]] = []
         for horizon in self.horizons:
@@ -112,9 +140,22 @@ class AnalystBacktestCoordinator:
                     underlying_change = (last - base) / base
                     direction_correct = 1 if (underlying_change > 0) == (direction == "BULL") else 0
 
-            strategy = simulate_long_option(
-                contract_bars, quantity=1, max_entry_price=None,
-                take_profit_pct=self.take_profit_pct, stop_loss_pct=self.stop_loss_pct,
+            # Stock leg: buy next open for BULL, stay flat for BEAR.
+            stock_pnl = None
+            if direction == "BULL" and len(underlying_bars) >= 2:
+                stock_entry = underlying_bars[1].open
+                stock_exit = underlying_bars[-1].close
+                if stock_entry and stock_exit:
+                    stock_pnl = (stock_exit - stock_entry) / stock_entry
+            elif direction == "BEAR" and len(underlying_bars) >= 1:
+                stock_pnl = 0.0
+
+            strategy = simulate_short_option(
+                contract_bars, quantity=1,
+                notional_per_contract=(atm_strike * 100.0) if atm_strike else None,
+                margin_pct=self.margin_pct,
+                take_profit_pct=self.take_profit_pct,
+                stop_loss_pct=self.stop_loss_pct,
             )
             outcomes.append({
                 "analyst": signal["analyst"],
@@ -127,6 +168,7 @@ class AnalystBacktestCoordinator:
                 "horizon_days": horizon,
                 "strategy_status": strategy.status,
                 "strategy_pnl_pct": strategy.pnl_pct,
+                "stock_pnl_pct": stock_pnl,
                 "direction_correct": direction_correct,
                 "underlying_change_pct": underlying_change,
                 "observed_at": signal["observed_at"],

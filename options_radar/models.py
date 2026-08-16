@@ -265,6 +265,7 @@ class SignalOutcome:
     pnl_pct: Optional[float] = None
     max_favorable: Optional[float] = None
     max_adverse: Optional[float] = None
+    exit_reason: Optional[str] = None
     observed_at: datetime = field(default_factory=datetime.utcnow)
 
 

@@ -78,6 +78,58 @@ def simulate_long_option(
     )
 
 
+def simulate_short_option(
+    bars: Sequence[OptionBar],
+    quantity: int = 1,
+    notional_per_contract: Optional[float] = None,
+    margin_pct: float = 0.25,
+    take_profit_pct: Optional[float] = None,
+    stop_loss_pct: float = 0.50,
+    commission_per_contract_side: float = 0.65,
+) -> BacktestResult:
+    """Sell an option short: collect premium at the first open, buy back later.
+
+    Conservative same-bar rules (stop checked before target). Return is quoted on
+    margin: pnl / (notional * margin_pct). ``notional_per_contract`` defaults to the
+    exit premium times 100 when unknown (strike x 100 preferred).
+    """
+    complete = [bar for bar in bars if bar.complete and bar.open > 0]
+    if not complete or quantity < 1:
+        return BacktestResult("no-fill", None, None, "no-complete-bar", 0.0, None, None, None)
+    first = complete[0]
+    slippage = max(0.03, first.open * 0.03)
+    entry_credit = first.open - slippage
+    exit_debit = complete[-1].close
+    exit_reason = "holding-limit"
+    maximum = entry_credit
+    minimum = entry_credit
+    for bar in complete:
+        maximum = max(maximum, bar.high)
+        minimum = min(minimum, bar.low)
+        if stop_loss_pct:
+            stop_price = entry_credit * (1.0 + stop_loss_pct)
+            if bar.high >= stop_price:
+                exit_debit = stop_price + max(0.03, stop_price * 0.03)
+                exit_reason = "stop-loss"
+                break
+        if take_profit_pct:
+            target_price = entry_credit * (1.0 - take_profit_pct)
+            if bar.low <= target_price:
+                exit_debit = target_price + max(0.03, target_price * 0.03)
+                exit_reason = "take-profit"
+                break
+    gross = (entry_credit - exit_debit) * 100.0 * quantity
+    fees = 2.0 * commission_per_contract_side * quantity
+    pnl = gross - fees
+    basis = (notional_per_contract if notional_per_contract else exit_debit * 100.0) * margin_pct * quantity
+    return BacktestResult(
+        "filled", round(entry_credit, 4), round(exit_debit, 4), exit_reason, round(pnl, 2),
+        pnl / basis if basis else None,
+        (entry_credit - minimum) / entry_credit if entry_credit else None,
+        (maximum - entry_credit) / entry_credit if entry_credit else None,
+    )
+
+
 def parameter_grid(champion: Dict[str, float]) -> List[Dict[str, float]]:
     """Small bounded grid; every value remains auditable and deterministic."""
     thresholds = sorted({60.0, 65.0, 70.0, float(champion.get("threshold", 65.0))})

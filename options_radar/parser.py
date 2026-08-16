@@ -140,7 +140,7 @@ def _direction(text: str, option_type: str, decision: str, analyst: str) -> (str
 def _decision(text: str) -> str:
     if re.search(r"\bno_trade\b|不交易|结论\s*[:：]\s*观望", text, re.IGNORECASE):
         return "NO_TRADE"
-    if re.search(r"\btrade\b|执行观点\s*交易|结论\s*[:：]\s*交易", text, re.IGNORECASE):
+    if re.search(r"\btrade\b|执行观点\s*[:：]?\s*交易|结论\s*[:：]\s*交易", text, re.IGNORECASE):
         return "TRADE"
     return "WATCH"
 
@@ -278,6 +278,42 @@ def parse_analyst_message(message: RawMessage, refiner: Optional[TextRefiner] = 
         completeness=completeness,
         raw_message_id=message.id,
     )
+
+
+def reparse_analyst_messages(database: Any, channels: Iterable[str] = ("pa", "fpd")) -> Dict[str, int]:
+    """Re-parse stored analyst messages with the current parser and update decisions.
+
+    Deterministic repair for parser fixes: it replays every stored message through
+    parse_analyst_message (no LLM) and upserts the parse-derived fields.
+    """
+    channel_list = tuple(channels)
+    marks = ",".join("?" for _ in channel_list)
+    updated = 0
+    inserted = 0
+    skipped = 0
+    with database.connect() as connection:
+        rows = connection.execute(
+            f"SELECT id, channel, analyst, observed_at, source_timestamp, content "
+            f"FROM raw_messages WHERE channel IN ({marks}) AND content LIKE '%解读%' ORDER BY id",
+            channel_list,
+        ).fetchall()
+    for row in rows:
+        message = RawMessage(
+            channel=str(row["channel"]), analyst=str(row["analyst"]),
+            observed_at=datetime.fromisoformat(str(row["observed_at"])),
+            source_timestamp=datetime.fromisoformat(str(row["source_timestamp"])) if row["source_timestamp"] else None,
+            content=str(row["content"]), id=int(row["id"]),
+        )
+        signal = parse_analyst_message(message)
+        if signal is None:
+            skipped += 1
+            continue
+        signal.raw_message_id = int(row["id"])
+        if database.update_parsed_signal(signal):
+            updated += 1
+        else:
+            inserted += 1
+    return {"updated": updated, "inserted": inserted, "skipped": skipped}
 
 
 def parse_accessibility_messages(tree: str, channel: str, analyst: str, observed_at: datetime) -> List[RawMessage]:

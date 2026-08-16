@@ -111,6 +111,7 @@ class BacktestCoordinator:
                     status=result.status, entry_price=result.entry_price,
                     exit_price=result.exit_price, pnl_pct=result.pnl_pct,
                     max_favorable=result.max_favorable, max_adverse=result.max_adverse,
+                    exit_reason=result.exit_reason,
                 ))
                 saved += 1
                 no_fill += int(result.status == "no-fill")
@@ -138,7 +139,7 @@ class BacktestCoordinator:
                     "horizon_days": horizon,
                     "status": outcome.status,
                     "pnl_pct": outcome.pnl_pct,
-                    "exit_reason": outcome.status,
+                    "exit_reason": outcome.exit_reason,
                 })
         rows.sort(key=lambda item: (item["session_date"], item["recommendation_id"], item["horizon_days"]))
         filled = [item for item in rows if item["status"] == "filled"]

@@ -186,6 +186,7 @@ CREATE TABLE IF NOT EXISTS signal_outcomes (
     pnl_pct REAL,
     max_favorable REAL,
     max_adverse REAL,
+    exit_reason TEXT,
     observed_at TEXT NOT NULL,
     UNIQUE(recommendation_id, horizon_days)
 );
@@ -202,6 +203,7 @@ CREATE TABLE IF NOT EXISTS analyst_backtest_outcomes (
     horizon_days INTEGER NOT NULL,
     strategy_status TEXT NOT NULL,
     strategy_pnl_pct REAL,
+    stock_pnl_pct REAL,
     direction_correct INTEGER,
     underlying_change_pct REAL,
     observed_at TEXT NOT NULL,
@@ -372,6 +374,12 @@ class Database:
             meta_columns = {row[1] for row in connection.execute("PRAGMA table_info(instrument_metadata)").fetchall()}
             if "group_name" not in meta_columns:
                 connection.execute("ALTER TABLE instrument_metadata ADD COLUMN group_name TEXT")
+            abt_columns = {row[1] for row in connection.execute("PRAGMA table_info(analyst_backtest_outcomes)").fetchall()}
+            if "stock_pnl_pct" not in abt_columns:
+                connection.execute("ALTER TABLE analyst_backtest_outcomes ADD COLUMN stock_pnl_pct REAL")
+            so_columns = {row[1] for row in connection.execute("PRAGMA table_info(signal_outcomes)").fetchall()}
+            if "exit_reason" not in so_columns:
+                connection.execute("ALTER TABLE signal_outcomes ADD COLUMN exit_reason TEXT")
             # Provider retries can return the same field and exchange timestamp.
             # Keep one canonical point before enforcing idempotent cache writes.
             connection.execute(
@@ -472,6 +480,29 @@ class Database:
                     (signal.raw_message_id, signal.contract_key),
                 ).fetchone()
                 return int(row["id"]), False
+
+    def update_parsed_signal(self, signal: ParsedSignal) -> bool:
+        """Refresh parse-derived fields for an existing signal row; insert if missing."""
+        with self.connect() as connection:
+            cursor = connection.execute(
+                """UPDATE parsed_signals SET
+                   decision=?, direction=?, direction_source=?, confidence=?, confidence_raw=?,
+                   rationale_json=?, underlying_entry=?, underlying_target=?, underlying_stop=?,
+                   win_rate=?, risk_score=?, risk_notes_json=?, completeness=?
+                   WHERE raw_message_id=? AND contract_key=?""",
+                (signal.decision, signal.direction, signal.direction_source,
+                 signal.confidence, signal.confidence_raw,
+                 json.dumps(signal.rationale, ensure_ascii=False),
+                 signal.underlying_entry, signal.underlying_target, signal.underlying_stop,
+                 signal.win_rate, signal.risk_score,
+                 json.dumps(signal.risk_notes, ensure_ascii=False),
+                 signal.completeness,
+                 signal.raw_message_id, signal.contract_key),
+            )
+            if cursor.rowcount:
+                return True
+        self.insert_signal(signal)
+        return False
 
     def insert_flow_event(self, event: FlowEvent) -> Tuple[int, bool]:
         with self.connect() as connection:
@@ -955,14 +986,15 @@ class Database:
             connection.execute(
                 """INSERT INTO analyst_backtest_outcomes
                 (analyst, analyst_family, contract_key, symbol, session_date, direction,
-                 option_type, horizon_days, strategy_status, strategy_pnl_pct,
+                 option_type, horizon_days, strategy_status, strategy_pnl_pct, stock_pnl_pct,
                  direction_correct, underlying_change_pct, observed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(analyst, contract_key, horizon_days) DO UPDATE SET
                 analyst_family=excluded.analyst_family, symbol=excluded.symbol,
                 session_date=excluded.session_date, direction=excluded.direction,
                 option_type=excluded.option_type, strategy_status=excluded.strategy_status,
                 strategy_pnl_pct=excluded.strategy_pnl_pct,
+                stock_pnl_pct=excluded.stock_pnl_pct,
                 direction_correct=excluded.direction_correct,
                 underlying_change_pct=excluded.underlying_change_pct,
                 observed_at=excluded.observed_at""",
@@ -971,6 +1003,7 @@ class Database:
                  str(outcome["session_date"]), str(outcome["direction"]),
                  str(outcome["option_type"]), int(outcome["horizon_days"]),
                  str(outcome["strategy_status"]), outcome.get("strategy_pnl_pct"),
+                 outcome.get("stock_pnl_pct"),
                  outcome.get("direction_correct"), outcome.get("underlying_change_pct"),
                  str(outcome["observed_at"])),
             )
@@ -988,12 +1021,15 @@ class Database:
         return [dict(row) for row in rows]
 
     def analyst_backtest_summary(self) -> List[Dict[str, object]]:
-        """Per-analyst accuracy: direction hit-rate and strategy win-rate per horizon."""
+        """Per-analyst accuracy: direction hit-rate, stock pnl, sell-side win-rate per horizon."""
         with self.connect() as connection:
             rows = connection.execute(
                 """SELECT analyst, horizon_days,
                           COUNT(*) AS trades,
                           SUM(CASE WHEN direction_correct=1 THEN 1 ELSE 0 END) AS direction_hits,
+                          SUM(CASE WHEN stock_pnl_pct IS NOT NULL THEN 1 ELSE 0 END) AS stock_rated,
+                          SUM(CASE WHEN stock_pnl_pct IS NOT NULL AND stock_pnl_pct>0 THEN 1 ELSE 0 END) AS stock_wins,
+                          AVG(stock_pnl_pct) AS avg_stock_pnl,
                           SUM(CASE WHEN strategy_status='filled' THEN 1 ELSE 0 END) AS filled,
                           SUM(CASE WHEN strategy_status='filled' AND strategy_pnl_pct>0 THEN 1 ELSE 0 END) AS strategy_wins,
                           AVG(CASE WHEN strategy_status='filled' THEN strategy_pnl_pct ELSE NULL END) AS avg_pnl
@@ -1011,6 +1047,7 @@ class Database:
                           COUNT(*) AS signals,
                           SUM(CASE WHEN direction_correct=1 THEN 1 ELSE 0 END) AS direction_hits,
                           SUM(CASE WHEN direction_correct IS NOT NULL THEN 1 ELSE 0 END) AS direction_rated,
+                          AVG(stock_pnl_pct) AS avg_stock_pnl,
                           SUM(CASE WHEN strategy_status='filled' THEN 1 ELSE 0 END) AS filled,
                           SUM(CASE WHEN strategy_status='filled' AND strategy_pnl_pct>0 THEN 1 ELSE 0 END) AS strategy_wins,
                           AVG(CASE WHEN strategy_status='filled' THEN strategy_pnl_pct ELSE NULL END) AS avg_pnl
@@ -1027,16 +1064,18 @@ class Database:
             connection.execute(
                 """INSERT INTO signal_outcomes
                 (recommendation_id, horizon_days, status, entry_price, exit_price, pnl_pct,
-                 max_favorable, max_adverse, observed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 max_favorable, max_adverse, exit_reason, observed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(recommendation_id, horizon_days) DO UPDATE SET
                 status=excluded.status, entry_price=excluded.entry_price,
                 exit_price=excluded.exit_price, pnl_pct=excluded.pnl_pct,
                 max_favorable=excluded.max_favorable, max_adverse=excluded.max_adverse,
+                exit_reason=excluded.exit_reason,
                 observed_at=excluded.observed_at""",
                 (outcome.recommendation_id, outcome.horizon_days, outcome.status,
                  outcome.entry_price, outcome.exit_price, outcome.pnl_pct,
-                 outcome.max_favorable, outcome.max_adverse, outcome.observed_at.isoformat()),
+                 outcome.max_favorable, outcome.max_adverse, outcome.exit_reason,
+                 outcome.observed_at.isoformat()),
             )
             row = connection.execute(
                 "SELECT id FROM signal_outcomes WHERE recommendation_id=? AND horizon_days=?",
@@ -1061,6 +1100,7 @@ class Database:
             pnl_pct=float(row["pnl_pct"]) if row["pnl_pct"] is not None else None,
             max_favorable=float(row["max_favorable"]) if row["max_favorable"] is not None else None,
             max_adverse=float(row["max_adverse"]) if row["max_adverse"] is not None else None,
+            exit_reason=str(row["exit_reason"]) if row["exit_reason"] is not None else None,
             observed_at=datetime.fromisoformat(str(row["observed_at"])),
         ) for row in rows]
 

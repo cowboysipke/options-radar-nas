@@ -811,6 +811,46 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
     finally {{button.disabled=false}}
   }});
 }});
+function attachTableFilters(opts) {{
+  const search=document.getElementById(opts.search);
+  const filters=[];
+  for (const id of (opts.selects||[])) {{
+    const el=document.getElementById(id); if (el) filters.push(el);
+  }}
+  const tables=[];
+  document.querySelectorAll('tr[data-filter]').forEach(function(row){{
+    if (!tables.includes(row.closest('table'))) tables.push(row.closest('table'));
+  }});
+  function apply(){{
+    const q=search?search.value.trim().toLowerCase():'';
+    const tokens={{}};
+    filters.forEach(function(el){{ tokens[el.getAttribute('data-key')||el.id]=el.value; }});
+    document.querySelectorAll('tr[data-filter]').forEach(function(row){{
+      const text=row.getAttribute('data-filter').toLowerCase();
+      let ok=!q||text.indexOf(q)>=0;
+      filters.forEach(function(el){{
+        const v=el.value; if (v&&v!=='all'&&text.indexOf(v)<0) ok=false;
+      }});
+      row.style.display=ok?'':'none';
+      const next=row.nextElementSibling;
+      if (next&&(next.classList.contains('signal-detail')||next.classList.contains('flow-detail'))) {{
+        next.style.display=ok?'':'none';
+      }}
+    }});
+  }}
+  if (search) search.addEventListener('input',apply);
+  filters.forEach(function(el){{ el.addEventListener('change',apply); }});
+  const expand=document.getElementById(opts.expand);
+  const collapse=document.getElementById(opts.collapse);
+  if (expand) expand.addEventListener('click',function(){{
+    document.querySelectorAll('details').forEach(function(d){{ d.setAttribute('open',''); }});
+  }});
+  if (collapse) collapse.addEventListener('click',function(){{
+    document.querySelectorAll('details').forEach(function(d){{ d.removeAttribute('open'); }});
+  }});
+}}
+attachTableFilters({{search:'signal-search',selects:['signal-dir','signal-status'],expand:'signal-expand',collapse:'signal-collapse'}});
+attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand:'portfolio-expand',collapse:'portfolio-collapse'}});
 </script></body></html>'''
 
     def _login_page(self, message: str = "") -> str:
@@ -1045,10 +1085,17 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                     )
                 else:
                     detail_html = '<p class="muted" style="margin:6px 0 0">暂无分析师解读</p>'
+                direction_token = "bull" if (signals and bull_count > bear_count) else "bear" if (signals and bear_count > bull_count) else "neutral" if signals else "none"
+                status_token = "has-analyst" if n else "flow-only"
+                filter_text = "|".join([
+                    str(item.get("symbol", "")).lower(), str(item.get("contract_key", "")).lower(),
+                    direction_token, status_token,
+                ])
                 rows.append(
-                    '<tr><td>{}</td><td>{}</td><td class="muted">{}</td><td class="muted">{}</td>'
-                    '<td>{}</td><td>{}</td></tr>'
-                    '<tr class="signal-detail"><td colspan="6">{}</td></tr>'.format(
+                    '<tr data-filter="{0}"><td>{1}</td><td>{2}</td><td class="muted">{3}</td><td class="muted">{4}</td>'
+                    '<td>{5}</td><td>{6}</td></tr>'
+                    '<tr class="signal-detail"><td colspan="6">{7}</td></tr>'.format(
+                        html.escape(filter_text),
                         html.escape(str(item.get("symbol", ""))),
                         html.escape(str(item.get("contract_key", ""))),
                         premium_text,
@@ -1059,7 +1106,18 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                     )
                 )
             return (
-                '<section class="card"><div class="table-wrap"><table>'
+                '<div class="card toolbar">'
+                '<input type="search" id="signal-search" placeholder="搜索标的或合约…" style="max-width:320px;display:inline-block">'
+                '<select id="signal-dir" style="width:auto;display:inline-block;margin-left:8px">'
+                '<option value="all">方向：全部</option><option value="bull">看多</option>'
+                '<option value="bear">看空</option><option value="neutral">中性</option></select>'
+                '<select id="signal-status" style="width:auto;display:inline-block;margin-left:8px">'
+                '<option value="all">状态：全部</option><option value="has-analyst">分析师确认</option>'
+                '<option value="flow-only">仅flow</option></select>'
+                '<button type="button" class="secondary" id="signal-expand">全部展开</button>'
+                '<button type="button" class="secondary" id="signal-collapse">全部折叠</button>'
+                '</div>'
+                '<section class="card" id="signal-table"><div class="table-wrap"><table>'
                 '<tr><th>标的</th><th>合约</th><th>交易量</th><th>时间</th><th>方向</th><th>状态</th></tr>'
                 + "".join(rows) + '</table></div></section>'
             )
@@ -1082,7 +1140,14 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                     change_str = f"{float(change)*100:+.2f}%"
                 display_name = f"{name_zh}（{name}）" if name_zh else name
                 flag = '<span class="badge up">异常期权</span>' if item.get("has_flow") else ""
-                row = '<tr><td>{}{}</td><td class="muted">{}</td><td class="muted">{}</td><td>{}</td><td>{}</td><td class="{}">{}</td><td>{}</td><td>{}</td></tr>'.format(
+                held = float(item.get("held_quantity", 0) or 0)
+                held_token = "held" if held else "no-hold"
+                filter_text = "|".join([
+                    str(symbol).lower(), str(item.get("company_name", "") or "").lower(),
+                    str(item.get("group_name", "") or "").lower(), held_token,
+                ])
+                row = '<tr data-filter="{0}"><td>{1}{2}</td><td class="muted">{3}</td><td class="muted">{4}</td><td>{5}</td><td>{6}</td><td class="{7}">{8}</td><td>{9}</td><td>{10}</td></tr>'.format(
+                    html.escape(filter_text),
                     html.escape(str(symbol)), flag, display_name, industry,
                     html.escape(str(item.get("held_quantity", 0))),
                     price_str, change_cls, change_str, float(item.get("concentration", 0) or 0), updated,
@@ -1095,10 +1160,20 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
             items = list(data.items())
             flow_rows = [render_row(s, v) for s, v in items if isinstance(v, Mapping) and v.get("has_flow")]
             other_rows = [render_row(s, v) for s, v in items if not (isinstance(v, Mapping) and v.get("has_flow"))]
-            sections = []
+            toolbar = (
+                '<div class="card toolbar">'
+                '<input type="search" id="portfolio-search" placeholder="搜索标的或公司名…" style="max-width:320px;display:inline-block">'
+                '<select id="portfolio-hold" style="width:auto;display:inline-block;margin-left:8px">'
+                '<option value="all">持仓：全部</option><option value="held">有持仓</option>'
+                '<option value="no-hold">无持仓</option></select>'
+                '<button type="button" class="secondary" id="portfolio-expand">全部展开</button>'
+                '<button type="button" class="secondary" id="portfolio-collapse">全部折叠</button>'
+                '</div>'
+            )
+            sections = [toolbar]
             if flow_rows:
-                sections.append('<section class="card"><h2>异常期权相关</h2><div class="table-wrap"><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + "".join(flow_rows) + '</table></div></section>')
-            sections.append('<section class="card"><h2>全部自选</h2><div class="table-wrap"><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + ("".join(other_rows) or '<tr><td colspan="8">暂无组合快照</td></tr>') + '</table></div></section>')
+                sections.append('<section class="card" id="portfolio-table"><h2>异常期权相关</h2><div class="table-wrap"><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + "".join(flow_rows) + '</table></div></section>')
+            sections.append('<section class="card" id="portfolio-table"><h2>全部自选</h2><div class="table-wrap"><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + ("".join(other_rows) or '<tr><td colspan="8">暂无组合快照</td></tr>') + '</table></div></section>')
             return "".join(sections)
         if path == "/backtest" and isinstance(data, dict):
             replay = data.get("replay") or {}
@@ -1117,16 +1192,20 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                     wins = sum(1 for item in (replay.get("outcomes") or []) if item.get("status") == "filled" and float(item.get("pnl_pct") or 0) > 0)
                     win_rate = f"{round(wins / filled * 100, 1)}%"
                 parts.append((
-                    '<section class="card"><h2>历史回放（{} ~ {}，{} 个交易日）</h2>'
+                    '<section class="card"><h2>共识推荐回放（{} ~ {}，{} 个交易日）</h2>'
                     '<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">'
                     f'<div class="card"><div class="muted">结算笔数</div><div class="metric">{filled}</div><div class="muted">未成交 {no_fill}</div></div>'
                     f'<div class="card"><div class="muted">胜率</div><div class="metric">{html.escape(win_rate)}</div></div>'
                     f'<div class="card"><div class="muted">平均收益率</div><div class="metric">{avg}%</div></div>'
                     f'<div class="card"><div class="muted">最大回撤</div><div class="metric">{dd}%</div></div>'
-                    '</div><p class="muted">基于当前数据库中的信号；5 日结算需交易日满 5 天，样本随运行自动积累。</p></section>'
+                    '</div><p class="muted">基于共识推荐记录（推荐按合约覆盖式更新，仅保留最近交易日）；5 日结算需交易日满 5 天，样本随运行自动积累。</p></section>'
                 ).format(html.escape(str(ranges["start"])), html.escape(str(ranges["end"])), data.get("sessions_available", 0)))
                 outcomes = replay.get("outcomes") or []
                 if outcomes:
+                    exit_names = {
+                        "stop-loss": "止损", "take-profit": "止盈", "holding-limit": "持有到期",
+                        "no-complete-bar": "无K线", "limit-exceeded": "超限价", "no-fill": "未成交",
+                    }
                     detail_rows = []
                     for item in outcomes:
                         pnl = float(item.get("pnl_pct") or 0.0) if item.get("status") == "filled" else None
@@ -1135,6 +1214,7 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                             cls = "up" if pnl >= 0 else "down"
                             pnl_html = f'<span class="{cls}">{pnl * 100:+.2f}%</span>'
                         status_label = {"filled": "成交", "no-fill": "未成交"}.get(str(item.get("status")), str(item.get("status")))
+                        exit_label = exit_names.get(str(item.get("exit_reason")), str(item.get("exit_reason") or "—"))
                         detail_rows.append(
                             '<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>'.format(
                                 html.escape(str(item.get("session_date", ""))),
@@ -1142,7 +1222,7 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                                 item.get("horizon_days", ""),
                                 html.escape(status_label),
                                 pnl_html,
-                                html.escape(str(item.get("exit_reason", ""))),
+                                html.escape(exit_label),
                             )
                         )
                     parts.append(
@@ -1162,27 +1242,33 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                     direction_rate = f"{direction_hits / trades * 100:.1f}%" if trades else "—"
                     strategy_rate = f"{strategy_wins / filled * 100:.1f}%" if filled else "—"
                     avg_pnl = float(item.get("avg_pnl", 0) or 0)
+                    avg_stock = float(item.get("avg_stock_pnl", 0) or 0)
                     pnl_cls = "up" if avg_pnl >= 0 else "down"
+                    stock_cls = "up" if avg_stock >= 0 else "down"
                     acc_rows.append(
-                        '<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class="{}">{:+.2f}%</td></tr>'.format(
+                        '<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class="{}">{:+.2f}%</td><td>{}</td><td class="{}">{:+.2f}%</td></tr>'.format(
                             html.escape(str(item.get("analyst", ""))),
                             item.get("horizon_days", ""),
                             trades,
                             direction_rate,
+                            stock_cls,
+                            avg_stock * 100,
                             strategy_rate,
                             pnl_cls,
                             avg_pnl * 100,
                         )
                     )
                 parts.append(
-                    '<section class="card"><h2>分析师准确度（TRADE 信号回测）</h2>'
+                    '<section class="card"><h2>分析师信号回测（TRADE 信号，双口径）</h2>'
                     '<div class="table-wrap"><table>'
-                    '<tr><th>分析师</th><th>持有(日)</th><th>信号数</th><th>方向正确率</th><th>策略胜率</th><th>平均盈亏</th></tr>'
+                    '<tr><th>分析师</th><th>持有(日)</th><th>信号数</th><th>方向正确率</th><th>正股盈亏</th><th>卖方策略胜率</th><th>卖方平均盈亏</th></tr>'
                     + "".join(acc_rows) + '</table></div>'
-                    '<p class="muted">方向正确率基于正股涨跌；策略胜率基于做多对应期权（BULL→CALL，BEAR→PUT）。</p></section>'
+                    '<p class="muted">每行 = 分析师 × 持有期。方向正确率基于正股涨跌；正股策略 = BULL 次日买正股持 N 日 / BEAR 空仓；'
+                    '卖方策略 = BULL 卖平值 PUT / BEAR 卖平值 CALL（次日开盘成交，3% 滑点，无止盈，权利金涨 50% 止损，收益率按 25% 保证金口径）。'
+                    '四个分析家族中当前有 TRADE 信号的都会纳入。</p></section>'
                 )
             elif accuracy.get("running"):
-                parts.append('<section class="card"><h2>分析师准确度</h2><p class="muted">正在回测 TRADE 信号（拉取期权历史行情），稍后刷新查看。</p></section>')
+                parts.append('<section class="card"><h2>分析师信号回测</h2><p class="muted">正在回测 TRADE 信号（拉取期权历史行情），稍后刷新查看。</p></section>')
 
             daily = accuracy.get("daily") if isinstance(accuracy.get("daily"), list) else []
             if daily:
@@ -1196,22 +1282,26 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                     direction_rate = f"{direction_hits / direction_rated * 100:.0f}%" if direction_rated else "—"
                     strategy_rate = f"{strategy_wins / filled * 100:.0f}%" if filled else "—"
                     avg_pnl = float(item.get("avg_pnl", 0) or 0)
+                    avg_stock = float(item.get("avg_stock_pnl", 0) or 0)
                     pnl_cls = "up" if avg_pnl >= 0 else "down"
+                    stock_cls = "up" if avg_stock >= 0 else "down"
                     cal_rows.append(
-                        '<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class="{}">{:+.1f}%</td></tr>'.format(
+                        '<tr><td>{}</td><td>{}</td><td>{}</td><td class="{}">{:+.2f}%</td><td>{}</td><td class="{}">{:+.2f}%</td></tr>'.format(
                             html.escape(str(item.get("session_date", ""))),
                             signals,
                             direction_rate,
+                            stock_cls,
+                            avg_stock * 100,
                             strategy_rate,
                             pnl_cls,
                             avg_pnl * 100,
                         )
                     )
                 parts.append(
-                    '<section class="card"><h2>信号日历（5 日结算）</h2><div class="table-wrap"><table>'
-                    '<tr><th>交易日</th><th>信号数</th><th>方向正确率</th><th>策略胜率</th><th>平均盈亏</th></tr>'
+                    '<section class="card"><h2>信号日历（5 日结算，双口径）</h2><div class="table-wrap"><table>'
+                    '<tr><th>交易日</th><th>信号数</th><th>方向正确率</th><th>正股盈亏</th><th>卖方策略胜率</th><th>卖方平均盈亏</th></tr>'
                     + "".join(cal_rows) + '</table></div>'
-                    '<p class="muted">按信号产生日聚合，方向正确率与策略盈亏均为 5 日持有期结果。</p></section>'
+                    '<p class="muted">按信号产生日聚合；正股 = BULL 买正股 / BEAR 空仓，卖方 = 卖平值期权（25% 保证金口径）。</p></section>'
                 )
 
             if breakdown:
@@ -1224,9 +1314,10 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
                     ) for item in breakdown
                 )
                 parts.append(
-                    '<section class="card"><h2>分析师胜率（5日结算）</h2><div class="table-wrap"><table>'
+                    '<section class="card"><h2>共识推荐分析师胜率（5日结算）</h2><div class="table-wrap"><table>'
                     '<tr><th>分析师</th><th>成交笔数</th><th>盈利笔数</th><th>胜率</th><th>平均收益</th></tr>'
-                    + br_rows + '</table></div></section>'
+                    + br_rows + '</table></div>'
+                    '<p class="muted">基于共识推荐中的分析师投票（覆盖式更新，仅最近交易日）。</p></section>'
                 )
             if paper:
                 parts.append(f'<section class="card"><h2>模拟交易统计</h2><p>平仓: {paper.get("closed",0)} 笔　胜率: {round(paper.get("win_rate",0)*100,1)}%　损益: ${paper.get("realized_pnl",0):,.2f}</p></section>')

@@ -55,69 +55,105 @@ class AnalystBacktestTests(unittest.TestCase):
         )
         self.db.insert_signal(signal)
 
-    def _rising_bars(self):
-        # Underlying closes 100 -> 102 -> ... rising every day from Aug 3.
+    def _rising_underlying(self):
         days = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5),
                 date(2026, 8, 6), date(2026, 8, 7), date(2026, 8, 10)]
         underlying = []
         for i, day in enumerate(days):
             close = 100.0 + i * 2.0
             underlying.append(_bar(day, close - 1.0, close + 1.0, close - 2.0, close))
-        # Option bars start the day AFTER the signal (entry uses next-day open).
-        contract = [
-            _bar(date(2026, 8, 4), 5.0, 6.0, 4.9, 5.5),
-            _bar(date(2026, 8, 5), 5.5, 6.5, 5.4, 6.0),
-            _bar(date(2026, 8, 6), 6.0, 7.0, 5.9, 6.5),
-            _bar(date(2026, 8, 7), 6.5, 7.5, 6.4, 7.0),
-            _bar(date(2026, 8, 10), 7.0, 8.0, 6.9, 7.5),
-        ]
-        return {"TEST": underlying, "US.TEST|2026-10-16|100|C": contract}
+        return underlying
 
     def test_trade_signals_joins_flow_and_dedupes(self):
         self._seed()
-        # A second signal from the same analyst on the same contract dedupes.
-        market = FakeMarket({})
-        coordinator = AnalystBacktestCoordinator(self.db, market)
+        coordinator = AnalystBacktestCoordinator(self.db, FakeMarket({}))
         self.assertEqual(len(coordinator.trade_signals()), 1)
 
-    def test_bull_direction_correct_on_rising_underlying(self):
+    def test_bull_sells_atm_put_and_stock_leg(self):
         self._seed(direction="BULL", option_type="C")
-        market = FakeMarket(self._rising_bars())
+        underlying = self._rising_underlying()
+        # Signal-day close = 100 -> ATM strike 100 -> O:TEST261016P00100000
+        put_bars = [
+            _bar(date(2026, 8, 4), 5.0, 5.5, 4.8, 4.5),
+            _bar(date(2026, 8, 5), 4.5, 4.8, 4.2, 4.0),
+            _bar(date(2026, 8, 6), 4.0, 4.4, 3.8, 3.6),
+            _bar(date(2026, 8, 7), 3.6, 3.9, 3.4, 3.2),
+            _bar(date(2026, 8, 10), 3.2, 3.5, 3.0, 2.8),
+        ]
+        market = FakeMarket({"TEST": underlying, "O:TEST261016P00100000": put_bars})
         coordinator = AnalystBacktestCoordinator(self.db, market)
         outcomes = coordinator._settle(coordinator.trade_signals()[0])
         by_horizon = {o["horizon_days"]: o for o in outcomes}
         self.assertEqual(by_horizon[1]["direction_correct"], 1)
+        self.assertGreater(by_horizon[1]["stock_pnl_pct"], 0)
         self.assertEqual(by_horizon[1]["strategy_status"], "filled")
+        # Underlying rises -> short put gains.
         self.assertGreater(by_horizon[1]["strategy_pnl_pct"], 0)
 
-    def test_bear_direction_correct_on_falling_underlying(self):
+    def test_bear_stock_flat_and_sells_atm_call(self):
         self._seed(direction="BEAR", option_type="P")
-        # Underlying falls; a BEAR (long put) should be direction-correct.
-        days = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
-        underlying = [_bar(days[0], 101, 102, 99, 100), _bar(days[1], 99, 100, 98, 99),
-                      _bar(days[2], 98, 99, 97, 98)]
-        contract = [_bar(date(2026, 8, 4), 5.0, 5.1, 4.9, 5.0)]
-        market = FakeMarket({"TEST": underlying, "US.TEST|2026-10-16|100|P": contract})
+        # Underlying falls from 100 on the signal day; ATM CALL strike 100.
+        underlying = [
+            _bar(date(2026, 8, 3), 101, 102, 99, 100),
+            _bar(date(2026, 8, 4), 99, 100, 98, 99),
+            _bar(date(2026, 8, 5), 98, 99, 97, 98),
+            _bar(date(2026, 8, 6), 97, 98, 96, 97),
+        ]
+        call_bars = [
+            _bar(date(2026, 8, 4), 5.0, 5.2, 4.8, 4.6),
+            _bar(date(2026, 8, 5), 4.6, 4.8, 4.3, 4.1),
+            _bar(date(2026, 8, 6), 4.1, 4.4, 3.9, 3.7),
+        ]
+        market = FakeMarket({"TEST": underlying, "O:TEST261016C00100000": call_bars})
         coordinator = AnalystBacktestCoordinator(self.db, market)
         outcomes = coordinator._settle(coordinator.trade_signals()[0])
-        self.assertEqual(outcomes[0]["direction_correct"], 1)
+        by_horizon = {o["horizon_days"]: o for o in outcomes}
+        self.assertEqual(by_horizon[1]["direction_correct"], 1)
+        # BEAR: stock leg stays flat at 0.
+        self.assertEqual(by_horizon[1]["stock_pnl_pct"], 0.0)
+        self.assertGreater(by_horizon[1]["strategy_pnl_pct"], 0)
+
+    def test_short_option_stops_out_when_premium_spikes(self):
+        self._seed(direction="BULL", option_type="C")
+        underlying = [
+            _bar(date(2026, 8, 3), 101, 102, 99, 100),
+            _bar(date(2026, 8, 4), 98, 99, 95, 96),
+            _bar(date(2026, 8, 5), 96, 97, 94, 95),
+        ]
+        # Premium spikes far above +50% on day 1 -> stop-loss, not holding-limit.
+        put_bars = [
+            _bar(date(2026, 8, 4), 5.0, 9.0, 4.9, 8.5),
+            _bar(date(2026, 8, 5), 8.5, 9.5, 8.0, 9.0),
+        ]
+        market = FakeMarket({"TEST": underlying, "O:TEST261016P00100000": put_bars})
+        coordinator = AnalystBacktestCoordinator(self.db, market)
+        outcomes = coordinator._settle(coordinator.trade_signals()[0])
+        by_horizon = {o["horizon_days"]: o for o in outcomes}
+        self.assertLess(by_horizon[1]["strategy_pnl_pct"], 0)
 
     def test_strategy_entry_uses_next_day_open_not_signal_day(self):
-        # Guard against look-ahead: the option position must open the day AFTER
-        # the signal. If it wrongly opened on the signal day it would include
-        # pre-signal movement.
         self._seed(direction="BULL", option_type="C")
-        # No option bar on the signal day (Aug 3); only Aug 4 onward exists.
-        market = FakeMarket(self._rising_bars())
+        underlying = self._rising_underlying()
+        put_bars = [
+            _bar(date(2026, 8, 4), 5.0, 5.5, 4.8, 4.5),
+            _bar(date(2026, 8, 5), 4.5, 4.8, 4.2, 4.0),
+            _bar(date(2026, 8, 6), 4.0, 4.4, 3.8, 3.6),
+        ]
+        market = FakeMarket({"TEST": underlying, "O:TEST261016P00100000": put_bars})
         coordinator = AnalystBacktestCoordinator(self.db, market)
         outcomes = coordinator._settle(coordinator.trade_signals()[0])
-        # horizon=1 uses a single next-day bar -> filled, not no-fill.
         by_horizon = {o["horizon_days"]: o for o in outcomes}
         self.assertEqual(by_horizon[1]["strategy_status"], "filled")
 
     def test_run_persists_and_is_idempotent(self):
         self._seed(direction="BULL", option_type="C")
-        market = FakeMarket(self._rising_bars())
+        underlying = self._rising_underlying()
+        put_bars = [
+            _bar(date(2026, 8, 4), 5.0, 5.5, 4.8, 4.5),
+            _bar(date(2026, 8, 5), 4.5, 4.8, 4.2, 4.0),
+            _bar(date(2026, 8, 6), 4.0, 4.4, 3.8, 3.6),
+        ]
+        market = FakeMarket({"TEST": underlying, "O:TEST261016P00100000": put_bars})
         coordinator = AnalystBacktestCoordinator(self.db, market)
         first = coordinator.run()
         self.assertGreaterEqual(first["saved"], 3)
@@ -128,6 +164,7 @@ class AnalystBacktestTests(unittest.TestCase):
         self.assertTrue(summary)
         self.assertIn("direction_hits", summary[0])
         self.assertIn("strategy_wins", summary[0])
+        self.assertIn("stock_wins", summary[0])
 
 
 if __name__ == "__main__":
