@@ -626,27 +626,37 @@ class OptionsRadarService:
                 disagreement_threshold=float(scoring.get("disagreement_threshold", 0.25)),
             )
             dte = event.dte if event.dte is not None else (event.expiry - target_date).days
+            # 信号质量硬过滤：合约本身不适合（期限/风险超限）才压分。
+            # 字段「缺失」多为休市行情拿不到，只影响可执行性，不压低信号评分。
             quality_filter = None
             if not int(scoring.get("min_dte", 14)) <= dte <= int(scoring.get("max_dte", 60)):
                 quality_filter = f"DTE {dte} 不在默认范围"
-            elif market.delta is None or not float(scoring.get("min_abs_delta", 0.30)) <= abs(market.delta) <= float(scoring.get("max_abs_delta", 0.65)):
-                quality_filter = "Delta 缺失或不在默认范围"
-            elif market.spread_pct is None or market.spread_pct > float(scoring.get("max_spread_pct", 0.12)):
-                quality_filter = "买卖价差缺失或超过默认上限"
-            elif market.open_interest is None or market.open_interest < float(scoring.get("min_open_interest", 100)):
-                quality_filter = "Open Interest 缺失或低于默认下限"
+            elif market.delta is not None and not float(scoring.get("min_abs_delta", 0.30)) <= abs(market.delta) <= float(scoring.get("max_abs_delta", 0.65)):
+                quality_filter = "Delta 不在默认范围"
+            elif market.spread_pct is not None and market.spread_pct > float(scoring.get("max_spread_pct", 0.12)):
+                quality_filter = "买卖价差超过默认上限"
+            elif market.open_interest is not None and market.open_interest < float(scoring.get("min_open_interest", 100)):
+                quality_filter = "Open Interest 低于默认下限"
             if quality_filter:
                 evaluation.score = min(evaluation.score, 64.0)
                 evaluation.grade = "C" if evaluation.score >= 50 else "D"
                 evaluation.eligible = False
                 evaluation.risk_flags.append(quality_filter)
-            # 行情新鲜度只影响「可执行性」，不压低信号质量评分。
+            # 行情新鲜度与字段缺失只影响「可执行性」，不压低信号质量评分。
+            missing_fields = []
             if market.data_status != "ok":
+                missing_fields.append("缺少新鲜实时bid/ask，仅进入观察榜")
+            if market.delta is None:
+                missing_fields.append("Delta 缺失")
+            if market.spread_pct is None:
+                missing_fields.append("买卖价差缺失")
+            if market.open_interest is None:
+                missing_fields.append("Open Interest 缺失")
+            if market.data_conflicts:
+                missing_fields.append("多供应商实时行情冲突，暂停生成入场限价")
+            if missing_fields:
                 evaluation.eligible = False
-                evaluation.risk_flags.append("缺少新鲜实时bid/ask，仅进入观察榜")
-            elif market.data_conflicts:
-                evaluation.eligible = False
-                evaluation.risk_flags.append("多供应商实时行情冲突，暂停生成入场限价")
+                evaluation.risk_flags.extend(missing_fields)
             recommendation_id = self.database.save_recommendation(
                 evaluation, [int(item.id) for item in signals if item.id], target_date
             )
