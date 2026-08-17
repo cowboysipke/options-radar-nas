@@ -1120,7 +1120,8 @@ class Database:
                    JOIN flow_events f ON p.flow_event_key = f.event_key
                    LEFT JOIN raw_messages r ON r.id = p.raw_message_id
                    WHERE p.decision='TRADE' AND p.direction IN ('BULL','BEAR')
-                     AND f.session_date IS NOT NULL"""
+                     AND f.session_date IS NOT NULL
+                     AND julianday(f.expiry) - julianday(f.session_date) >= 7"""
             ).fetchall()
         pool = [dict(row) for row in rows]
         rng = random.Random(seed)

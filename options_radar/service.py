@@ -1236,6 +1236,7 @@ class OptionsRadarService:
                        JOIN flow_events f ON p.flow_event_key = f.event_key
                        WHERE p.decision='TRADE' AND p.direction IN ('BULL','BEAR')
                          AND f.session_date IS NOT NULL
+                         AND julianday(f.expiry) - julianday(f.session_date) >= 7
                        GROUP BY p.analyst, f.contract_key
                    )"""
             ).fetchone()[0]
@@ -1344,6 +1345,8 @@ class OptionsRadarService:
                 "卖方策略：BULL 卖平值 PUT、BEAR 卖平值 CALL；平值行权价=信号日正股收盘；"
                 "收益率按 25% 保证金口径；权利金涨 50% 止损，否则持有到 N 日或到期前 3 天平仓。"
                 "因此 ATM 合约的 PUT/CALL 与信号关联的合约（原文本里的 CALL/PUT）相反是正常设计，不是异常。"
+                "方向正确率看「信号日收盘 → 持有期末收盘」的涨跌；卖方盈亏看「次日开盘入场 → 平仓」。"
+                "两者时间基准不同：正股先跌后涨时，方向最终正确但卖方会在中途暴跌时止损，这是正常的路径依赖，不是数据错误。"
             ),
             "回测结果": {
                 "正股涨跌": outcome.get("underlying_change_pct"),
@@ -1356,7 +1359,8 @@ class OptionsRadarService:
         question = (
             "请判断「现有解析」的决策和方向是否与「原文本」明确陈述一致（重点看 执行观点/结论/decision 行）。"
             "不要因 ATM 合约的 PUT/CALL 与信号合约相反就判异常（那是卖方策略的正常设计）。"
-            "回测方面只判断：正股涨跌与方向是否匹配、卖方盈亏与方向/退出原因是否自洽。"
+            "回测方面只判断：正股涨跌与方向是否匹配、卖方盈亏与退出原因是否自洽。"
+            "注意「方向最终对但卖方中途止损」是正常的先跌后涨路径，不要判为数据错误。"
             "简洁输出：解析是否一致、回测是否合理，各用一句话，指出真正的异常点。"
         )
         result = self.ai.answer(question, context)

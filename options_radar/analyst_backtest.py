@@ -92,6 +92,7 @@ class AnalystBacktestCoordinator:
         take_profit_pct: Optional[float] = None,
         stop_loss_pct: float = 0.50,
         exit_before_expiry_days: int = 3,
+        min_dte: int = 7,
     ):
         self.database = database
         self.market = market
@@ -100,11 +101,17 @@ class AnalystBacktestCoordinator:
         self.take_profit_pct = take_profit_pct
         self.stop_loss_pct = stop_loss_pct
         self.exit_before_expiry_days = exit_before_expiry_days
+        self.min_dte = min_dte
 
     # -- data access ---------------------------------------------------------
 
     def trade_signals(self) -> List[Dict[str, Any]]:
-        """Distinct (analyst, contract) TRADE signals with the flow contract joined in."""
+        """Distinct (analyst, contract) TRADE signals with the flow contract joined in.
+
+        Excludes signals whose contract is fewer than ``min_dte`` calendar days
+        from expiry: near-expiry options carry explosive gamma, so a sell-side
+        back-test on them is noise rather than signal.
+        """
         with self.database.connect() as connection:
             rows = connection.execute(
                 """SELECT p.analyst, p.analyst_family, p.direction,
@@ -114,8 +121,10 @@ class AnalystBacktestCoordinator:
                    JOIN flow_events f ON p.flow_event_key = f.event_key
                    WHERE p.decision='TRADE' AND p.direction IN ('BULL','BEAR')
                      AND f.session_date IS NOT NULL
+                     AND julianday(f.expiry) - julianday(f.session_date) >= ?
                    GROUP BY p.analyst, f.contract_key
-                   ORDER BY f.session_date, p.analyst"""
+                   ORDER BY f.session_date, p.analyst""",
+                (self.min_dte,),
             ).fetchall()
         return [dict(row) for row in rows]
 

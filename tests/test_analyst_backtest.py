@@ -42,17 +42,18 @@ class AnalystBacktestTests(unittest.TestCase):
         self.db = Database(Path(self._tmp.name) / "radar.db")
 
     def _seed(self, symbol="TEST", contract="US.TEST|2026-10-16|100|C",
-              direction="BULL", option_type="C", analyst="mr", family="mean_reversion"):
+              direction="BULL", option_type="C", analyst="mr", family="mean_reversion",
+              expiry=date(2026, 10, 16)):
         flow = FlowEvent(
             event_key=f"evt-{contract}", contract_key=contract, symbol=symbol,
-            expiry=date(2026, 10, 16), strike=100.0, option_type=option_type,
+            expiry=expiry, strike=100.0, option_type=option_type,
             premium=5.0, average_price=None, dte=None,
             observed_at=datetime(2026, 8, 3, 18, 0), session_date=date(2026, 8, 3),
         )
         self.db.insert_flow_event(flow)
         signal = ParsedSignal(
             flow_event_key=flow.event_key, contract_key=contract, symbol=symbol,
-            expiry=date(2026, 10, 16), strike=100.0, option_type=option_type,
+            expiry=expiry, strike=100.0, option_type=option_type,
             decision="TRADE", direction=direction, direction_source="flow",
             confidence=0.8, confidence_raw="high", analyst_family=family,
             analyst=analyst, channel="test", observed_at=datetime(2026, 8, 3, 18, 0),
@@ -81,6 +82,12 @@ class AnalystBacktestTests(unittest.TestCase):
         self._seed()
         coordinator = AnalystBacktestCoordinator(self.db, FakeMarket({}))
         self.assertEqual(len(coordinator.trade_signals()), 1)
+
+    def test_dte_filter_excludes_near_expiry(self):
+        # session 8/03, expiry 8/04 -> DTE=1, below the default min_dte=7.
+        self._seed(contract="US.TEST|2026-08-04|100|C", expiry=date(2026, 8, 4))
+        coordinator = AnalystBacktestCoordinator(self.db, FakeMarket({}))
+        self.assertEqual(len(coordinator.trade_signals()), 0)
 
     def test_bull_sells_atm_put_and_stock_leg(self):
         underlying = self._rising_underlying()
