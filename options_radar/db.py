@@ -1103,6 +1103,63 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def audit_sample(self, n: int = 50, seed: int = 42, horizon_days: int = 5) -> List[Dict[str, object]]:
+        """Random sample of TRADE signals with the full chain: raw text -> parse -> back-test.
+
+        Reproducible via ``seed``; each item carries the raw message text, the parsed
+        fields, and the settled back-test outcome at ``horizon_days`` for AI review.
+        """
+        import random
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT p.id AS signal_id, p.analyst, p.decision, p.direction, p.confidence,
+                          p.raw_message_id, p.contract_key, f.symbol, f.expiry, f.strike,
+                          f.option_type, f.session_date,
+                          r.content AS raw_text
+                   FROM parsed_signals p
+                   JOIN flow_events f ON p.flow_event_key = f.event_key
+                   LEFT JOIN raw_messages r ON r.id = p.raw_message_id
+                   WHERE p.decision='TRADE' AND p.direction IN ('BULL','BEAR')
+                     AND f.session_date IS NOT NULL"""
+            ).fetchall()
+        pool = [dict(row) for row in rows]
+        rng = random.Random(seed)
+        sample = rng.sample(pool, min(n, len(pool)))
+        for item in sample:
+            with self.connect() as connection:
+                row = connection.execute(
+                    """SELECT * FROM analyst_backtest_outcomes
+                       WHERE analyst=? AND contract_key=? AND horizon_days=?""",
+                    (item["analyst"], item["contract_key"], horizon_days),
+                ).fetchone()
+            item["outcome"] = dict(row) if row else None
+        return sample
+
+    def audit_signal(self, signal_id: int, horizon_days: int = 5) -> Optional[Dict[str, object]]:
+        """One TRADE signal with raw text, parsed fields and back-test outcome for AI review."""
+        with self.connect() as connection:
+            row = connection.execute(
+                """SELECT p.id AS signal_id, p.analyst, p.decision, p.direction, p.confidence,
+                          p.raw_message_id, p.contract_key, f.symbol, f.expiry, f.strike,
+                          f.option_type, f.session_date, r.content AS raw_text
+                   FROM parsed_signals p
+                   JOIN flow_events f ON p.flow_event_key = f.event_key
+                   LEFT JOIN raw_messages r ON r.id = p.raw_message_id
+                   WHERE p.id=?""",
+                (signal_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        with self.connect() as connection:
+            outcome = connection.execute(
+                "SELECT * FROM analyst_backtest_outcomes WHERE analyst=? AND contract_key=? AND horizon_days=?",
+                (item["analyst"], item["contract_key"], horizon_days),
+            ).fetchone()
+        item["outcome"] = dict(outcome) if outcome else None
+        return item
+
+
     def analyst_backtest_outcomes(self) -> List[Dict[str, object]]:
         with self.connect() as connection:
             rows = connection.execute(

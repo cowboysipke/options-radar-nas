@@ -1322,6 +1322,46 @@ class OptionsRadarService:
             "outcomes": self.database.analyst_backtest_outcomes_for_analyst(str(analyst), horizon),
         }
 
+    def audit_sample(self, n: int = 50, seed: int = 42, **_kwargs: Any) -> Any:
+        """Random reproducible sample of TRADE signals with the full review chain."""
+        return {"seed": seed, "samples": self.database.audit_sample(int(n), int(seed))}
+
+    def audit_review(self, signal_id: int = 0, **_kwargs: Any) -> Any:
+        """Ask the AI to judge whether the stored parse and back-test result are consistent with the raw text."""
+        signal = self.database.audit_signal(int(signal_id))
+        if signal is None:
+            return {"status": "error", "message": "信号不存在"}
+        if not signal.get("raw_text"):
+            return {"status": "error", "message": "原文本缺失"}
+        outcome = signal.get("outcome") or {}
+        context = {
+            "原文本": str(signal["raw_text"])[:900],
+            "现有解析": {
+                "决策": signal.get("decision"), "方向": signal.get("direction"),
+                "合约": signal.get("contract_key"), "分析师": signal.get("analyst"),
+            },
+            "回测结果": {
+                "正股涨跌": outcome.get("underlying_change_pct"),
+                "方向正确": outcome.get("direction_correct"),
+                "卖方盈亏(保证金口径)": outcome.get("strategy_pnl_pct"),
+                "退出原因": outcome.get("strategy_exit_reason"),
+                "ATM合约": outcome.get("atm_ticker"),
+            },
+        }
+        question = (
+            "请判断「现有解析」的决策和方向是否与「原文本」明确陈述一致（重点看 执行观点/结论/decision 行），"
+            "以及「回测结果」是否合理（方向正确却卖方亏损、或方向错误却盈利，需说明原因）。"
+            "简洁输出：解析是否一致、回测是否合理，各用一句话，指出异常点。"
+        )
+        result = self.ai.answer(question, context)
+        verdict = result.text if not result.ai_degraded else ("AI 不可用：" + str(result.reason))
+        return {
+            "status": "ok",
+            "signal_id": int(signal_id),
+            "verdict": verdict,
+            "existing": {"decision": signal.get("decision"), "direction": signal.get("direction")},
+        }
+
     def _analyst_backtest_breakdown(self) -> List[Dict[str, Any]]:
         """Per-analyst win-rate for the longest settled horizon per recommendation."""
         # Prefer 5-day outcomes; fall back to whatever horizon has settled so the
@@ -1441,6 +1481,8 @@ class OptionsRadarService:
             "ibkr_sync": lambda payload: self.sync_ibkr(**payload),
             "collect": lambda payload: self.collect(bool(payload.get("backfill", False))),
             "analyst_backtest_detail": lambda payload: self.analyst_backtest_detail(**payload),
+            "audit_sample": lambda payload: self.audit_sample(**payload),
+            "audit_review": lambda payload: self.audit_review(**payload),
             "report": lambda _payload: {"queue_id": self.publish_daily()},
             "feishu_test": lambda _payload: self.feishu.test_credentials(),
             "discord_login": lambda _payload: self.source.open_login(),
@@ -1459,10 +1501,23 @@ class OptionsRadarService:
         destination = backup_dir / f"options-radar-{datetime.now():%Y%m%d-%H%M%S}.db"
         with sqlite3.connect(str(self.database.path)) as source, sqlite3.connect(str(destination)) as target:
             source.backup(target)
+        self._prune_backups(keep=14)
         return {
             "status": "ok", "message": "备份已创建。", "path": str(destination),
             "size": destination.stat().st_size,
         }
+
+    def _prune_backups(self, keep: int = 14) -> None:
+        """Keep only the most recent ``keep`` backup files."""
+        backup_dir = self.data_dir / "backups"
+        if not backup_dir.is_dir():
+            return
+        files = sorted(backup_dir.glob("options-radar-*.db"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for stale in files[keep:]:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
 
     def _run_feishu(self) -> None:
         try:
@@ -1507,6 +1562,7 @@ class OptionsRadarService:
         )
         self._scheduler.add_job(self.publish_daily, CronTrigger(hour=17, minute=15, timezone="America/New_York"), id="daily-report")
         self._scheduler.add_job(self.run_backtests, CronTrigger(hour=18, minute=0, timezone="America/New_York"), id="daily-backtest")
+        self._scheduler.add_job(self.create_backup, CronTrigger(hour=3, minute=0, timezone="Asia/Shanghai"), id="daily-backup")
         self._scheduler.add_job(self.run_optimizer, CronTrigger(day_of_week="sun", hour=9, minute=0, timezone="Asia/Shanghai"), id="weekly-optimizer")
         self._scheduler.add_job(self.check_ai_budget, "interval", hours=1, id="ai-budget")
         self._scheduler.start()

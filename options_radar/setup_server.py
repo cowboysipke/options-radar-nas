@@ -473,6 +473,7 @@ PAGE_INFO = {
     "/signals": ("信号明细", "signals", "Discord原文、分析师意见和融合过程"),
     "/portfolio": ("自选与持仓", "portfolio", "IBKR组合与富途一次性导入自选"),
     "/backtest": ("回测", "backtest", "模拟盘、回测结算与策略优化"),
+    "/audit": ("数据复核", "status", "抽样复核原文本、解析方向与回测结果"),
     "/system": ("系统诊断", "status", "富途 OpenD、Discord、DeepSeek、飞书与持仓同步状态"),
     "/setup": ("设置", "status", "首次配置和连接测试"),
     "/providers": ("数据源诊断", "providers", "富途主源、Alpaca/Massive 历史复核"),
@@ -488,6 +489,8 @@ GET_APIS = {
     "/api/analysts": "analysts",
     "/api/backtest": "backtest",
     "/api/analyst-backtest-detail": "analyst_backtest_detail",
+    "/api/audit-sample": "audit_sample",
+    "/api/audit-review": "audit_review",
     "/api/providers": "providers",
     "/api/signals": "signals",
 }
@@ -763,7 +766,7 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
     def _shell(title: str, content: str, active: str = "") -> str:
         links = (("/", "今日推荐"), ("/signals", "信号明细"),
                   ("/portfolio", "自选与持仓"), ("/backtest", "回测"),
-                  ("/system", "系统诊断"), ("/setup", "设置"))
+                  ("/audit", "数据复核"), ("/system", "系统诊断"), ("/setup", "设置"))
         nav = "".join(
             f'<a class="{"active" if path == active else ""}" href="{path}">{label}</a>' for path, label in links
         )
@@ -905,6 +908,81 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
     rows.forEach(function(r){{ const d=document.getElementById('detail-'+r.getAttribute('data-analyst')); if(d) d.style.display='none'; }});
   }});
 }})();
+(function(){{
+  const drawBtn=document.getElementById('audit-sample');
+  if(!drawBtn) return;
+  const nInput=document.getElementById('audit-n');
+  const resultEl=document.getElementById('audit-result');
+  const summaryEl=document.getElementById('audit-summary');
+  function esc(s){{ const d=document.createElement('div'); d.textContent=s==null?'':String(s); return d.innerHTML; }}
+  function badge(v,cls){{ return '<span class="badge '+cls+'">'+esc(v)+'</span>'; }}
+  function dirBadge(d){{ return d==='BULL'?badge('看多','up'):(d==='BEAR'?badge('看空','down'):badge(d||'—','watch')); }}
+  function renderSample(s){{
+    const o=s.outcome||{{}};
+    const pnl=o.strategy_pnl_pct; const dc=o.direction_correct; const uc=o.underlying_change_pct;
+    const pnlHtml=pnl==null?'—':'<span class="'+(pnl>=0?'up':'down')+'">'+(pnl*100).toFixed(2)+'%</span>';
+    const dcHtml=dc==null?'—':(dc===1?'<span class="up">对</span>':'<span class="down">错</span>');
+    return '<div class="card" style="padding:14px">'
+      +'<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+      +'<strong>'+esc(s.symbol)+'</strong><span class="muted">'+esc(s.contract_key)+'</span>'
+      +dirBadge(s.direction)+'<span class="muted">分析师 '+esc(s.analyst)+'</span>'
+      +'<span class="muted">决策 '+esc(s.decision)+'</span>'
+      +'<span class="muted">正股 '+((uc==null)?'—':(uc*100).toFixed(2)+'%')+'</span>'
+      +'<span class="muted">方向 '+dcHtml+'</span>'
+      +'<span class="muted">卖方盈亏 '+pnlHtml+'</span>'
+      +'<span class="muted">退出 '+esc(o.strategy_exit_reason||'—')+'</span>'
+      +'<span class="muted">ATM '+esc(o.atm_ticker||'—')+'</span>'
+      +'<button type="button" class="secondary audit-review" data-id="'+s.signal_id+'" style="margin:0">AI 复核</button>'
+      +'</div>'
+      +'<details style="margin-top:8px"><summary class="muted">原文本</summary><pre style="max-height:200px">'+esc(s.raw_text)+'</pre></details>'
+      +'<div class="audit-verdict" data-id="'+s.signal_id+'" style="margin-top:6px"></div>'
+      +'</div>';
+  }}
+  async function review(id,btn,verdictEl){{
+    btn.disabled=true; btn.textContent='复核中…';
+    try{{
+      const r=await fetch('/api/audit-review?signal_id='+id);
+      const d=await r.json();
+      if(d.status==='ok'){{
+        verdictEl.innerHTML='<p style="margin:6px 0 0">现有解析：决策 '+esc(d.existing.decision)+'、方向 '+esc(d.existing.direction)+'</p>'
+          +'<p class="card" style="margin:6px 0 0;padding:10px">'+esc(d.verdict)+'</p>';
+      }} else {{
+        verdictEl.innerHTML='<p class="error" style="margin:6px 0 0">复核失败：'+esc(d.message||d.status)+'</p>';
+      }}
+    }}catch(e){{ verdictEl.innerHTML='<p class="error" style="margin:6px 0 0">请求失败：'+e+'</p>'; }}
+    finally{{ btn.disabled=false; btn.textContent='AI 复核'; }}
+  }}
+  drawBtn.addEventListener('click',async function(){{
+    drawBtn.disabled=true; drawBtn.textContent='抽取中…'; resultEl.textContent='';
+    try{{
+      const n=parseInt(nInput.value,10)||50;
+      const r=await fetch('/api/audit-sample?n='+n+'&seed=42');
+      const d=await r.json();
+      const samples=d.samples||[];
+      resultEl.innerHTML=samples.map(renderSample).join('');
+      summaryEl.textContent='已抽取 '+samples.length+' 个信号（种子 42）';
+    }}catch(e){{ resultEl.textContent='抽取失败：'+e; }}
+    finally{{ drawBtn.disabled=false; drawBtn.textContent='随机抽取'; }}
+  }});
+  document.addEventListener('click',function(e){{
+    const btn=e.target.closest('.audit-review');
+    if(!btn) return;
+    const id=btn.getAttribute('data-id');
+    const verdict=document.querySelector('.audit-verdict[data-id="'+id+'"]');
+    review(id,btn,verdict);
+  }});
+  const reviewAll=document.getElementById('audit-review-all');
+  if(reviewAll) reviewAll.addEventListener('click',function(){{
+    const buttons=Array.from(document.querySelectorAll('.audit-review'));
+    buttons.forEach(function(btn){{
+      if(!btn.disabled){{
+        const id=btn.getAttribute('data-id');
+        const verdict=document.querySelector('.audit-verdict[data-id="'+id+'"]');
+        review(id,btn,verdict);
+      }}
+    }});
+  }});
+}})();
 </script></body></html>'''
 
     def _login_page(self, message: str = "") -> str:
@@ -973,6 +1051,19 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
 
     @staticmethod
     def _visual_summary(path: str, data: Any) -> str:
+        if path == "/audit":
+            return (
+                '<section class="card"><h2>数据复核</h2>'
+                '<p class="muted">随机抽样 TRADE 信号，对比原文本、解析方向与回测结果，用 AI 重新解析原文本以发现系统性解析错误。</p>'
+                '<div class="toolbar" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+                '<label style="margin:0;font-weight:600">抽样数量</label>'
+                '<input type="number" id="audit-n" value="50" min="1" max="200" style="width:90px;display:inline-block;margin:0">'
+                '<button type="button" id="audit-sample">随机抽取</button>'
+                '<button type="button" class="secondary" id="audit-review-all">全部 AI 复核</button>'
+                '<span class="muted" id="audit-summary"></span>'
+                '</div>'
+                '<div id="audit-result" style="margin-top:12px"></div></section>'
+            )
         if path == "/" and isinstance(data, list):
             if not data:
                 return '<section class="card"><h2>今日暂无候选</h2><p class="muted">点击“立即采集并生成推荐”，或等待新的异常期权事件。</p></section>'
