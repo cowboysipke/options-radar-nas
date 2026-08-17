@@ -1340,6 +1340,11 @@ class OptionsRadarService:
                 "决策": signal.get("decision"), "方向": signal.get("direction"),
                 "合约": signal.get("contract_key"), "分析师": signal.get("analyst"),
             },
+            "回测口径": (
+                "卖方策略：BULL 卖平值 PUT、BEAR 卖平值 CALL；平值行权价=信号日正股收盘；"
+                "收益率按 25% 保证金口径；权利金涨 50% 止损，否则持有到 N 日或到期前 3 天平仓。"
+                "因此 ATM 合约的 PUT/CALL 与信号关联的合约（原文本里的 CALL/PUT）相反是正常设计，不是异常。"
+            ),
             "回测结果": {
                 "正股涨跌": outcome.get("underlying_change_pct"),
                 "方向正确": outcome.get("direction_correct"),
@@ -1349,9 +1354,10 @@ class OptionsRadarService:
             },
         }
         question = (
-            "请判断「现有解析」的决策和方向是否与「原文本」明确陈述一致（重点看 执行观点/结论/decision 行），"
-            "以及「回测结果」是否合理（方向正确却卖方亏损、或方向错误却盈利，需说明原因）。"
-            "简洁输出：解析是否一致、回测是否合理，各用一句话，指出异常点。"
+            "请判断「现有解析」的决策和方向是否与「原文本」明确陈述一致（重点看 执行观点/结论/decision 行）。"
+            "不要因 ATM 合约的 PUT/CALL 与信号合约相反就判异常（那是卖方策略的正常设计）。"
+            "回测方面只判断：正股涨跌与方向是否匹配、卖方盈亏与方向/退出原因是否自洽。"
+            "简洁输出：解析是否一致、回测是否合理，各用一句话，指出真正的异常点。"
         )
         result = self.ai.answer(question, context)
         verdict = result.text if not result.ai_degraded else ("AI 不可用：" + str(result.reason))
