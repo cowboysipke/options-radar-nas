@@ -35,11 +35,14 @@ def simulate_long_option(
     bars: Sequence[OptionBar],
     quantity: int = 1,
     max_entry_price: Optional[float] = None,
-    take_profit_pct: float = 0.35,
-    stop_loss_pct: float = 0.25,
+    take_profit_pct: Optional[float] = 0.35,
+    stop_loss_pct: Optional[float] = 0.25,
     commission_per_contract_side: float = 0.65,
 ) -> BacktestResult:
-    """Apply the fixed five-minute fill and conservative same-bar rules."""
+    """Apply the fixed five-minute fill and conservative same-bar rules.
+
+    ``take_profit_pct``/``stop_loss_pct`` may be None to disable that exit.
+    """
     complete = [bar for bar in bars if bar.complete and bar.open > 0]
     if not complete or quantity < 1:
         return BacktestResult("no-fill", None, None, "no-complete-bar", 0.0, None, None, None)
@@ -48,8 +51,8 @@ def simulate_long_option(
     entry = first.open + slippage
     if max_entry_price is not None and entry > max_entry_price:
         return BacktestResult("no-fill", None, None, "limit-exceeded", 0.0, None, None, None)
-    take_profit = entry * (1.0 + take_profit_pct)
-    stop_loss = entry * (1.0 - stop_loss_pct)
+    take_profit = entry * (1.0 + take_profit_pct) if take_profit_pct is not None else None
+    stop_loss = entry * (1.0 - stop_loss_pct) if stop_loss_pct is not None else None
     exit_price = complete[-1].close
     exit_reason = "holding-limit"
     maximum = entry
@@ -57,8 +60,8 @@ def simulate_long_option(
     for bar in complete:
         maximum = max(maximum, bar.high)
         minimum = min(minimum, bar.low)
-        hit_stop = bar.low <= stop_loss
-        hit_target = bar.high >= take_profit
+        hit_stop = stop_loss is not None and bar.low <= stop_loss
+        hit_target = take_profit is not None and bar.high >= take_profit
         if hit_stop:  # conservative when both occur inside one bar
             exit_price = stop_loss - max(0.03, stop_loss * 0.03)
             exit_reason = "stop-loss"
