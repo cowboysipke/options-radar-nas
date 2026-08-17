@@ -49,7 +49,26 @@ def _market_quality(market: Optional[MarketSnapshot], risk_flags: List[str]) -> 
             risk_flags.append("行情时间戳已过期（休市或数据源延迟），需等开市后刷新")
         else:
             risk_flags.append("暂未取到实时行情，等待数据源恢复")
-        return 30.0
+        # Liquidity-first: a sell-side strategy holds toward expiry, so stale
+        # timestamps matter less than spread/OI. If liquidity data is present,
+        # award a base score instead of a flat 30.
+        score = 30.0
+        if market is not None:
+            spread = market.spread_pct
+            if spread is not None:
+                score += 25.0
+                if spread > 0.20:
+                    score -= 20.0
+                    risk_flags.append("流动性风险：价差超过20%")
+                elif spread > 0.12:
+                    score -= 12.0
+                    risk_flags.append("流动性风险：价差超过12%")
+            if market.open_interest is not None:
+                score += 10.0
+                if market.open_interest < 100:
+                    score -= 8.0
+                    risk_flags.append("流动性风险：Open Interest低于100")
+        return clamp(score)
     is_eod = market.data_status == "eod"
     score = 70.0 if is_eod else 100.0
     if is_eod:
@@ -102,6 +121,7 @@ def _portfolio_quality(portfolio: PortfolioContext, risk_flags: List[str]) -> fl
 def evaluate_consensus(
     signals: Iterable[ParsedSignal],
     analyst_weights: Optional[Dict[str, float]] = None,
+    family_alphas: Optional[Dict[str, float]] = None,
     market: Optional[MarketSnapshot] = None,
     portfolio: Optional[PortfolioContext] = None,
     now: Optional[datetime] = None,
@@ -112,6 +132,7 @@ def evaluate_consensus(
     if not votes_source:
         raise ValueError("at least one signal is required")
     weights = analyst_weights or {}
+    alphas = family_alphas or {}
     portfolio = portfolio or PortfolioContext(symbol=votes_source[0].symbol)
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     risk_flags: List[str] = []
@@ -119,17 +140,22 @@ def evaluate_consensus(
     family_votes = _family_trade_votes(votes_source, weights)
     family_values: List[float] = []
     family_strengths: List[float] = []
+    family_weights: List[float] = []
     for family, items in family_votes.items():
         denominator = sum(weight for _, weight in items) or 1.0
         value = sum(DIRECTION_VALUE[signal.direction] * weight for signal, weight in items) / denominator
         family_values.append(value)
         family_strengths.append(abs(value))
+        family_weights.append(alphas.get(family, 1.0))
         if len({signal.direction for signal, _ in items}) > 1:
             risk_flags.append(f"{family}家族内部方向冲突")
 
     active_families = len(family_votes)
     if family_values:
-        family_direction = sum(family_values) / len(family_values)
+        # Family-level alpha-weighted consensus: a high-alpha family (e.g. fpd)
+        # dominates the direction instead of every family counting equally.
+        total_alpha = sum(family_weights) or 1.0
+        family_direction = sum(v * w for v, w in zip(family_values, family_weights)) / total_alpha
         consensus_strength = abs(family_direction)
         final_direction = "BULL" if family_direction > 0.05 else "BEAR" if family_direction < -0.05 else "NEUTRAL"
     else:
@@ -189,9 +215,11 @@ def evaluate_consensus(
         risk_flags.append("多数分析师选择观望")
     if active_families == 0:
         score = min(score, 49.0)
-    elif active_families == 1:
+    elif "flow_positioning" not in family_votes:
+        # No flow-price-divergence (fpd) confirmation: the remaining families
+        # are statistically close to random, so cap their consensus.
         score = min(score, 64.0)
-        risk_flags.append("仅一个独立分析家族确认")
+        risk_flags.append("无流价背离(fpd)确认，仅随机家族")
     if disagreement:
         score = min(score, 64.0)
 
@@ -208,7 +236,7 @@ def evaluate_consensus(
             risk_flags.append("盘口或OI暂不完整，等待实时数据恢复")
 
     score = round(clamp(score), 2)
-    if score >= 80 and active_families >= 2 and trade_count >= 2 and not disagreement:
+    if score >= 80 and active_families >= 1 and trade_count >= 1 and not disagreement:
         grade = "A"
     elif score >= 65:
         grade = "B"
@@ -257,9 +285,13 @@ def evaluate_consensus(
 
 
 def calibrated_weight(hit_rate: float, median_return: float, calibration_score: float, samples: int) -> float:
-    """60-day analyst weight with shrinkage until 20 closed samples."""
+    """60-day analyst weight with shrinkage until 20 closed samples.
+
+    Bounded 0.2..2.0 so a family with real alpha (e.g. fpd) can pull clearly
+    above 1.0 while a coin-flip stays near 1.0 rather than collapsing to 0.5.
+    """
     return_score = clamp((median_return + 0.25) / 0.60, 0.0, 1.0)
     raw_quality = 0.50 * clamp(hit_rate, 0.0, 1.0) + 0.30 * return_score + 0.20 * clamp(calibration_score, 0.0, 1.0)
-    raw_weight = 0.5 + raw_quality
+    raw_weight = 0.2 + raw_quality * 1.8
     shrinkage = min(1.0, max(0, samples) / 20.0)
-    return round(clamp(1.0 + shrinkage * (raw_weight - 1.0), 0.5, 1.5), 4)
+    return round(clamp(1.0 + shrinkage * (raw_weight - 1.0), 0.2, 2.0), 4)

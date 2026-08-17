@@ -107,6 +107,14 @@ CREATE TABLE IF NOT EXISTS analyst_weights (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS family_alphas (
+    family TEXT PRIMARY KEY,
+    alpha REAL NOT NULL DEFAULT 1.0,
+    hit_rate REAL,
+    sample_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS recommendations (
     id INTEGER PRIMARY KEY,
     contract_key TEXT NOT NULL,
@@ -634,6 +642,27 @@ class Database:
                 updated_at=excluded.updated_at""",
                 (analyst, weight, sample_count, json.dumps(metrics), datetime.utcnow().isoformat()),
             )
+
+    def save_family_alpha(self, family: str, alpha: float, hit_rate: Optional[float], sample_count: int) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO family_alphas(family, alpha, hit_rate, sample_count, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(family) DO UPDATE SET alpha=excluded.alpha,
+                hit_rate=excluded.hit_rate, sample_count=excluded.sample_count,
+                updated_at=excluded.updated_at""",
+                (family, alpha, hit_rate, sample_count, datetime.utcnow().isoformat()),
+            )
+
+    def family_alphas(self) -> Dict[str, float]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT family, alpha FROM family_alphas").fetchall()
+        return {str(row["family"]): float(row["alpha"]) for row in rows}
+
+    def family_alpha_stats(self) -> List[Dict[str, object]]:
+        with self.connect() as connection:
+            rows = connection.execute("SELECT * FROM family_alphas ORDER BY alpha DESC").fetchall()
+        return [dict(row) for row in rows]
 
     def save_recommendation(
         self, evaluation: ConsensusEvaluation, signal_ids: Sequence[int], session_date: Optional[date] = None

@@ -39,7 +39,7 @@ class ScoringTests(unittest.TestCase):
     def test_two_independent_families_can_reach_a(self):
         result = evaluate_consensus([
             signal("pa", "price_action", confidence=1.0),
-            signal("fpd", "flow_divergence", confidence=1.0, minute=1),
+            signal("fpd", "flow_positioning", confidence=1.0, minute=1),
         ], analyst_weights={"pa": 1.5, "fpd": 1.5}, market=self.market,
            portfolio=self.portfolio, now=datetime(2026, 8, 6, 1, 5))
         self.assertGreaterEqual(result.score, 80)
@@ -49,14 +49,14 @@ class ScoringTests(unittest.TestCase):
         result = evaluate_consensus([
             signal("pa", "price_action", direction="BEAR"),
             signal("pa", "price_action", direction="BULL", minute=1),
-            signal("fpd", "flow_divergence", direction="BULL"),
+            signal("fpd", "flow_positioning", direction="BULL"),
         ], market=self.market, portfolio=self.portfolio, now=datetime(2026, 8, 6, 2))
         self.assertEqual(len(result.votes), 2)
         self.assertEqual(result.final_direction, "BULL")
 
     def test_weight_shrinkage(self):
         self.assertEqual(calibrated_weight(1, 0.5, 1, 0), 1.0)
-        self.assertEqual(calibrated_weight(1, 0.5, 1, 20), 1.5)
+        self.assertEqual(calibrated_weight(1, 0.5, 1, 20), 2.0)
 
 
 if __name__ == "__main__":

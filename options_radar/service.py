@@ -18,7 +18,11 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
 from .ai_provider import DeepSeekProvider
 from .analyst_backtest import AnalystBacktestCoordinator, CompositeBarsSource
-from .analytics import update_analyst_weights_from_backtest, update_analyst_weights_from_outcomes
+from .analytics import (
+    compute_family_alphas,
+    update_analyst_weights_from_backtest,
+    update_analyst_weights_from_outcomes,
+)
 from .backtest_service import BacktestCoordinator
 from .backup_providers import AlpacaProvider
 from .config import AppConfig, load_config
@@ -616,6 +620,7 @@ class OptionsRadarService:
             ))
             evaluation = evaluate_consensus(
                 signals, self.database.get_weights(item.analyst for item in signals),
+                family_alphas=self.database.family_alphas(),
                 market=market, portfolio=portfolio,
                 recommendation_threshold=float(scoring.get("recommendation_threshold", 65)),
                 disagreement_threshold=float(scoring.get("disagreement_threshold", 0.25)),
@@ -1217,6 +1222,10 @@ class OptionsRadarService:
             self.analyst_backtests.run()
             try:
                 update_analyst_weights_from_backtest(self.database, horizon_days=0)
+            except Exception:
+                pass
+            try:
+                compute_family_alphas(self.database, horizon_days=0)
             except Exception:
                 pass
             self._analyst_backtest_at = time.monotonic()
