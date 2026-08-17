@@ -1109,15 +1109,22 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                 badge = f'<span class="badge {badge_cls}">{html.escape(direction)}</span>'
                 flow_only = str(item.get("data_quality", "")).startswith("仅") or item.get("analyst_count") is not None
                 source_badge = '<span class="badge watch">仅flow</span>' if flow_only else f'<span class="badge watch">分析师{n_html if (n_html := html.escape(str(item.get("analyst_count", ""))) if item.get("analyst_count") is not None else "") else ""}</span>'
+                votes = item.get("votes") if isinstance(item.get("votes"), list) else []
+                fpd_trade = any(
+                    isinstance(v, Mapping) and v.get("analyst") == "fpd" and v.get("decision") == "TRADE"
+                    for v in votes
+                )
+                fpd_badge = '<span class="badge up">fpd确认</span>' if fpd_trade else ''
                 score = item.get("score")
                 score_html = f'{float(score):.1f}' if isinstance(score, (int, float)) else html.escape(str(score))
                 grade = html.escape(str(item.get("grade", "-")))
                 premium_text = format_premium(item.get("premium"))
                 data_quality = str(item.get("data_quality", item.get("market_status", "待行情")))
-                # 休市时行情时间戳必然过期，直接标注休市而不是 missing。
-                market_state = "休市"
+                # 这里标注的是「行情数据新鲜度」，不是市场状态；市场开闭由顶部
+                # market-banner 按当前时间展示，避免旧数据把「交易中」误标成休市。
+                market_state = "行情待刷新"
                 if data_quality in {"native", "realtime", "ok"}:
-                    market_state = "实时"
+                    market_state = "实时行情"
                 elif data_quality in {"仅flow", "flow"}:
                     market_state = "待采集"
                 quote_line = f'bid/ask {bid} / {ask} · 数据 {market_state} · 执行 {html.escape(str(item.get("execution_status", "待行情")))}'
@@ -1149,7 +1156,7 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                     remaining = "评分组成：" + reason.split("评分组成：", 1)[1].split("风险提示", 1)[0]
                 cards.append(
                     '<section class="card">'
-                    f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:18px">{key}</h2><span class="muted" style="font-size:13px">交易量 {premium_text}</span>{badge}{source_badge}</div>'
+                    f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:18px">{key}</h2><span class="muted" style="font-size:13px">交易量 {premium_text}</span>{badge}{source_badge}{fpd_badge}</div>'
                     f'<div style="margin:8px 0 4px"><span style="font-size:24px;font-weight:700">{score_html}</span>'
                     f'<span class="muted" style="margin-left:8px">{grade}级</span></div>'
                     f'<p style="margin:2px 0" class="muted">{quote_line}</p>'
@@ -1159,7 +1166,7 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                     f'<p style="margin:6px 0 0" class="muted">{html.escape(remaining) if remaining else ""}</p>'
                     '</section>'
                 )
-            return market_banner + '<div class="grid">' + "".join(cards) + '</div><details class="card" style="margin-top:16px"><summary>评分体系说明（参考国际常用期权分析框架）</summary><p>候选从 Discord 异常期权/分析师频道采集（解析成交额、持仓、分析师卡片），再叠加以下五维评分。每个维度都用<strong>可验证的数据</strong>计算，不是主观打分：</p><table><tr><th>维度</th><th>权重</th><th>依据</th></tr><tr><td>方向共识</td><td>40%</td><td>四个分析家族（价格行为/均值回归/量化均值回归/流价背离）独立观点的方向与决策（TRADE/WATCH/NO_TRADE）加权一致度；家族间方向冲突直接扣分</td></tr><tr><td>历史胜率</td><td>20%</td><td>各分析师历史推荐的模拟盘盈亏（1/3/5日结算）动态校准权重，类似国际组合的“因子回测”权重</td></tr><tr><td>信号完整度</td><td>15%</td><td>分析师卡片是否给出方向、置信度、入场/止盈/止损、理由等字段的完整程度</td></tr><tr><td>行情质量</td><td>15%</td><td>富途实时 bid/ask、买卖价差、Open Interest、成交量、隐含波动率（IV）——对应流动性检验（类似 CBOE 盘口校验）</td></tr><tr><td>组合适配</td><td>10%</td><td>标的是否已在持仓/自选、仓位集中度是否过高——对应风控的集中度限制</td></tr></table><p>评级：A≥80（飞书提醒）｜B 65-79（合格）｜C 50-64（观察榜）｜D&lt;50（过滤）。仅flow=异常期权事件但分析师尚未确认。</p><p class="muted">数据来源：Discord 频道文本（成交额/分析师观点）、富途 OpenD 实时行情（盘口/OI/IV/希腊字母）、Alpaca/Massive 历史行情（回测）、DeepSeek 仅做翻译与文字整理，不参与任何数值决策。</p></details>'
+            return market_banner + '<div class="grid">' + "".join(cards) + '</div><details class="card" style="margin-top:16px"><summary>评分体系说明</summary><p>候选从 Discord 异常期权/分析师频道采集（解析成交额、持仓、分析师卡片），再叠加以下五维评分。每个维度都用<strong>可验证的数据</strong>计算，不是主观打分：</p><table><tr><th>维度</th><th>权重</th><th>依据</th></tr><tr><td>方向共识</td><td>40%</td><td>四个分析家族按<strong>回测方向正确率加权</strong>（贝叶斯收缩映射，fpd 流价背离权重最高）；fpd 单独确认即可高分，无 fpd 的随机家族共识封顶 64</td></tr><tr><td>历史胜率</td><td>20%</td><td>分析师<strong>卖方策略回测</strong>（BULL 卖平值 PUT / BEAR 卖平值 CALL，到期口径）动态校准权重</td></tr><tr><td>信号质量</td><td>15%</td><td>分析师卡片是否给出方向、置信度、入场/止盈/止损、理由等字段的完整程度</td></tr><tr><td>行情质量</td><td>15%</td><td><strong>流动性优先</strong>：买卖价差、Open Interest（卖方进出成本）；卖方持有到期，行情实时性降权</td></tr><tr><td>组合适配</td><td>10%</td><td>标的是否已在持仓/自选、仓位集中度是否过高——对应风控的集中度限制</td></tr></table><p>评级：A≥80（飞书提醒）｜B 65-79（合格）｜C 50-64（观察榜）｜D&lt;50（过滤）。仅flow=异常期权事件但分析师尚未确认。休市/行情缺失只影响「可执行性」，不压低信号评分。</p><p class="muted">数据来源：Discord 频道文本（成交额/分析师观点）、富途 OpenD 实时行情（盘口/OI/IV/希腊字母）、Alpaca 历史行情（回测）、DeepSeek 仅做翻译与文字整理，不参与任何数值决策。</p></details>'
         if path == "/signals" and isinstance(data, list):
             def format_premium(value: Any) -> str:
                 try:
@@ -1178,7 +1185,7 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
 
             family_names = {
                 "price_action": "价格行为", "mean_reversion": "均值回归",
-                "quant_mean_reversion": "量化均值回归", "flow_price_divergence": "流价背离",
+                "quant_mean_reversion": "量化均值回归", "flow_positioning": "流价背离",
                 "pa": "价格行为", "mr": "均值回归",
                 "qmr": "量化均值回归", "fpd": "流价背离",
             }
@@ -1321,10 +1328,7 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
             sections.append('<section class="card" id="portfolio-table"><h2>全部自选</h2><div class="table-wrap"><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + ("".join(other_rows) or '<tr><td colspan="8">暂无组合快照</td></tr>') + '</table></div></section>')
             return "".join(sections)
         if path == "/backtest" and isinstance(data, dict):
-            replay = data.get("replay") or {}
-            ranges = data.get("historical_range") or {}
             paper = data.get("paper") or {}
-            breakdown = data.get("analyst_breakdown") if isinstance(data.get("analyst_breakdown"), list) else []
             parts = []
 
             # -- 1. 分析师信号回测（置顶，核心） --
@@ -1417,78 +1421,7 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                     '<p class="muted">按信号产生日聚合；正股 = BULL 买正股 / BEAR 空仓，卖方 = 卖平值期权（25% 保证金口径）。</p></details>'
                 )
 
-            # -- 3. 共识推荐（合并折叠组） --
-            consensus_parts = []
-            if ranges.get("start"):
-                filled = replay.get("filled", 0)
-                no_fill = replay.get("no_fill", 0)
-                avg = round(float(replay.get("avg_net_return", 0) or 0) * 100, 2)
-                dd = round(float(replay.get("max_drawdown", 0) or 0) * 100, 2)
-                win_rate = "—"
-                if filled:
-                    wins = sum(1 for item in (replay.get("outcomes") or []) if item.get("status") == "filled" and float(item.get("pnl_pct") or 0) > 0)
-                    win_rate = f"{round(wins / filled * 100, 1)}%"
-                consensus_parts.append((
-                    '<h3 style="margin:14px 0 6px">回放（{} ~ {}，{} 个交易日）</h3>'
-                    '<div class="grid" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">'
-                    f'<div class="card"><div class="muted">结算笔数</div><div class="metric">{filled}</div><div class="muted">未成交 {no_fill}</div></div>'
-                    f'<div class="card"><div class="muted">胜率</div><div class="metric">{html.escape(win_rate)}</div></div>'
-                    f'<div class="card"><div class="muted">平均收益率</div><div class="metric">{avg}%</div></div>'
-                    f'<div class="card"><div class="muted">最大回撤</div><div class="metric">{dd}%</div></div>'
-                    '</div>'
-                ).format(html.escape(str(ranges["start"])), html.escape(str(ranges["end"])), data.get("sessions_available", 0)))
-                outcomes = replay.get("outcomes") or []
-                if outcomes:
-                    exit_names = {
-                        "stop-loss": "止损", "take-profit": "止盈", "holding-limit": "持有到期",
-                        "no-complete-bar": "无K线", "limit-exceeded": "超限价", "no-fill": "未成交",
-                    }
-                    detail_rows = []
-                    for item in outcomes:
-                        pnl = float(item.get("pnl_pct") or 0.0) if item.get("status") == "filled" else None
-                        pnl_html = "—"
-                        if pnl is not None:
-                            cls = "up" if pnl >= 0 else "down"
-                            pnl_html = f'<span class="{cls}">{pnl * 100:+.2f}%</span>'
-                        status_label = {"filled": "成交", "no-fill": "未成交"}.get(str(item.get("status")), str(item.get("status")))
-                        exit_label = exit_names.get(str(item.get("exit_reason")), str(item.get("exit_reason") or "—"))
-                        detail_rows.append(
-                            '<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>'.format(
-                                html.escape(str(item.get("session_date", ""))),
-                                html.escape(str(item.get("contract_key", ""))),
-                                item.get("horizon_days", ""),
-                                html.escape(status_label),
-                                pnl_html,
-                                html.escape(exit_label),
-                            )
-                        )
-                    consensus_parts.append(
-                        '<h3 style="margin:14px 0 6px">逐笔结算明细</h3><div class="table-wrap"><table>'
-                        '<tr><th>交易日</th><th>合约</th><th>持有(日)</th><th>状态</th><th>收益率</th><th>退出</th></tr>'
-                        + "".join(detail_rows) + '</table></div>'
-                    )
-            if breakdown:
-                br_rows = "".join(
-                    '<tr><td>{}</td><td>{}</td><td>{}</td><td>{:.1f}%</td><td>{:+.2f}%</td></tr>'.format(
-                        html.escape(str(item.get("analyst", ""))),
-                        item.get("trades", 0), item.get("wins", 0),
-                        float(item.get("win_rate", 0) or 0) * 100,
-                        float(item.get("avg_return", 0) or 0) * 100,
-                    ) for item in breakdown
-                )
-                consensus_parts.append(
-                    '<h3 style="margin:14px 0 6px">共识推荐分析师胜率（5日结算）</h3><div class="table-wrap"><table>'
-                    '<tr><th>分析师</th><th>成交笔数</th><th>盈利笔数</th><th>胜率</th><th>平均收益</th></tr>'
-                    + br_rows + '</table></div>'
-                )
-            if consensus_parts:
-                parts.append(
-                    '<details class="card"><summary>共识推荐（推荐级回放，样本少）</summary>'
-                    '<p class="muted">基于共识推荐记录（推荐按合约覆盖式更新，仅保留最近交易日）；5 日结算需交易日满 5 天，样本随运行自动积累。</p>'
-                    + "".join(consensus_parts) + '</details>'
-                )
-
-            # -- 4. 模拟交易统计 --
+            # -- 3. 模拟交易统计 --
             if paper:
                 parts.append(f'<section class="card"><h2>模拟交易统计</h2><p>平仓: {paper.get("closed",0)} 笔　胜率: {round(paper.get("win_rate",0)*100,1)}%　损益: ${paper.get("realized_pnl",0):,.2f}</p></section>')
             return "".join(parts) if parts else '<section class="card"><p>暂无回测数据。等待系统积累足够交易日后再查看。</p></section>'

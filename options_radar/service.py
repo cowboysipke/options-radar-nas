@@ -21,7 +21,6 @@ from .analyst_backtest import AnalystBacktestCoordinator, CompositeBarsSource
 from .analytics import (
     compute_family_alphas,
     update_analyst_weights_from_backtest,
-    update_analyst_weights_from_outcomes,
 )
 from .backtest_service import BacktestCoordinator
 from .backup_providers import AlpacaProvider
@@ -389,6 +388,7 @@ class OptionsRadarService:
         self._portfolio_refresh_status = "idle"
         self._portfolio_refresh_error: Optional[str] = None
         self._last_results: List[Dict[str, Any]] = []
+        self._last_top5_keys: set = set()
         self._last_collection: Optional[str] = None
         self._last_sync: Optional[str] = None
         self._last_error: Optional[str] = None
@@ -626,24 +626,27 @@ class OptionsRadarService:
                 disagreement_threshold=float(scoring.get("disagreement_threshold", 0.25)),
             )
             dte = event.dte if event.dte is not None else (event.expiry - target_date).days
-            hard_filter = None
+            quality_filter = None
             if not int(scoring.get("min_dte", 14)) <= dte <= int(scoring.get("max_dte", 60)):
-                hard_filter = f"DTE {dte} 不在默认范围"
+                quality_filter = f"DTE {dte} 不在默认范围"
             elif market.delta is None or not float(scoring.get("min_abs_delta", 0.30)) <= abs(market.delta) <= float(scoring.get("max_abs_delta", 0.65)):
-                hard_filter = "Delta 缺失或不在默认范围"
+                quality_filter = "Delta 缺失或不在默认范围"
             elif market.spread_pct is None or market.spread_pct > float(scoring.get("max_spread_pct", 0.12)):
-                hard_filter = "买卖价差缺失或超过默认上限"
+                quality_filter = "买卖价差缺失或超过默认上限"
             elif market.open_interest is None or market.open_interest < float(scoring.get("min_open_interest", 100)):
-                hard_filter = "Open Interest 缺失或低于默认下限"
-            elif market.data_status != "ok":
-                hard_filter = "缺少新鲜实时bid/ask，仅进入观察榜"
-            elif market.data_conflicts:
-                hard_filter = "多供应商实时行情冲突，暂停生成入场限价"
-            if hard_filter:
+                quality_filter = "Open Interest 缺失或低于默认下限"
+            if quality_filter:
                 evaluation.score = min(evaluation.score, 64.0)
                 evaluation.grade = "C" if evaluation.score >= 50 else "D"
                 evaluation.eligible = False
-                evaluation.risk_flags.append(hard_filter)
+                evaluation.risk_flags.append(quality_filter)
+            # 行情新鲜度只影响「可执行性」，不压低信号质量评分。
+            if market.data_status != "ok":
+                evaluation.eligible = False
+                evaluation.risk_flags.append("缺少新鲜实时bid/ask，仅进入观察榜")
+            elif market.data_conflicts:
+                evaluation.eligible = False
+                evaluation.risk_flags.append("多供应商实时行情冲突，暂停生成入场限价")
             recommendation_id = self.database.save_recommendation(
                 evaluation, [int(item.id) for item in signals if item.id], target_date
             )
@@ -675,11 +678,20 @@ class OptionsRadarService:
         return output
 
     def publish_top5(self) -> Optional[str]:
-        """Send the top-5 scored recommendations to Feishu as a regular update."""
+        """Send the top-5 recommendations only when a new contract enters the list.
+
+        Repeating the same five contracts every poll spams Feishu; this tracks
+        the previously-sent contract set and skips the send when nothing changed.
+        """
         results = self.dashboard_recommendations({"date": self._trade_date().isoformat()})
         top = sorted(results, key=lambda x: float(x.get("score", 0)), reverse=True)[:5]
         if not top:
             return None
+        keys = {str(item.get("contract_key", "")) for item in top}
+        last_keys = getattr(self, "_last_top5_keys", set())
+        if keys <= last_keys and last_keys:
+            return None
+        self._last_top5_keys = keys
         body = "\n".join(
             f"**#{i+1} {item['contract_key']}**｜{float(item.get('score', 0)):.1f}分｜"
             f"{item.get('grade', '-')}｜{item.get('direction', '-')}｜"
@@ -691,7 +703,7 @@ class OptionsRadarService:
             f"理由：{item.get('reason', '暂无理由')}"
             for i, item in enumerate(top)
         )
-        source = "top5-" + datetime.utcnow().strftime("%Y%m%d%H%M")
+        source = "top5-" + datetime.utcnow().strftime("%Y%m%d")
         return self.feishu.enqueue_card(build_card("今日推荐 TOP5", body, "blue"), source_message_id=source)
 
     def collect(self, backfill: bool = False) -> List[Dict[str, Any]]:
@@ -725,9 +737,16 @@ class OptionsRadarService:
         )
 
     def run_backtests(self) -> Dict[str, int]:
-        self._last_backtest = self.backtests.record_daily(self._trade_date())
+        self._last_backtest = self.analyst_backtests.run()
         self._last_backtest_at = time.monotonic()
-        update_analyst_weights_from_outcomes(self.database)
+        try:
+            update_analyst_weights_from_backtest(self.database, horizon_days=0)
+        except Exception:
+            pass
+        try:
+            compute_family_alphas(self.database, horizon_days=0)
+        except Exception:
+            pass
         return self._last_backtest
 
     def replay_backtest(self, start: str = "", end: str = "") -> Dict[str, Any]:
@@ -736,7 +755,6 @@ class OptionsRadarService:
         end_date = date.fromisoformat(end) if end else self._trade_date()
         settlement = self.backtests.replay(start_date, end_date)
         summary = self.backtests.replay_summary(start_date, end_date)
-        update_analyst_weights_from_outcomes(self.database)
         return {"settlement": settlement, **summary}
 
     def run_optimizer(self) -> Dict[str, Any]:
@@ -885,7 +903,7 @@ class OptionsRadarService:
             for item in votes if isinstance(item, Mapping)
         )
         components = payload.get("components") if isinstance(payload.get("components"), Mapping) else {}
-        component_labels = {"consensus": "共识", "signal_quality": "信号质量", "market_quality": "行情质量", "portfolio_fit": "组合适配"}
+        component_labels = {"consensus": "方向共识", "analyst_history": "历史胜率", "signal_quality": "信号质量", "market_quality": "行情质量", "portfolio_fit": "组合适配"}
         component_text = "、".join(
             f"{component_labels.get(str(key), key)} {float(value):.1f}"
             for key, value in components.items()
@@ -1270,41 +1288,11 @@ class OptionsRadarService:
             horizon = 5 if raw in (None, "") else int(raw)
         except (TypeError, ValueError):
             horizon = 5
-        # Kick a background replay when stale, then return cached results so the
-        # page renders instantly. The first load may show partial data while
-        # historical bars are fetched; later loads are complete.
-        try:
-            with self.database.connect() as conn:
-                sessions = [row[0] for row in conn.execute(
-                    "SELECT DISTINCT session_date FROM recommendations WHERE session_date IS NOT NULL ORDER BY session_date"
-                ).fetchall()]
-        except Exception:
-            sessions = []
-        summary = {}
-        if sessions:
-            start = date.fromisoformat(sessions[0])
-            end = date.fromisoformat(sessions[-1])
-            fresh = self._last_backtest and (time.monotonic() - self._last_backtest_at) < 3600
-            with self._backtest_lock:
-                running = self._backtest_running
-            if not fresh and not running:
-                with self._backtest_lock:
-                    self._backtest_running = True
-                threading.Thread(target=self._backtest_worker, args=(start, end), daemon=True).start()
-            with self._backtest_lock:
-                summary = dict(self._backtest_summary) if self._backtest_summary else {}
-            if not summary:
-                summary = {"status": "collecting", "note": "正在结算历史收益（拉取期权历史行情），稍后刷新页面查看。"}
         self._maybe_start_analyst_backtest()
         self._ensure_horizon_settled(horizon)
         return {
             "paper": self.database.paper_stats(),
-            "last_run": self._last_backtest,
             "optimization": self._last_optimization,
-            "historical_range": {"start": sessions[0] if sessions else None, "end": sessions[-1] if sessions else None},
-            "sessions_available": len(sessions),
-            "replay": summary,
-            "analyst_breakdown": self._analyst_backtest_breakdown(),
             "analyst_accuracy": {
                 "summary": self.database.analyst_backtest_summary_for_horizon(horizon),
                 "daily": self.database.analyst_backtest_daily_summary(horizon),
@@ -1380,48 +1368,6 @@ class OptionsRadarService:
             "verdict": verdict,
             "existing": {"decision": signal.get("decision"), "direction": signal.get("direction")},
         }
-
-    def _analyst_backtest_breakdown(self) -> List[Dict[str, Any]]:
-        """Per-analyst win-rate for the longest settled horizon per recommendation."""
-        # Prefer 5-day outcomes; fall back to whatever horizon has settled so the
-        # panel is informative before a full week of data accumulates.
-        outcomes = {
-            item.recommendation_id: item for item in self.database.signal_outcomes()
-        }
-        best: Dict[int, Any] = {}
-        for item in outcomes.values():
-            if item.status != "filled":
-                continue
-            current = best.get(item.recommendation_id)
-            if current is None or item.horizon_days > current.horizon_days:
-                best[item.recommendation_id] = item
-        by_analyst: Dict[str, List[float]] = {}
-        for row in self.database.recommendations_since(date.today() - timedelta(days=300)):
-            outcome = best.get(int(row["id"]))
-            if outcome is None:
-                continue
-            try:
-                payload = json.loads(str(row["payload_json"]))
-            except Exception:
-                continue
-            votes = payload.get("votes") if isinstance(payload.get("votes"), list) else []
-            for vote in votes:
-                if not isinstance(vote, Mapping) or vote.get("decision") != "TRADE":
-                    continue
-                analyst = str(vote.get("analyst", ""))
-                if analyst:
-                    by_analyst.setdefault(analyst, []).append(float(outcome.pnl_pct or 0.0))
-        rows = []
-        for analyst, returns in sorted(by_analyst.items()):
-            wins = sum(1 for value in returns if value > 0)
-            rows.append({
-                "analyst": analyst,
-                "trades": len(returns),
-                "wins": wins,
-                "win_rate": round(wins / len(returns), 3) if returns else 0.0,
-                "avg_return": round(sum(returns) / len(returns), 4) if returns else 0.0,
-            })
-        return rows
 
     def dashboard_contracts(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         return self.dashboard_recommendations({})
