@@ -156,8 +156,14 @@ class AnalystBacktestCoordinator:
     # -- bars ----------------------------------------------------------------
 
     def _daily_bars(self, ticker: str, start: date, end: date) -> List[OptionBar]:
+        source = self.market
+        if str(ticker).startswith("O:"):
+            # Option daily bars come from Alpaca; Massive only reliably serves
+            # 5-minute bars and its daily option aggregates are sparse and
+            # rate-limited (5 req/min), so skip the fallback to keep building fast.
+            source = getattr(self.market, "primary", self.market)
         try:
-            raw = self.market.aggregate_bars(ticker, start, end, 1, "day")
+            raw = source.aggregate_bars(ticker, start, end, 1, "day")
         except Exception:
             return []
         bars = [value for value in (_bar(item) for item in raw) if value is not None]
