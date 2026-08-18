@@ -993,11 +993,11 @@ class OptionsRadarService:
             sell = sorted(
                 [v for v in views if v.get("strategy_type") != "buy"],
                 key=lambda item: float(item.get("score", 0)), reverse=True,
-            )[:5]
+            )[:3]
             buy = sorted(
                 [v for v in views if v.get("strategy_type") == "buy"],
                 key=lambda item: float(item.get("score", 0)), reverse=True,
-            )[:5]
+            )[:3]
             return {"sell": sell, "buy": buy}
         # No analyst confirmation for this session yet: surface recent flow
         # events as observation candidates so the dashboard updates as new
