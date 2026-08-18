@@ -401,6 +401,7 @@ class AlpacaProvider(_HttpMarketProvider):
         else:
             payload = self._get(f"/v2/stocks/{ticker.upper()}/bars", {
                 "timeframe": timeframe, "start": start_dt, "end": end_dt, "limit": 10000,
+                "feed": "iex",
             })
             rows = payload.get("bars", []) if isinstance(payload, dict) else []
         output: List[Dict[str, object]] = []

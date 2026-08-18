@@ -265,8 +265,11 @@ class DiscordRestSource(DiscordSource):
         return output
 
     def fetch_since(
-        self, channel_id: str, cursor: Optional[SourceCursor], scroll_pages: int = 0
+        self, channel_id: str, cursor: Optional[SourceCursor], scroll_pages: int = 0,
+        timeout_ms: Optional[int] = None,
     ) -> List[SourceMessage]:
+        if timeout_ms is not None:
+            self.timeout_ms = int(timeout_ms)
         with self._lock:
             snowflake = self._snowflake(channel_id)
             if snowflake is None:
