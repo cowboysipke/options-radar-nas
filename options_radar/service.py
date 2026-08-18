@@ -44,7 +44,7 @@ from .paper import build_candidate
 from .parser import parse_analyst_message, parse_flow_message
 from .reports import daily_report, portfolio_markdown
 from .rulebook import RulebookCompiler
-from .scoring import evaluate_consensus
+from .scoring import evaluate_buy_side, evaluate_consensus
 from .provider_adapters import FutuUnifiedProvider, MassiveUnifiedProvider
 from .provider_registry import ProviderRegistry, market_snapshot_from_composite
 from .timeutil import us_session_date_from_china_time
@@ -618,103 +618,138 @@ class OptionsRadarService:
             portfolio = self._portfolio.get(event.symbol, PortfolioContext(
                 symbol=event.symbol, in_watchlist=event.symbol in set(self._watch_symbols()),
             ))
-            evaluation = evaluate_consensus(
-                signals, self.database.get_weights(item.analyst for item in signals),
-                family_alphas=self.database.family_alphas(),
-                market=market, portfolio=portfolio,
-                recommendation_threshold=float(scoring.get("recommendation_threshold", 65)),
-                disagreement_threshold=float(scoring.get("disagreement_threshold", 0.25)),
-            )
             dte = event.dte if event.dte is not None else (event.expiry - target_date).days
-            # 信号质量硬过滤：合约本身不适合（期限/风险超限）才压分。
-            # 字段「缺失」多为休市行情拿不到，只影响可执行性，不压低信号评分。
-            quality_filter = None
-            if not int(scoring.get("min_dte", 14)) <= dte <= int(scoring.get("max_dte", 60)):
-                quality_filter = f"DTE {dte} 不在默认范围"
-            elif market.delta is not None and not float(scoring.get("min_abs_delta", 0.30)) <= abs(market.delta) <= float(scoring.get("max_abs_delta", 0.65)):
-                quality_filter = "Delta 不在默认范围"
-            elif market.spread_pct is not None and market.spread_pct > float(scoring.get("max_spread_pct", 0.12)):
-                quality_filter = "买卖价差超过默认上限"
-            elif market.open_interest is not None and market.open_interest < float(scoring.get("min_open_interest", 100)):
-                quality_filter = "Open Interest 低于默认下限"
-            if quality_filter:
-                evaluation.score = min(evaluation.score, 64.0)
-                evaluation.grade = "C" if evaluation.score >= 50 else "D"
-                evaluation.eligible = False
-                evaluation.risk_flags.append(quality_filter)
-            # 行情新鲜度与字段缺失只影响「可执行性」，不压低信号质量评分。
-            missing_fields = []
-            if market.data_status != "ok":
-                missing_fields.append("缺少新鲜实时bid/ask，仅进入观察榜")
-            if market.delta is None:
-                missing_fields.append("Delta 缺失")
-            if market.spread_pct is None:
-                missing_fields.append("买卖价差缺失")
-            if market.open_interest is None:
-                missing_fields.append("Open Interest 缺失")
-            if market.data_conflicts:
-                missing_fields.append("多供应商实时行情冲突，暂停生成入场限价")
-            if missing_fields:
-                evaluation.eligible = False
-                evaluation.risk_flags.extend(missing_fields)
-            recommendation_id = self.database.save_recommendation(
-                evaluation, [int(item.id) for item in signals if item.id], target_date
-            )
-            candidate = build_candidate(evaluation, market, portfolio, paper)
-            execution = {
-                "strategy": candidate.strategy, "contract_key": candidate.market.contract_key,
-                "futu_code": market.futu_code, "bid": market.bid, "ask": market.ask,
-                "last": market.last, "volume": market.volume, "open_interest": market.open_interest,
-                "iv": market.implied_volatility, "delta": market.delta, "spread_pct": market.spread_pct,
-                "entry_debit": candidate.entry_debit, "max_entry_price": candidate.max_entry_price,
-                "underlying_entry": candidate.underlying_entry, "underlying_target": candidate.underlying_target,
-                "underlying_stop": candidate.underlying_stop, "quantity": candidate.quantity,
-                "quantity_status": candidate.quantity_status, "risk_per_contract": candidate.risk_per_contract,
-                "max_loss": candidate.max_loss, "take_profit": candidate.take_profit,
-                "stop_loss": candidate.stop_loss,
-                "valid_until": candidate.valid_until.isoformat() if candidate.valid_until else None,
-                "invalidation": candidate.invalidation, "data_quality": candidate.data_quality,
-                "market_status": candidate.market.data_status,
-                "market_observed_at": candidate.market.observed_at.isoformat(),
-            }
-            self.database.attach_execution(recommendation_id, execution)
-            output.append({
-                "recommendation_id": recommendation_id, "contract_key": evaluation.contract_key,
-                "grade": evaluation.grade, "score": evaluation.score,
-                "direction": evaluation.final_direction, "eligible": evaluation.eligible,
-                **execution,
-            })
+            max_dte = int(scoring.get("max_dte", 60))
+            min_buy_dte = int(scoring.get("min_buy_dte", 7))
+
+            if 14 <= dte <= max_dte:
+                # -- 卖方流：DTE 14~60，卖 ATM PUT/CALL --
+                evaluation = evaluate_consensus(
+                    signals, self.database.get_weights(item.analyst for item in signals),
+                    family_alphas=self.database.family_alphas(),
+                    market=market, portfolio=portfolio,
+                    recommendation_threshold=float(scoring.get("recommendation_threshold", 65)),
+                    disagreement_threshold=float(scoring.get("disagreement_threshold", 0.25)),
+                )
+                quality_filter = None
+                if market.delta is not None and not float(scoring.get("min_abs_delta", 0.30)) <= abs(market.delta) <= float(scoring.get("max_abs_delta", 0.65)):
+                    quality_filter = "Delta 不在默认范围"
+                elif market.spread_pct is not None and market.spread_pct > float(scoring.get("max_spread_pct", 0.12)):
+                    quality_filter = "买卖价差超过默认上限"
+                elif market.open_interest is not None and market.open_interest < float(scoring.get("min_open_interest", 100)):
+                    quality_filter = "Open Interest 低于默认下限"
+                if quality_filter:
+                    evaluation.score = min(evaluation.score, 64.0)
+                    evaluation.grade = "C" if evaluation.score >= 50 else "D"
+                    evaluation.eligible = False
+                    evaluation.risk_flags.append(quality_filter)
+                missing_fields = []
+                if market.data_status != "ok":
+                    missing_fields.append("缺少新鲜实时bid/ask，仅进入观察榜")
+                if market.delta is None:
+                    missing_fields.append("Delta 缺失")
+                if market.spread_pct is None:
+                    missing_fields.append("买卖价差缺失")
+                if market.open_interest is None:
+                    missing_fields.append("Open Interest 缺失")
+                if market.data_conflicts:
+                    missing_fields.append("多供应商实时行情冲突，暂停生成入场限价")
+                if missing_fields:
+                    evaluation.eligible = False
+                    evaluation.risk_flags.extend(missing_fields)
+                recommendation_id = self.database.save_recommendation(
+                    evaluation, [int(item.id) for item in signals if item.id], target_date, strategy_type="sell"
+                )
+                candidate = build_candidate(evaluation, market, portfolio, paper)
+                execution = {
+                    "strategy": candidate.strategy, "contract_key": candidate.market.contract_key,
+                    "futu_code": market.futu_code, "bid": market.bid, "ask": market.ask,
+                    "last": market.last, "volume": market.volume, "open_interest": market.open_interest,
+                    "iv": market.implied_volatility, "delta": market.delta, "spread_pct": market.spread_pct,
+                    "entry_debit": candidate.entry_debit, "max_entry_price": candidate.max_entry_price,
+                    "underlying_entry": candidate.underlying_entry, "underlying_target": candidate.underlying_target,
+                    "underlying_stop": candidate.underlying_stop, "quantity": candidate.quantity,
+                    "quantity_status": candidate.quantity_status, "risk_per_contract": candidate.risk_per_contract,
+                    "max_loss": candidate.max_loss, "take_profit": candidate.take_profit,
+                    "stop_loss": candidate.stop_loss,
+                    "valid_until": candidate.valid_until.isoformat() if candidate.valid_until else None,
+                    "invalidation": candidate.invalidation, "data_quality": candidate.data_quality,
+                    "market_status": candidate.market.data_status,
+                    "market_observed_at": candidate.market.observed_at.isoformat(),
+                }
+                self.database.attach_execution(recommendation_id, execution)
+                output.append({
+                    "recommendation_id": recommendation_id, "contract_key": evaluation.contract_key,
+                    "grade": evaluation.grade, "score": evaluation.score,
+                    "direction": evaluation.final_direction, "eligible": evaluation.eligible,
+                    "strategy_type": "sell", **execution,
+                })
+            elif min_buy_dte <= dte < 14:
+                # -- 买方短线流：DTE 7~14，仅 fpd 有交易计划 --
+                evaluation = evaluate_buy_side(signals, market)
+                if evaluation.score <= 0:
+                    continue
+                recommendation_id = self.database.save_recommendation(
+                    evaluation, [int(item.id) for item in signals if item.id], target_date, strategy_type="buy"
+                )
+                vote = evaluation.votes[0] if evaluation.votes else None
+                execution = {
+                    "strategy": "LONG_CALL" if evaluation.final_direction == "BULL" else "LONG_PUT",
+                    "contract_key": evaluation.contract_key,
+                    "underlying_entry": vote.underlying_entry if vote else None,
+                    "underlying_target": vote.underlying_target if vote else None,
+                    "underlying_stop": vote.underlying_stop if vote else None,
+                    "market_status": market.data_status,
+                }
+                self.database.attach_execution(recommendation_id, execution)
+                output.append({
+                    "recommendation_id": recommendation_id, "contract_key": evaluation.contract_key,
+                    "grade": evaluation.grade, "score": evaluation.score,
+                    "direction": evaluation.final_direction, "eligible": False,
+                    "strategy_type": "buy", **execution,
+                })
         output.sort(key=lambda item: float(item["score"]), reverse=True)
         return output
 
     def publish_top5(self) -> Optional[str]:
-        """Send the top-5 recommendations only when a new contract enters the list.
+        """Send the top recommendations only when a new contract enters either list.
 
-        Repeating the same five contracts every poll spams Feishu; this tracks
-        the previously-sent contract set and skips the send when nothing changed.
+        Two streams are pushed: sell-side (DTE 14-60) and buy-side short-term
+        (DTE 7-14, fpd). Repeating the same contracts every poll spams Feishu,
+        so each stream tracks its previously-sent set and skips when unchanged.
         """
-        results = self.dashboard_recommendations({"date": self._trade_date().isoformat()})
-        top = sorted(results, key=lambda x: float(x.get("score", 0)), reverse=True)[:5]
-        if not top:
+        result = self.dashboard_recommendations({"date": self._trade_date().isoformat()})
+        if not isinstance(result, Mapping):
             return None
-        keys = {str(item.get("contract_key", "")) for item in top}
+        sell = result.get("sell") or []
+        buy = result.get("buy") or []
         last_keys = getattr(self, "_last_top5_keys", set())
-        if keys <= last_keys and last_keys:
-            return None
-        self._last_top5_keys = keys
-        body = "\n".join(
-            f"**#{i+1} {item['contract_key']}**｜{float(item.get('score', 0)):.1f}分｜"
-            f"{item.get('grade', '-')}｜{item.get('direction', '-')}｜"
-            f"行情:{item.get('market_status', '待行情')}｜执行:{item.get('execution_status', '待行情')}\n"
-            f"bid/ask: {_format_price(item.get('bid'))} / {_format_price(item.get('ask'))}；"
-            f"入场:{_format_price(item.get('max_entry_price'))}；"
-            f"止盈:{_format_price(item.get('take_profit'))}；"
-            f"止损:{_format_price(item.get('stop_loss'))}\n"
-            f"理由：{item.get('reason', '暂无理由')}"
-            for i, item in enumerate(top)
-        )
-        source = "top5-" + datetime.utcnow().strftime("%Y%m%d")
-        return self.feishu.enqueue_card(build_card("今日推荐 TOP5", body, "blue"), source_message_id=source)
+
+        def _body(items, title):
+            keys = {str(item.get("contract_key", "")) for item in items}
+            if keys <= last_keys and last_keys:
+                return None
+            text = "\n".join(
+                f"**#{i+1} {item['contract_key']}**｜{float(item.get('score', 0)):.1f}分｜"
+                f"{item.get('grade', '-')}｜{item.get('direction', '-')}｜"
+                f"行情:{item.get('market_status', '待行情')}｜执行:{item.get('execution_status', '待行情')}\n"
+                f"理由：{item.get('reason', '暂无理由')}"
+                for i, item in enumerate(items)
+            )
+            return text
+
+        sent_any = False
+        sell_body = _body(sell, "卖方")
+        if sell_body:
+            self.feishu.enqueue_card(build_card("今日推荐·卖方", sell_body, "blue"), source_message_id="top5-sell-" + datetime.utcnow().strftime("%Y%m%d"))
+            sent_any = True
+        buy_body = _body(buy, "买方短线")
+        if buy_body:
+            self.feishu.enqueue_card(build_card("今日推荐·买方短线", buy_body, "purple"), source_message_id="top5-buy-" + datetime.utcnow().strftime("%Y%m%d"))
+            sent_any = True
+        if sent_any:
+            self._last_top5_keys = {str(item.get("contract_key", "")) for item in sell + buy}
+        return "queued" if sent_any else None
 
     def collect(self, backfill: bool = False) -> List[Dict[str, Any]]:
         with self._lock:
@@ -955,7 +990,15 @@ class OptionsRadarService:
                 key = str(view.get("contract_key", ""))
                 if key in premium_by_key and not view.get("premium"):
                     view["premium"] = premium_by_key[key]
-            return sorted(views, key=lambda item: float(item.get("score", 0)), reverse=True)[:5]
+            sell = sorted(
+                [v for v in views if v.get("strategy_type") != "buy"],
+                key=lambda item: float(item.get("score", 0)), reverse=True,
+            )[:5]
+            buy = sorted(
+                [v for v in views if v.get("strategy_type") == "buy"],
+                key=lambda item: float(item.get("score", 0)), reverse=True,
+            )[:5]
+            return {"sell": sell, "buy": buy}
         # No analyst confirmation for this session yet: surface recent flow
         # events as observation candidates so the dashboard updates as new
         # flow arrives.
@@ -979,7 +1022,7 @@ class OptionsRadarService:
                 "reason": "异常期权事件（无分析师确认）",
             })
         flow_only.sort(key=lambda item: float(item.get("premium", 0) or 0), reverse=True)
-        return flow_only[:10]
+        return {"sell": flow_only[:10], "buy": []}
 
     def dashboard_portfolio(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         metadata = self.database.all_instrument_metadata()
@@ -1281,9 +1324,26 @@ class OptionsRadarService:
             buyside_count = conn.execute(
                 "SELECT COUNT(DISTINCT analyst || char(1) || contract_key) FROM analyst_buyside_outcomes"
             ).fetchone()[0]
+            plan_signal_count = conn.execute(
+                """SELECT COUNT(*) FROM (
+                       SELECT p.analyst, f.contract_key
+                       FROM parsed_signals p
+                       JOIN flow_events f ON p.flow_event_key = f.event_key
+                       WHERE p.decision='TRADE' AND p.direction IN ('BULL','BEAR')
+                         AND f.session_date IS NOT NULL
+                         AND p.underlying_entry IS NOT NULL
+                         AND p.underlying_target IS NOT NULL
+                         AND p.underlying_stop IS NOT NULL
+                       GROUP BY p.analyst, f.contract_key
+                   )"""
+            ).fetchone()[0]
+            plan_count = conn.execute(
+                "SELECT COUNT(DISTINCT analyst || char(1) || contract_key) FROM analyst_plan_outcomes"
+            ).fetchone()[0]
         sell_pending = max(0, signal_count - series_count)
         buy_pending = max(0, signal_count - buyside_count)
-        return max(sell_pending, buy_pending)
+        plan_pending = max(0, plan_signal_count - plan_count)
+        return max(sell_pending, buy_pending, plan_pending)
 
     def _maybe_start_analyst_backtest(self) -> None:
         with self._backtest_lock:
@@ -1300,9 +1360,9 @@ class OptionsRadarService:
         payload = _payload if isinstance(_payload, Mapping) else {}
         raw = payload.get("horizon_days")
         try:
-            horizon = 5 if raw in (None, "") else int(raw)
+            horizon = 0 if raw in (None, "") else int(raw)
         except (TypeError, ValueError):
-            horizon = 5
+            horizon = 0
         self._maybe_start_analyst_backtest()
         self._ensure_horizon_settled(horizon)
         return {
@@ -1316,6 +1376,9 @@ class OptionsRadarService:
             },
             "buyside": {
                 "summary": self.database.analyst_buyside_summary(),
+            },
+            "plan": {
+                "summary": self.database.analyst_plan_summary(),
             },
         }
 

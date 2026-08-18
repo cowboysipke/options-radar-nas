@@ -284,6 +284,81 @@ def evaluate_consensus(
     )
 
 
+def evaluate_buy_side(
+    signals: Iterable[ParsedSignal],
+    market: Optional[MarketSnapshot] = None,
+    now: Optional[datetime] = None,
+) -> ConsensusEvaluation:
+    """Score a short-term buy-side signal (fpd only) by its own plan quality.
+
+    Weighting: 40% plan reward:risk, 30% liquidity, 30% analyst confidence.
+    Requires an fpd TRADE signal with entry/target/stop on the underlying.
+    """
+    votes_source = dedupe_analyst_votes(signals)
+    if not votes_source:
+        raise ValueError("at least one signal is required")
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    risk_flags: List[str] = []
+
+    fpd_trade = [
+        signal for signal in votes_source
+        if signal.analyst == "fpd" and signal.decision == "TRADE"
+        and signal.direction in {"BULL", "BEAR"}
+        and signal.underlying_entry is not None
+        and signal.underlying_target is not None
+        and signal.underlying_stop is not None
+    ]
+    if not fpd_trade:
+        signal = votes_source[0]
+        return ConsensusEvaluation(
+            contract_key=signal.contract_key, evaluated_at=now,
+            final_direction=signal.direction, score=0.0, grade="D",
+            disagreement=False, consensus_strength=0.0,
+            components={"plan_rr": 0.0, "liquidity": 0.0, "confidence": 0.0},
+            votes=[], risk_flags=["无 fpd 交易计划，不进入买方短线流"],
+            market_status=market.data_status if market else "missing", eligible=False,
+        )
+
+    signal = fpd_trade[0]
+    direction = signal.direction
+    entry = float(signal.underlying_entry)
+    target = float(signal.underlying_target)
+    stop = float(signal.underlying_stop)
+    if direction == "BULL":
+        reward = target - entry
+        risk = entry - stop
+    else:
+        reward = entry - target
+        risk = stop - entry
+    rr = reward / risk if risk and risk > 0 else 0.0
+    rr_score = clamp(rr / 2.0, 0.0, 1.0)  # R:R >= 2 is full marks
+
+    liquidity = _market_quality(market, risk_flags) / 100.0
+    confidence = float(signal.confidence if signal.confidence is not None else 0.5)
+
+    score = round(clamp(100.0 * (0.40 * rr_score + 0.30 * liquidity + 0.30 * confidence)), 2)
+    grade = "A" if score >= 80 else "B" if score >= 65 else "C" if score >= 50 else "D"
+
+    votes = [
+        AnalystVote(
+            analyst=signal.analyst, family=signal.analyst_family, decision=signal.decision,
+            direction=signal.direction, confidence=signal.confidence if signal.confidence is not None else 0.5,
+            weight=1.0, rationale=signal.rationale,
+            underlying_entry=signal.underlying_entry, underlying_target=signal.underlying_target,
+            underlying_stop=signal.underlying_stop, win_rate=signal.win_rate, risk_score=signal.risk_score,
+        )
+    ]
+    return ConsensusEvaluation(
+        contract_key=votes_source[0].contract_key, evaluated_at=now,
+        final_direction=direction, score=score, grade=grade,
+        disagreement=False, consensus_strength=1.0,
+        components={"plan_rr": round(rr_score * 100.0, 2), "liquidity": round(liquidity * 100.0, 2), "confidence": round(confidence * 100.0, 2)},
+        votes=votes, risk_flags=list(dict.fromkeys(risk_flags)),
+        market_status=market.data_status if market else "missing",
+        eligible=False,
+    )
+
+
 def calibrated_weight(hit_rate: float, median_return: float, calibration_score: float, samples: int) -> float:
     """60-day analyst weight with shrinkage until 20 closed samples.
 

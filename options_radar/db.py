@@ -125,6 +125,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
     final_direction TEXT NOT NULL,
     disagreement INTEGER NOT NULL,
     eligible INTEGER NOT NULL,
+    strategy_type TEXT NOT NULL DEFAULT 'sell',
     payload_json TEXT NOT NULL,
     signal_ids_json TEXT NOT NULL
 );
@@ -255,6 +256,24 @@ CREATE TABLE IF NOT EXISTS analyst_buyside_outcomes (
     underlying_change_pct REAL,
     observed_at TEXT NOT NULL,
     UNIQUE(analyst, contract_key, horizon_days)
+);
+
+CREATE TABLE IF NOT EXISTS analyst_plan_outcomes (
+    id INTEGER PRIMARY KEY,
+    analyst TEXT NOT NULL,
+    analyst_family TEXT NOT NULL,
+    contract_key TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    session_date TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    entry_price REAL,
+    plan_entry REAL,
+    plan_target REAL,
+    plan_stop REAL,
+    plan_status TEXT NOT NULL,
+    plan_pnl_pct REAL,
+    observed_at TEXT NOT NULL,
+    UNIQUE(analyst, contract_key)
 );
 
 CREATE TABLE IF NOT EXISTS strategy_versions (
@@ -418,6 +437,8 @@ class Database:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(recommendations)").fetchall()}
             if "session_date" not in columns:
                 connection.execute("ALTER TABLE recommendations ADD COLUMN session_date TEXT")
+            if "strategy_type" not in columns:
+                connection.execute("ALTER TABLE recommendations ADD COLUMN strategy_type TEXT NOT NULL DEFAULT 'sell'")
             meta_columns = {row[1] for row in connection.execute("PRAGMA table_info(instrument_metadata)").fetchall()}
             if "group_name" not in meta_columns:
                 connection.execute("ALTER TABLE instrument_metadata ADD COLUMN group_name TEXT")
@@ -683,7 +704,8 @@ class Database:
         return [dict(row) for row in rows]
 
     def save_recommendation(
-        self, evaluation: ConsensusEvaluation, signal_ids: Sequence[int], session_date: Optional[date] = None
+        self, evaluation: ConsensusEvaluation, signal_ids: Sequence[int],
+        session_date: Optional[date] = None, strategy_type: str = "sell",
     ) -> int:
         payload = {
             "contract_key": evaluation.contract_key,
@@ -699,12 +721,13 @@ class Database:
             "market_status": evaluation.market_status,
             "eligible": evaluation.eligible,
             "session_date": session_date.isoformat() if session_date else None,
+            "strategy_type": strategy_type,
         }
         signal_ids_text = json.dumps(list(signal_ids))
         with self.connect() as connection:
             existing = connection.execute(
-                "SELECT id FROM recommendations WHERE contract_key=? AND signal_ids_json=? ORDER BY id DESC LIMIT 1",
-                (evaluation.contract_key, signal_ids_text),
+                "SELECT id FROM recommendations WHERE contract_key=? AND signal_ids_json=? AND strategy_type=? ORDER BY id DESC LIMIT 1",
+                (evaluation.contract_key, signal_ids_text, strategy_type),
             ).fetchone()
             if existing:
                 recommendation_id = int(existing["id"])
@@ -720,7 +743,7 @@ class Database:
             cursor = connection.execute(
                 """INSERT INTO recommendations
                 (contract_key, session_date, evaluated_at, score, grade, final_direction, disagreement,
-                 eligible, payload_json, signal_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                 eligible, strategy_type, payload_json, signal_ids_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     evaluation.contract_key,
                     session_date.isoformat() if session_date else None,
@@ -730,6 +753,7 @@ class Database:
                     evaluation.final_direction,
                     int(evaluation.disagreement),
                     int(evaluation.eligible),
+                    strategy_type,
                     json.dumps(payload, ensure_ascii=False),
                     signal_ids_text,
                 ),
@@ -1306,6 +1330,50 @@ class Database:
             rows = connection.execute(
                 "SELECT * FROM analyst_buyside_outcomes WHERE analyst=? AND horizon_days=? ORDER BY session_date, contract_key",
                 (analyst, horizon_days),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_analyst_plan_outcome(self, outcome: Mapping[str, object]) -> int:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO analyst_plan_outcomes
+                (analyst, analyst_family, contract_key, symbol, session_date, direction,
+                 entry_price, plan_entry, plan_target, plan_stop, plan_status, plan_pnl_pct, observed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(analyst, contract_key) DO UPDATE SET
+                analyst_family=excluded.analyst_family, symbol=excluded.symbol,
+                session_date=excluded.session_date, direction=excluded.direction,
+                entry_price=excluded.entry_price, plan_entry=excluded.plan_entry,
+                plan_target=excluded.plan_target, plan_stop=excluded.plan_stop,
+                plan_status=excluded.plan_status, plan_pnl_pct=excluded.plan_pnl_pct,
+                observed_at=excluded.observed_at""",
+                (str(outcome["analyst"]), str(outcome["analyst_family"]),
+                 str(outcome["contract_key"]), str(outcome["symbol"]),
+                 str(outcome["session_date"]), str(outcome["direction"]),
+                 outcome.get("entry_price"), outcome.get("plan_entry"),
+                 outcome.get("plan_target"), outcome.get("plan_stop"),
+                 str(outcome["plan_status"]), outcome.get("plan_pnl_pct"),
+                 str(outcome["observed_at"])),
+            )
+            row = connection.execute(
+                "SELECT id FROM analyst_plan_outcomes WHERE analyst=? AND contract_key=?",
+                (str(outcome["analyst"]), str(outcome["contract_key"])),
+            ).fetchone()
+        return int(row["id"])
+
+    def analyst_plan_summary(self) -> List[Dict[str, object]]:
+        """Per-analyst plan outcome: target-hit / stop-hit / expiry distribution and pnl."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT analyst,
+                          COUNT(*) AS trades,
+                          SUM(CASE WHEN plan_status='target-hit' THEN 1 ELSE 0 END) AS target_hits,
+                          SUM(CASE WHEN plan_status='stop-hit' THEN 1 ELSE 0 END) AS stop_hits,
+                          SUM(CASE WHEN plan_status='expiry' THEN 1 ELSE 0 END) AS expiries,
+                          AVG(plan_pnl_pct) AS avg_pnl
+                   FROM analyst_plan_outcomes
+                   GROUP BY analyst
+                   ORDER BY analyst"""
             ).fetchall()
         return [dict(row) for row in rows]
 

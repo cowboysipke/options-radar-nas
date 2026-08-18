@@ -61,10 +61,13 @@ class DashboardViewTests(unittest.TestCase):
         service = object.__new__(OptionsRadarService)
         service.feishu = FakeFeishu()
         service._trade_date = lambda: datetime(2026, 8, 11).date()
-        service.dashboard_recommendations = lambda _payload: [
-            {"contract_key": "US.A", "score": 59, "grade": "C", "direction": "BULL", "market_status": "eod", "reason": "测试理由A"},
-            {"contract_key": "US.B", "score": 42, "grade": "D", "direction": "BEAR", "market_status": "eod", "reason": "测试理由B"},
-        ]
+        service.dashboard_recommendations = lambda _payload: {
+            "sell": [
+                {"contract_key": "US.A", "score": 59, "grade": "C", "direction": "BULL", "market_status": "eod", "reason": "测试理由A", "strategy_type": "sell"},
+                {"contract_key": "US.B", "score": 42, "grade": "D", "direction": "BEAR", "market_status": "eod", "reason": "测试理由B", "strategy_type": "sell"},
+            ],
+            "buy": [],
+        }
         self.assertEqual(service.publish_top5(), "queued")
         content = service.feishu.card["elements"][0]["content"]
         self.assertIn("US.A", content)
