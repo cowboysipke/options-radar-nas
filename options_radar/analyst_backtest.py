@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from .db import Database
 from .massive_client import MassiveClient
-from .optimizer import OptionBar, simulate_short_option
+from .optimizer import OptionBar, simulate_long_option, simulate_short_option
 from .paper import add_business_days
 
 EXPIRY_HORIZON = 0  # horizon_days==0 means "hold to expiry - 3 days"
@@ -57,6 +57,15 @@ def _bars_from_json(payload: str) -> List[OptionBar]:
 def _atm_ticker(symbol: str, expiry: date, spot: float, option_type: str) -> str:
     strike_code = f"{int(round(spot * 1000)):08d}"
     return f"O:{symbol.replace('.', '')}{expiry:%y%m%d}{option_type.upper()}{strike_code}"
+
+
+def _occ_ticker(contract_key: str) -> str:
+    """OCC ticker for a signal's own flow contract ("US.GOOG|2026-08-14|342.5|C")."""
+    sym, expiry_text, strike_text, kind = contract_key.split("|")
+    symbol = sym.split(".")[-1]
+    expiry = date.fromisoformat(expiry_text)
+    strike_code = f"{int(round(float(strike_text) * 1000)):08d}"
+    return f"O:{symbol}{expiry:%y%m%d}{kind.upper()}{strike_code}"
 
 
 class CompositeBarsSource:
@@ -97,6 +106,7 @@ class AnalystBacktestCoordinator:
         self.database = database
         self.market = market
         self.horizons = tuple(horizons)
+        self.buy_horizons = (1, 2, 3)
         self.margin_pct = margin_pct
         self.take_profit_pct = take_profit_pct
         self.stop_loss_pct = stop_loss_pct
@@ -364,7 +374,84 @@ class AnalystBacktestCoordinator:
         for horizon in (*self.horizons, EXPIRY_HORIZON):
             result = self.settle_horizon(horizon)
             totals[f"h{horizon}_saved"] = result["saved"]
+        for horizon in self.buy_horizons:
+            result = self.settle_buyside_horizon(horizon)
+            totals[f"buy_h{horizon}_saved"] = result
         return totals
+
+    # -- buy-side settlement -------------------------------------------------
+
+    def _buyside_settled_keys(self, horizon_days: int) -> Set[Tuple[str, str]]:
+        with self.database.connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT analyst, contract_key FROM analyst_buyside_outcomes WHERE horizon_days=?",
+                (horizon_days,),
+            ).fetchall()
+        return {(str(r["analyst"]), str(r["contract_key"])) for r in rows}
+
+    def _settle_buyside(self, signal: Dict[str, Any], horizon_days: int) -> Optional[Dict[str, object]]:
+        """Buy the signal's own flow contract (BULL buys CALL, BEAR buys PUT), hold N days.
+
+        No take-profit/stop-loss: a buy-side reversal play is held to the horizon
+        and its return quoted on premium (entry x 100).
+        """
+        session = date.fromisoformat(str(signal["session_date"]))
+        symbol = str(signal["symbol"])
+        contract = str(signal["contract_key"])
+        direction = str(signal["direction"])
+        end_day = add_business_days(session, horizon_days)
+        entry_day = add_business_days(session, 1)
+        option_bars = self._daily_bars(_occ_ticker(contract), entry_day, end_day)
+        underlying_bars = self._daily_bars(symbol, session, end_day)
+
+        underlying_change = None
+        direction_correct = None
+        if len(underlying_bars) >= 2:
+            base = underlying_bars[0].close
+            last = underlying_bars[-1].close
+            if base and last:
+                underlying_change = (last - base) / base
+                direction_correct = 1 if (underlying_change > 0) == (direction == "BULL") else 0
+
+        result = simulate_long_option(
+            option_bars, quantity=1, max_entry_price=None,
+            take_profit_pct=None, stop_loss_pct=None,
+        )
+        if result.status != "filled" or result.pnl_pct is None:
+            return None
+        return {
+            "analyst": str(signal["analyst"]),
+            "analyst_family": str(signal["analyst_family"]),
+            "contract_key": contract,
+            "symbol": symbol,
+            "session_date": signal["session_date"],
+            "direction": direction,
+            "option_type": str(signal["option_type"]),
+            "horizon_days": horizon_days,
+            "strategy_status": result.status,
+            "strategy_pnl_pct": result.pnl_pct,
+            "direction_correct": direction_correct,
+            "underlying_change_pct": underlying_change,
+            "observed_at": signal["observed_at"],
+        }
+
+    def settle_buyside_horizon(self, horizon_days: int) -> int:
+        """Settle the buy-side leg at one holding period (1/2/3 days)."""
+        settled = self._buyside_settled_keys(horizon_days)
+        saved = 0
+        for signal in self.trade_signals():
+            key = (str(signal["analyst"]), str(signal["contract_key"]))
+            if key in settled:
+                continue
+            outcome = self._settle_buyside(signal, horizon_days)
+            if outcome is None:
+                continue
+            self.database.save_analyst_buyside_outcome(outcome)
+            saved += 1
+        return saved
+
+    def buyside_summary(self) -> List[Dict[str, object]]:
+        return self.database.analyst_buyside_summary()
 
     def summary_for_horizon(self, horizon_days: int) -> List[Dict[str, object]]:
         return self.database.analyst_backtest_summary_for_horizon(horizon_days)

@@ -1264,7 +1264,7 @@ class OptionsRadarService:
                 self._analyst_backtest_running = False
 
     def _analyst_backtest_pending(self) -> int:
-        """Count TRADE signal groups that have no persisted bar series yet."""
+        """Count TRADE signal groups lacking sell-side series or buy-side outcomes."""
         with self.database.connect() as conn:
             signal_count = conn.execute(
                 """SELECT COUNT(*) FROM (
@@ -1278,7 +1278,12 @@ class OptionsRadarService:
                    )"""
             ).fetchone()[0]
             series_count = conn.execute("SELECT COUNT(*) FROM analyst_backtest_series").fetchone()[0]
-        return max(0, signal_count - series_count)
+            buyside_count = conn.execute(
+                "SELECT COUNT(DISTINCT analyst || char(1) || contract_key) FROM analyst_buyside_outcomes"
+            ).fetchone()[0]
+        sell_pending = max(0, signal_count - series_count)
+        buy_pending = max(0, signal_count - buyside_count)
+        return max(sell_pending, buy_pending)
 
     def _maybe_start_analyst_backtest(self) -> None:
         with self._backtest_lock:
@@ -1308,6 +1313,9 @@ class OptionsRadarService:
                 "daily": self.database.analyst_backtest_daily_summary(horizon),
                 "horizon_days": horizon,
                 "running": self._analyst_backtest_running,
+            },
+            "buyside": {
+                "summary": self.database.analyst_buyside_summary(),
             },
         }
 

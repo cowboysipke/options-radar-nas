@@ -1421,6 +1421,33 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                     '<p class="muted">按信号产生日聚合；正股 = BULL 买正股 / BEAR 空仓，卖方 = 卖平值期权（25% 保证金口径）。</p></details>'
                 )
 
+            # -- 2.5 买方短线回测（fpd 反转信号适合买方） --
+            buyside = data.get("buyside") or {}
+            buyside_summary = buyside.get("summary") if isinstance(buyside.get("summary"), list) else []
+            if buyside_summary:
+                bs_rows = []
+                for item in buyside_summary:
+                    analyst = str(item.get("analyst", ""))
+                    horizon = item.get("horizon_days", "")
+                    filled = int(item.get("filled", 0) or 0)
+                    wins = int(item.get("strategy_wins", 0) or 0)
+                    avg_pnl = float(item.get("avg_pnl", 0) or 0)
+                    win_rate = f"{wins / filled * 100:.1f}%" if filled else "—"
+                    pnl_cls = "up" if avg_pnl >= 0 else "down"
+                    bs_rows.append(
+                        '<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class="{}">{:+.1f}%</td></tr>'.format(
+                            html.escape(analyst), horizon, filled, win_rate, pnl_cls, avg_pnl * 100,
+                        )
+                    )
+                parts.append(
+                    '<details class="card"><summary>买方短线回测（买原始合约，1/2/3 日，无止盈止损）</summary>'
+                    '<div class="table-wrap"><table>'
+                    '<tr><th>分析师</th><th>持有(日)</th><th>样本</th><th>胜率</th><th>平均收益</th></tr>'
+                    + "".join(bs_rows) + '</table></div>'
+                    '<p class="muted">买方 = BULL 买 CALL / BEAR 买 PUT（信号关联的原始合约，次日开盘买入，持有到 N 日，收益率按权利金口径）。'
+                    '适合 fpd 等短线反转信号（gamma 放大收益），与卖方口径互为对照。</p></details>'
+                )
+
             # -- 3. 模拟交易统计 --
             if paper:
                 parts.append(f'<section class="card"><h2>模拟交易统计</h2><p>平仓: {paper.get("closed",0)} 笔　胜率: {round(paper.get("win_rate",0)*100,1)}%　损益: ${paper.get("realized_pnl",0):,.2f}</p></section>')

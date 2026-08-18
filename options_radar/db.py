@@ -239,6 +239,24 @@ CREATE TABLE IF NOT EXISTS analyst_backtest_series (
     PRIMARY KEY(analyst, contract_key)
 );
 
+CREATE TABLE IF NOT EXISTS analyst_buyside_outcomes (
+    id INTEGER PRIMARY KEY,
+    analyst TEXT NOT NULL,
+    analyst_family TEXT NOT NULL,
+    contract_key TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    session_date TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    option_type TEXT NOT NULL,
+    horizon_days INTEGER NOT NULL,
+    strategy_status TEXT NOT NULL,
+    strategy_pnl_pct REAL,
+    direction_correct INTEGER,
+    underlying_change_pct REAL,
+    observed_at TEXT NOT NULL,
+    UNIQUE(analyst, contract_key, horizon_days)
+);
+
 CREATE TABLE IF NOT EXISTS strategy_versions (
     version TEXT PRIMARY KEY,
     status TEXT NOT NULL,
@@ -1234,6 +1252,60 @@ class Database:
                    GROUP BY analyst
                    ORDER BY analyst""",
                 (horizon_days,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def save_analyst_buyside_outcome(self, outcome: Mapping[str, object]) -> int:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO analyst_buyside_outcomes
+                (analyst, analyst_family, contract_key, symbol, session_date, direction,
+                 option_type, horizon_days, strategy_status, strategy_pnl_pct,
+                 direction_correct, underlying_change_pct, observed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(analyst, contract_key, horizon_days) DO UPDATE SET
+                analyst_family=excluded.analyst_family, symbol=excluded.symbol,
+                session_date=excluded.session_date, direction=excluded.direction,
+                option_type=excluded.option_type, strategy_status=excluded.strategy_status,
+                strategy_pnl_pct=excluded.strategy_pnl_pct,
+                direction_correct=excluded.direction_correct,
+                underlying_change_pct=excluded.underlying_change_pct,
+                observed_at=excluded.observed_at""",
+                (str(outcome["analyst"]), str(outcome["analyst_family"]),
+                 str(outcome["contract_key"]), str(outcome["symbol"]),
+                 str(outcome["session_date"]), str(outcome["direction"]),
+                 str(outcome["option_type"]), int(outcome["horizon_days"]),
+                 str(outcome["strategy_status"]), outcome.get("strategy_pnl_pct"),
+                 outcome.get("direction_correct"), outcome.get("underlying_change_pct"),
+                 str(outcome["observed_at"])),
+            )
+            row = connection.execute(
+                "SELECT id FROM analyst_buyside_outcomes WHERE analyst=? AND contract_key=? AND horizon_days=?",
+                (str(outcome["analyst"]), str(outcome["contract_key"]), int(outcome["horizon_days"])),
+            ).fetchone()
+        return int(row["id"])
+
+    def analyst_buyside_summary(self) -> List[Dict[str, object]]:
+        """Per-analyst buy-side win-rate and return per holding period."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT analyst, horizon_days,
+                          COUNT(*) AS trades,
+                          SUM(CASE WHEN direction_correct=1 THEN 1 ELSE 0 END) AS direction_hits,
+                          SUM(CASE WHEN strategy_status='filled' THEN 1 ELSE 0 END) AS filled,
+                          SUM(CASE WHEN strategy_status='filled' AND strategy_pnl_pct>0 THEN 1 ELSE 0 END) AS strategy_wins,
+                          AVG(CASE WHEN strategy_status='filled' THEN strategy_pnl_pct ELSE NULL END) AS avg_pnl
+                   FROM analyst_buyside_outcomes
+                   GROUP BY analyst, horizon_days
+                   ORDER BY analyst, horizon_days"""
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def analyst_buyside_outcomes_for_analyst(self, analyst: str, horizon_days: int) -> List[Dict[str, object]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM analyst_buyside_outcomes WHERE analyst=? AND horizon_days=? ORDER BY session_date, contract_key",
+                (analyst, horizon_days),
             ).fetchall()
         return [dict(row) for row in rows]
 
