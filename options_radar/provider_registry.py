@@ -90,7 +90,12 @@ class ProviderRegistry:
 
     @staticmethod
     def _point_fresh(point: SourcedValue, now: datetime, max_age: int) -> bool:
-        timestamp = point.market_timestamp or point.received_at
+        # Freshness must reflect when the source delivered this value
+        # (received_at), not when the market last changed the quote
+        # (market_timestamp). Illiquid option quotes can sit unchanged for
+        # hours mid-session, so market_timestamp would wrongly mark live data
+        # as stale and suppress the market-quality score.
+        timestamp = point.received_at
         if timestamp.tzinfo and not now.tzinfo:
             now = now.replace(tzinfo=timezone.utc)
         elif now.tzinfo and not timestamp.tzinfo:

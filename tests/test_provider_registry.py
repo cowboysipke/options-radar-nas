@@ -8,9 +8,10 @@ from options_radar.provider_types import ProviderCapability, ProviderHealth, Pro
 NOW = datetime(2026, 8, 12, 15, 0)
 
 
-def point(value, provider, quality="realtime", age=0):
+def point(value, provider, quality="realtime", age=0, received_age=0):
     stamp = NOW - timedelta(seconds=age)
-    return SourcedValue(value, provider, quality, stamp, NOW, age)
+    received = NOW - timedelta(seconds=received_age)
+    return SourcedValue(value, provider, quality, stamp, received, age)
 
 
 def snapshot(provider, bid=None, ask=None, quality="realtime", **fields):
@@ -52,15 +53,28 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertTrue(market.data_conflicts)
 
     def test_stale_realtime_does_not_become_execution_grade(self):
-        old = point(1.0, "futu", "realtime", age=120)
+        old = point(1.0, "futu", "realtime", age=0, received_age=120)
         candidate = ProviderMarketSnapshot(
             "US.TEST|2026-09-18|100|C", "futu",
-            {"bid": old, "ask": SourcedValue(1.1, "futu", "realtime", old.market_timestamp, NOW, 120)},
+            {"bid": old, "ask": SourcedValue(1.1, "futu", "realtime", old.market_timestamp, old.received_at, 120)},
         )
         registry = ProviderRegistry(priority=["futu"], max_quote_age_seconds=60)
         value = registry.composite_snapshot(candidate.contract_key, {"futu": candidate}, now=NOW)
         self.assertEqual(value.data_status, "stale")
         self.assertFalse(value.execution_allowed)
+
+    def test_fresh_delivery_is_ok_even_when_quote_long_unchanged(self):
+        # Illiquid option: the quote last changed hours ago (market_timestamp
+        # old) but the source delivered it just now -> still live and executable.
+        bid = point(1.0, "futu", "realtime", age=14400, received_age=1)
+        candidate = ProviderMarketSnapshot(
+            "US.TEST|2026-09-18|100|C", "futu",
+            {"bid": bid, "ask": SourcedValue(1.1, "futu", "realtime", bid.market_timestamp, bid.received_at, 14400)},
+        )
+        registry = ProviderRegistry(priority=["futu"], max_quote_age_seconds=60)
+        value = registry.composite_snapshot(candidate.contract_key, {"futu": candidate}, now=NOW)
+        self.assertEqual(value.data_status, "ok")
+        self.assertTrue(value.execution_allowed)
 
     def test_realtime_non_quote_fields_do_not_hide_missing_bid_ask(self):
         registry = ProviderRegistry(priority=["ibkr"])
