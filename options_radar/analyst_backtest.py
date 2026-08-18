@@ -224,6 +224,7 @@ class AnalystBacktestCoordinator:
                     break
         if atm_strike is None:
             return None
+        flow_option_all = self._daily_bars(_occ_ticker(contract), entry_day, underlying_end)
         return {
             "analyst": str(signal["analyst"]),
             "analyst_family": str(signal["analyst_family"]),
@@ -238,6 +239,7 @@ class AnalystBacktestCoordinator:
             "atm_ticker": atm_ticker or "",
             "underlying_bars_json": _bars_to_json(underlying_all),
             "option_bars_json": _bars_to_json(option_all),
+            "flow_option_bars_json": _bars_to_json(flow_option_all),
             "observed_at": signal["observed_at"],
         }
 
@@ -335,7 +337,27 @@ class AnalystBacktestCoordinator:
                 continue
             self.database.save_analyst_backtest_series(series)
             built += 1
-        return {"built": built, "skipped": skipped}
+        flow_refilled = self._backfill_flow_options()
+        return {"built": built, "skipped": skipped, "flow_refilled": flow_refilled}
+
+    def _backfill_flow_options(self) -> int:
+        """Fill flow_option_bars_json for series rows persisted before the column existed."""
+        refilled = 0
+        for series in self.database.analyst_backtest_series_all():
+            if str(series.get("flow_option_bars_json") or ""):
+                continue
+            contract = str(series["contract_key"])
+            entry_day = date.fromisoformat(str(series["entry_day"]))
+            try:
+                expiry = date.fromisoformat(str(series["expiry"]))
+            except ValueError:
+                expiry = entry_day
+            underlying_end = add_business_days(expiry, 5)
+            flow_option_all = self._daily_bars(_occ_ticker(contract), entry_day, underlying_end)
+            series["flow_option_bars_json"] = _bars_to_json(flow_option_all)
+            self.database.save_analyst_backtest_series(series)
+            refilled += 1
+        return refilled
 
     def settle_horizon(self, horizon_days: int) -> Dict[str, int]:
         """Settle every signal at one holding period; idempotent (ON CONFLICT)."""
@@ -370,7 +392,7 @@ class AnalystBacktestCoordinator:
     def run(self) -> Dict[str, int]:
         """Build series then settle the default horizons plus the expiry horizon."""
         built = self.build_series()
-        totals: Dict[str, int] = {"built": built["built"], "skipped_series": built["skipped"]}
+        totals: Dict[str, int] = {"built": built["built"], "skipped_series": built["skipped"], "flow_refilled": built.get("flow_refilled", 0)}
         for horizon in (*self.horizons, EXPIRY_HORIZON):
             result = self.settle_horizon(horizon)
             totals[f"h{horizon}_saved"] = result["saved"]
@@ -390,30 +412,28 @@ class AnalystBacktestCoordinator:
             ).fetchall()
         return {(str(r["analyst"]), str(r["contract_key"])) for r in rows}
 
-    def _settle_buyside(self, signal: Dict[str, Any], horizon_days: int) -> Optional[Dict[str, object]]:
+    def _settle_buyside(self, series: Dict[str, Any], horizon_days: int) -> Optional[Dict[str, object]]:
         """Buy the signal's own flow contract (BULL buys CALL, BEAR buys PUT), hold N days.
 
         horizon_days==0 means hold toward expiry (exit_before_expiry_days before expiry).
         No take-profit/stop-loss: a buy-side reversal play is held to the horizon
         and its return quoted on premium (entry x 100).
         """
-        session = date.fromisoformat(str(signal["session_date"]))
-        symbol = str(signal["symbol"])
-        contract = str(signal["contract_key"])
-        direction = str(signal["direction"])
-        try:
-            expiry = date.fromisoformat(contract.split("|")[1])
-        except (IndexError, ValueError):
-            expiry = session
+        session = date.fromisoformat(str(series["session_date"]))
+        symbol = str(series["symbol"])
+        contract = str(series["contract_key"])
+        direction = str(series["direction"])
+        expiry = date.fromisoformat(str(series["expiry"]))
         if horizon_days == EXPIRY_HORIZON:
             end_day = expiry - timedelta(days=self.exit_before_expiry_days)
         else:
             end_day = add_business_days(session, horizon_days)
         if end_day <= session:
             return None
-        entry_day = add_business_days(session, 1)
-        option_bars = self._daily_bars(_occ_ticker(contract), entry_day, end_day)
-        underlying_bars = self._daily_bars(symbol, session, end_day)
+        option_all = _bars_from_json(str(series.get("flow_option_bars_json") or "[]"))
+        underlying_all = _bars_from_json(str(series["underlying_bars_json"]))
+        option_bars = [bar for bar in option_all if bar.observed_at.date() <= end_day]
+        underlying_bars = [bar for bar in underlying_all if session <= bar.observed_at.date() <= end_day]
 
         underlying_change = None
         direction_correct = None
@@ -431,30 +451,32 @@ class AnalystBacktestCoordinator:
         if result.status != "filled" or result.pnl_pct is None:
             return None
         return {
-            "analyst": str(signal["analyst"]),
-            "analyst_family": str(signal["analyst_family"]),
+            "analyst": str(series["analyst"]),
+            "analyst_family": str(series.get("analyst_family", "")),
             "contract_key": contract,
             "symbol": symbol,
-            "session_date": signal["session_date"],
+            "session_date": series["session_date"],
             "direction": direction,
-            "option_type": str(signal["option_type"]),
+            "option_type": str(series.get("option_type", "")),
             "horizon_days": horizon_days,
             "strategy_status": result.status,
             "strategy_pnl_pct": result.pnl_pct,
             "direction_correct": direction_correct,
             "underlying_change_pct": underlying_change,
-            "observed_at": signal["observed_at"],
+            "observed_at": series["observed_at"],
         }
 
     def settle_buyside_horizon(self, horizon_days: int) -> int:
-        """Settle the buy-side leg at one holding period (1/2/3 days)."""
+        """Settle the buy-side leg at one holding period (1/2/3 days / expiry)."""
         settled = self._buyside_settled_keys(horizon_days)
         saved = 0
-        for signal in self.trade_signals():
-            key = (str(signal["analyst"]), str(signal["contract_key"]))
+        for series in self.database.analyst_backtest_series_all():
+            key = (str(series["analyst"]), str(series["contract_key"]))
             if key in settled:
                 continue
-            outcome = self._settle_buyside(signal, horizon_days)
+            if not str(series.get("flow_option_bars_json") or ""):
+                continue
+            outcome = self._settle_buyside(series, horizon_days)
             if outcome is None:
                 continue
             self.database.save_analyst_buyside_outcome(outcome)
@@ -493,7 +515,7 @@ class AnalystBacktestCoordinator:
         return list(latest.values())
 
     def _settle_plan(self, signal: Dict[str, Any],
-                     stock_cache: Dict[str, Dict[date, "OptionBar"]]) -> Optional[Dict[str, object]]:
+                     underlying_bars: List[OptionBar]) -> Optional[Dict[str, object]]:
         """Replay the analyst's own underlying plan: entry (signal-day close),
         target/stop (analyst's prices), held to expiry when neither is touched.
 
@@ -512,8 +534,7 @@ class AnalystBacktestCoordinator:
             expiry = date.fromisoformat(str(signal["contract_key"]).split("|")[1])
         except (IndexError, ValueError):
             expiry = session
-        by_day = stock_cache.get(symbol, {})
-        bars = [by_day[d] for d in sorted(by_day) if session <= d <= expiry]
+        bars = [bar for bar in underlying_bars if session <= bar.observed_at.date() <= expiry]
         if not bars:
             return None
         entry = bars[0].close
@@ -567,25 +588,15 @@ class AnalystBacktestCoordinator:
 
     def settle_plan(self) -> int:
         """Settle the analyst plan for every signal with entry/target/stop."""
-        signals = self.plan_signals()
-        # Prefetch the underlying once per symbol across its whole span.
-        grouped: Dict[str, List[Tuple[date, date]]] = {}
-        for signal in signals:
-            session = date.fromisoformat(str(signal["session_date"]))
-            try:
-                expiry = date.fromisoformat(str(signal["contract_key"]).split("|")[1])
-            except (IndexError, ValueError):
-                expiry = session
-            grouped.setdefault(str(signal["symbol"]), []).append((session, expiry))
-        stock_cache: Dict[str, Dict[date, "OptionBar"]] = {}
-        for symbol, spans in grouped.items():
-            start = min(s for s, _ in spans)
-            end = max(e for _, e in spans)
-            bars = self._daily_bars(symbol, start, end)
-            stock_cache[symbol] = {b.observed_at.date(): b for b in bars}
         saved = 0
-        for signal in signals:
-            outcome = self._settle_plan(signal, stock_cache)
+        for signal in self.plan_signals():
+            series = self.database.analyst_backtest_series(
+                str(signal["analyst"]), str(signal["contract_key"])
+            )
+            if series is None:
+                continue
+            underlying_bars = _bars_from_json(str(series["underlying_bars_json"]))
+            outcome = self._settle_plan(signal, underlying_bars)
             if outcome is None:
                 continue
             self.database.save_analyst_plan_outcome(outcome)

@@ -177,6 +177,49 @@ class AnalystBacktestTests(unittest.TestCase):
         stored = self.db.get_weights(["mr"])
         self.assertEqual(stored["mr"], weights["mr"])
 
+    def test_build_series_persists_flow_option_bars(self):
+        self._seed(direction="BULL", option_type="C")
+        underlying = self._rising_underlying()
+        flow_call_bars = [
+            _bar(date(2026, 8, 4), 5.0, 5.5, 4.8, 5.2),
+            _bar(date(2026, 8, 5), 5.2, 5.6, 5.0, 5.4),
+        ]
+        atm_put_bars = [_bar(date(2026, 8, 4), 5.0, 5.5, 4.8, 4.5)]
+        market = FakeMarket({
+            "TEST": underlying,
+            "O:TEST261016C00100000": flow_call_bars,
+            "O:TEST261016P00100000": atm_put_bars,
+        })
+        coordinator = AnalystBacktestCoordinator(self.db, market)
+        coordinator.build_series()
+        series = self.db.analyst_backtest_series("mr", "US.TEST|2026-10-16|100|C")
+        self.assertIsNotNone(series)
+        self.assertIn("flow_option_bars_json", series)
+        self.assertGreater(len(str(series["flow_option_bars_json"])), 2)
+
+    def test_buyside_settles_from_cached_flow_bars(self):
+        self._seed(direction="BULL", option_type="C")
+        underlying = self._rising_underlying()
+        flow_call_bars = [
+            _bar(date(2026, 8, 4), 5.0, 5.5, 4.8, 5.2),
+            _bar(date(2026, 8, 5), 5.2, 5.6, 5.0, 5.4),
+            _bar(date(2026, 8, 6), 5.4, 5.8, 5.2, 5.6),
+        ]
+        atm_put_bars = [_bar(date(2026, 8, 4), 5.0, 5.5, 4.8, 4.5)]
+        market = FakeMarket({
+            "TEST": underlying,
+            "O:TEST261016C00100000": flow_call_bars,
+            "O:TEST261016P00100000": atm_put_bars,
+        })
+        coordinator = AnalystBacktestCoordinator(self.db, market)
+        coordinator.build_series()
+        market.bars = {}
+        saved = coordinator.settle_buyside_horizon(2)
+        self.assertEqual(saved, 1)
+        rows = self.db.analyst_buyside_outcomes_for_analyst("mr", 2)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["strategy_status"], "filled")
+
     def test_horizon_bars_expiry_and_n_day(self):
         coordinator = AnalystBacktestCoordinator(self.db, FakeMarket({}))
         session = date(2026, 8, 3)

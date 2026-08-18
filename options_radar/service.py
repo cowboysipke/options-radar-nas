@@ -526,9 +526,11 @@ class OptionsRadarService:
             fetch_cursor = cursor
             pages = 24
             if backfill:
+                # Backfill ~90 trading days (≈126 calendar days incl. weekends)
+                # so the analyst back-test has a 3-month sample.
                 fetch_cursor = SourceCursor(
                     channel_id=channel_id, last_message_id="0",
-                    last_timestamp=datetime.utcnow() - timedelta(days=30),
+                    last_timestamp=datetime.utcnow() - timedelta(days=126),
                 )
                 pages = 200
             try:
@@ -592,11 +594,12 @@ class OptionsRadarService:
         )
         return snapshot
 
-    def _evaluate(self, target_date: date, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        try:
-            self.sync_broker(force=True)
-        except Exception as exc:
-            self._last_error = f"futu_sync:{type(exc).__name__}:{str(exc)[:120]}"
+    def _evaluate(self, target_date: date, limit: Optional[int] = None, sync: bool = True) -> List[Dict[str, Any]]:
+        if sync:
+            try:
+                self.sync_broker(force=True)
+            except Exception as exc:
+                self._last_error = f"futu_sync:{type(exc).__name__}:{str(exc)[:120]}"
         scoring = self.config.section("scoring")
         paper = self.config.section("paper")
         output: List[Dict[str, Any]] = []
@@ -974,6 +977,16 @@ class OptionsRadarService:
         result["reason"] = "；".join(reasons) or "暂无可引用的分析理由。"
         return result
 
+    def reevaluate_today(self) -> Dict[str, Any]:
+        """Re-score today's recommendations from the latest market data and weights.
+
+        Unlike collect(), this does not re-sync Discord messages or IBKR
+        positions, so it returns quickly and only refreshes scores.
+        """
+        target = self._trade_date()
+        results = self._evaluate(target, sync=False)
+        return {"status": "ok", "count": len(results), "date": target.isoformat()}
+
     def dashboard_recommendations(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         date_str = str((_payload or {}).get("date", "")).strip()
         session = date.fromisoformat(date_str) if date_str else self._dashboard_date()
@@ -998,7 +1011,7 @@ class OptionsRadarService:
                 [v for v in views if v.get("strategy_type") == "buy"],
                 key=lambda item: float(item.get("score", 0)), reverse=True,
             )[:3]
-            return {"sell": sell, "buy": buy}
+            return {"sell": sell, "buy": buy, "session_date": session.isoformat(), "is_latest": session == self._dashboard_date()}
         # No analyst confirmation for this session yet: surface recent flow
         # events as observation candidates so the dashboard updates as new
         # flow arrives.
@@ -1022,7 +1035,7 @@ class OptionsRadarService:
                 "reason": "异常期权事件（无分析师确认）",
             })
         flow_only.sort(key=lambda item: float(item.get("premium", 0) or 0), reverse=True)
-        return {"sell": flow_only[:10], "buy": []}
+        return {"sell": flow_only[:10], "buy": [], "session_date": session.isoformat(), "is_latest": session == self._dashboard_date()}
 
     def dashboard_portfolio(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         metadata = self.database.all_instrument_metadata()
@@ -1526,6 +1539,7 @@ class OptionsRadarService:
             "market_compare": lambda payload: self.market_compare(**payload),
             "ibkr_sync": lambda payload: self.sync_ibkr(**payload),
             "collect": lambda payload: self.collect(bool(payload.get("backfill", False))),
+            "reevaluate": lambda _payload: self.reevaluate_today(),
             "analyst_backtest_detail": lambda payload: self.analyst_backtest_detail(**payload),
             "audit_sample": lambda payload: self.audit_sample(**payload),
             "audit_review": lambda payload: self.audit_review(**payload),

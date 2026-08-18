@@ -236,6 +236,7 @@ CREATE TABLE IF NOT EXISTS analyst_backtest_series (
     atm_ticker TEXT NOT NULL,
     underlying_bars_json TEXT NOT NULL,
     option_bars_json TEXT NOT NULL,
+    flow_option_bars_json TEXT NOT NULL DEFAULT '',
     observed_at TEXT NOT NULL,
     PRIMARY KEY(analyst, contract_key)
 );
@@ -454,6 +455,9 @@ class Database:
             so_columns = {row[1] for row in connection.execute("PRAGMA table_info(signal_outcomes)").fetchall()}
             if "exit_reason" not in so_columns:
                 connection.execute("ALTER TABLE signal_outcomes ADD COLUMN exit_reason TEXT")
+            series_columns = {row[1] for row in connection.execute("PRAGMA table_info(analyst_backtest_series)").fetchall()}
+            if "flow_option_bars_json" not in series_columns:
+                connection.execute("ALTER TABLE analyst_backtest_series ADD COLUMN flow_option_bars_json TEXT NOT NULL DEFAULT ''")
             # Provider retries can return the same field and exchange timestamp.
             # Keep one canonical point before enforcing idempotent cache writes.
             connection.execute(
@@ -1121,20 +1125,22 @@ class Database:
             connection.execute(
                 """INSERT INTO analyst_backtest_series
                 (analyst, analyst_family, contract_key, symbol, session_date, direction, option_type, expiry, entry_day,
-                 atm_strike, atm_ticker, underlying_bars_json, option_bars_json, observed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 atm_strike, atm_ticker, underlying_bars_json, option_bars_json, flow_option_bars_json, observed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(analyst, contract_key) DO UPDATE SET
                 analyst_family=excluded.analyst_family, symbol=excluded.symbol,
                 session_date=excluded.session_date, direction=excluded.direction,
                 option_type=excluded.option_type,
                 expiry=excluded.expiry, entry_day=excluded.entry_day, atm_strike=excluded.atm_strike,
                 atm_ticker=excluded.atm_ticker, underlying_bars_json=excluded.underlying_bars_json,
-                option_bars_json=excluded.option_bars_json, observed_at=excluded.observed_at""",
+                option_bars_json=excluded.option_bars_json,
+                flow_option_bars_json=excluded.flow_option_bars_json, observed_at=excluded.observed_at""",
                 (str(series["analyst"]), str(series.get("analyst_family", "")), str(series["contract_key"]),
                  str(series["symbol"]), str(series["session_date"]), str(series["direction"]),
                  str(series.get("option_type", "")), str(series["expiry"]),
                  str(series["entry_day"]), float(series["atm_strike"]), str(series["atm_ticker"]),
                  str(series["underlying_bars_json"]), str(series["option_bars_json"]),
+                 str(series.get("flow_option_bars_json", "")),
                  str(series["observed_at"])),
             )
 

@@ -501,6 +501,7 @@ POST_APIS = {
     "/api/futu/relogin": "futu_relogin",
     "/api/futu/sync": "futu_sync",
     "/api/actions/collect": "collect",
+    "/api/actions/reevaluate": "reevaluate",
     "/api/actions/report": "report",
     "/api/actions/backup": "backup",
     "/api/actions/feishu-test": "feishu_test",
@@ -812,6 +813,7 @@ document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
       try {{data=JSON.parse(text)}} catch(_) {{data={{message:text}}}}
       panel.textContent=(response.ok?'完成：':'失败：')+(data.message||data.status||JSON.stringify(data));
       panel.className=response.ok?'card ok':'card error';
+      if (form.dataset.reload && response.ok) {{ setTimeout(function(){{ location.reload(); }}, 700); }}
     }} catch(error) {{panel.textContent='请求失败：'+error; panel.className='card error'}}
     finally {{button.disabled=false}}
   }});
@@ -1012,10 +1014,16 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                 _dashboard_date_cache.clear()
                 _dashboard_date_cache.extend(dates)
         encoded = html.escape(json.dumps(data, ensure_ascii=False, indent=2, default=str))
-        encoded = html.escape(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         action_cards = ""
         if path == "/":
             action_cards = self._action_forms(csrf, (("/api/actions/collect", "立即采集并生成推荐"), ("/api/actions/report", "生成飞书日报")))
+            if isinstance(data, Mapping) and data.get("is_latest"):
+                action_cards += (
+                    '<div class="card"><b>刷新</b><div>'
+                    '<form data-ajax="1" data-reload="1" style="display:inline" method="post" action="/api/actions/reevaluate">'
+                    f'<input type="hidden" name="csrf" value="{html.escape(csrf)}">'
+                    '<button>刷新评分</button></form></div></div>'
+                )
         elif path == "/portfolio":
             action_cards = self._action_forms(csrf, (("/futu/import-watchlist", "从富途导入自选"), ("/api/portfolio/refresh", "手动刷新持仓")))
         elif path == "/system":
@@ -1077,6 +1085,11 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                     f'<div class="market-banner">当前<b>{html.escape(session_label)}</b>，'
                     '行情为最近收盘快照，bid/ask 与 OI 暂不新鲜，开市后自动刷新为实时数据。</div>'
                 )
+            is_latest = bool(data.get("is_latest", True))
+            snapshot_note = "" if is_latest else (
+                '<div class="card" style="margin:10px 0;border-left:3px solid #d97706">'
+                '<b>历史快照</b>：此日期为历史数据，评分基于当日信号与行情，不随当前权重/行情重算。</div>'
+            )
             def format_price(value: Any) -> str:
                 if value is None:
                     return "待行情"
@@ -1168,7 +1181,7 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
             buy_block = ('<div class="grid">' + "".join(render_card(item) for item in buy) + '</div>') if buy else '<div class="card"><p>暂无买方短线信号（等待 fpd 短线确认）</p></div>'
             sections.append('<h2 style="margin:20px 0 6px">卖方推荐（DTE 14~60）</h2>' + sell_block)
             sections.append('<h2 style="margin:20px 0 6px">买方短线推荐（DTE 7~14，仅 fpd）</h2>' + buy_block)
-            return market_banner + "".join(sections) + '<details class="card" style="margin-top:16px"><summary>评分体系说明</summary><p>候选从 Discord 异常期权/分析师频道采集（解析成交额、持仓、分析师卡片），再叠加以下五维评分。每个维度都用<strong>可验证的数据</strong>计算，不是主观打分：</p><table><tr><th>维度</th><th>权重</th><th>依据</th></tr><tr><td>方向共识</td><td>40%</td><td>四个分析家族按<strong>回测方向正确率加权</strong>（贝叶斯收缩映射，fpd 流价背离权重最高）；fpd 单独确认即可高分，无 fpd 的随机家族共识封顶 64</td></tr><tr><td>历史胜率</td><td>20%</td><td>分析师<strong>卖方策略回测</strong>（BULL 卖平值 PUT / BEAR 卖平值 CALL，到期口径）动态校准权重</td></tr><tr><td>信号质量</td><td>15%</td><td>分析师卡片是否给出方向、置信度、入场/止盈/止损、理由等字段的完整程度</td></tr><tr><td>行情质量</td><td>15%</td><td><strong>流动性优先</strong>：买卖价差、Open Interest（卖方进出成本）；卖方持有到期，行情实时性降权</td></tr><tr><td>组合适配</td><td>10%</td><td>标的是否已在持仓/自选、仓位集中度是否过高——对应风控的集中度限制</td></tr></table><p>评级：A≥80（飞书提醒）｜B 65-79（合格）｜C 50-64（观察榜）｜D&lt;50（过滤）。仅flow=异常期权事件但分析师尚未确认。休市/行情缺失只影响「可执行性」，不压低信号评分。</p><p class="muted">数据来源：Discord 频道文本（成交额/分析师观点）、富途 OpenD 实时行情（盘口/OI/IV/希腊字母）、Alpaca 历史行情（回测）、DeepSeek 仅做翻译与文字整理，不参与任何数值决策。</p></details>'
+            return market_banner + snapshot_note + "".join(sections) + '<details class="card" style="margin-top:16px"><summary>评分体系说明</summary><p>候选从 Discord 异常期权/分析师频道采集（解析成交额、持仓、分析师卡片），再叠加以下五维评分。每个维度都用<strong>可验证的数据</strong>计算，不是主观打分：</p><table><tr><th>维度</th><th>权重</th><th>依据</th></tr><tr><td>方向共识</td><td>40%</td><td>四个分析家族按<strong>回测方向正确率加权</strong>（贝叶斯收缩映射，fpd 流价背离权重最高）；fpd 单独确认即可高分，无 fpd 的随机家族共识封顶 64</td></tr><tr><td>历史胜率</td><td>20%</td><td>分析师<strong>卖方策略回测</strong>（BULL 卖平值 PUT / BEAR 卖平值 CALL，到期口径）动态校准权重</td></tr><tr><td>信号质量</td><td>15%</td><td>分析师卡片是否给出方向、置信度、入场/止盈/止损、理由等字段的完整程度</td></tr><tr><td>行情质量</td><td>15%</td><td><strong>流动性优先</strong>：买卖价差、Open Interest（卖方进出成本）；卖方持有到期，行情实时性降权</td></tr><tr><td>组合适配</td><td>10%</td><td>标的是否已在持仓/自选、仓位集中度是否过高——对应风控的集中度限制</td></tr></table><p>评级：A≥80（飞书提醒）｜B 65-79（合格）｜C 50-64（观察榜）｜D&lt;50（过滤）。仅flow=异常期权事件但分析师尚未确认。休市/行情缺失只影响「可执行性」，不压低信号评分。</p><p class="muted">数据来源：Discord 频道文本（成交额/分析师观点）、富途 OpenD 实时行情（盘口/OI/IV/希腊字母）、Alpaca 历史行情（回测）、DeepSeek 仅做翻译与文字整理，不参与任何数值决策。</p></details>'
         if path == "/signals" and isinstance(data, list):
             def format_premium(value: Any) -> str:
                 try:
@@ -1571,7 +1584,7 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
 
     @staticmethod
     def _action_forms(csrf: str, actions: Tuple[Tuple[str, str], ...]) -> str:
-        labels = {"/api/actions/collect":"立即采集并生成推荐","/api/actions/report":"生成日报","/api/actions/backup":"创建备份","/api/actions/feishu-test":"测试飞书","/api/actions/discord-login":"打开Discord登录","/api/actions/deepseek-test":"测试DeepSeek","/api/ibkr/sync":"同步IBKR持仓","/api/providers/massive/test":"测试Massive","/futu/import-watchlist":"从富途导入自选"}
+        labels = {"/api/actions/collect":"立即采集并生成推荐","/api/actions/reevaluate":"刷新评分","/api/actions/report":"生成日报","/api/actions/backup":"创建备份","/api/actions/feishu-test":"测试飞书","/api/actions/discord-login":"打开Discord登录","/api/actions/deepseek-test":"测试DeepSeek","/api/ibkr/sync":"同步IBKR持仓","/api/providers/massive/test":"测试Massive","/futu/import-watchlist":"从富途导入自选"}
         return '<div class="card"><b>快捷操作</b><div>' + "".join(f'<form data-ajax="1" style="display:inline" method="post" action="{path}"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button>{html.escape(labels.get(path, label))}</button></form>' for path, label in actions) + "</div></div>"
 
     def _setup_page(self, csrf: str, message: str = "") -> str:
