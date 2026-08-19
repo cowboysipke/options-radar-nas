@@ -106,7 +106,7 @@ def build_candidate(
         strategy = "SHORT_PUT" if evaluation.final_direction == "BULL" else "SHORT_CALL"
     if native_execution and quantity < 1 and entry and quantity_status == "available":
         strategy = "CREDIT_SPREAD_REQUIRED"
-    if native_execution and market.implied_volatility is not None and market.implied_volatility >= float(settings.get("high_iv_threshold", 0.80)):
+    if native_execution and market.implied_volatility is not None and market.implied_volatility >= float(settings.get("high_iv_threshold", 80.0)):
         strategy = "CREDIT_SPREAD_REQUIRED"
     take_profit_pct = float(settings.get("take_profit_pct", 0.50))
     stop_loss_pct = float(settings.get("stop_loss_pct", 0.50))

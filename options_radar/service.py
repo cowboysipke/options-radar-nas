@@ -604,15 +604,32 @@ class OptionsRadarService:
         suffices.
         """
         spot = snapshot.underlying_price
+        if spot is None:
+            spot = self._stock_spot(str(event.symbol))
         expiry = event.expiry
         if spot is None or not expiry:
             return None
+        # The ATM strike must exist in the option chain; round(spot) may not
+        # (e.g. wide 2.5/5 strikes), so pick the nearest listed strike like the
+        # back-test's two-candidate fallback.
         root = str(event.contract_key).split("|", 1)[0]
-        atm_key = f"{root}|{expiry.isoformat()}|{int(round(spot))}|P"
+        for strike in (round(spot), round(spot / 5.0) * 5.0):
+            atm_key = f"{root}|{expiry.isoformat()}|{strike}|P"
+            try:
+                atm_composite = self.providers.composite_snapshot(atm_key)
+                point = atm_composite.fields.get("implied_volatility")
+                if point is not None and point.value is not None:
+                    return float(point.value)
+            except Exception:
+                continue
+        return None
+
+    def _stock_spot(self, symbol: str) -> Optional[float]:
+        """Realtime underlying price from Futu when the option quote lacks owner price."""
         try:
-            atm_composite = self.providers.composite_snapshot(atm_key)
-            point = atm_composite.fields.get("implied_volatility")
-            return float(point.value) if point is not None and point.value is not None else None
+            snap = self.futu.get_snapshots([f"US.{symbol}"])
+            stock = snap.get(f"US.{symbol}")
+            return float(stock.last) if stock is not None and stock.last is not None else None
         except Exception:
             return None
 

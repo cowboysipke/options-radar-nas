@@ -114,8 +114,10 @@ def _premium_quality(market: Optional[MarketSnapshot], risk_flags: List[str]) ->
         return 50.0
 
     score = 0.0
+    # VRP = IV - HV in decimal terms: Futu IV is a percentage (e.g. 79.37),
+    # while HV is annualised decimal volatility (e.g. 0.89), so normalise IV.
     if market.atm_iv is not None and market.underlying_hv is not None and market.underlying_hv > 0:
-        vrp = market.atm_iv - market.underlying_hv
+        vrp = market.atm_iv / 100.0 - market.underlying_hv
     else:
         vrp = None
     if vrp is None:
