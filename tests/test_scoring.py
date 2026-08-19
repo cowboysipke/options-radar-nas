@@ -24,17 +24,19 @@ class ScoringTests(unittest.TestCase):
         )
         self.portfolio = PortfolioContext(symbol="TEST", in_watchlist=True)
 
-    def test_one_family_is_capped_below_recommendation(self):
+    def test_single_family_can_reach_a_with_quality_premium(self):
         result = evaluate_consensus([signal("pa", "price_action")], market=self.market,
                                     portfolio=self.portfolio, now=datetime(2026, 8, 6, 2))
-        self.assertLessEqual(result.score, 64)
-        self.assertEqual(result.grade, "C")
+        self.assertGreaterEqual(result.score, 80)
+        self.assertEqual(result.grade, "A")
 
     def test_mr_and_qmr_count_as_one_family(self):
         result = evaluate_consensus([
-            signal("mr", "mean_reversion"), signal("qmr", "mean_reversion", minute=1)
+            signal("mr", "mean_reversion", direction="BULL"),
+            signal("qmr", "mean_reversion", direction="BEAR", minute=1),
         ], market=self.market, portfolio=self.portfolio, now=datetime(2026, 8, 6, 2))
-        self.assertLessEqual(result.score, 64)
+        self.assertIn("mean_reversion家族内部方向冲突", result.risk_flags)
+        self.assertEqual(result.final_direction, "NEUTRAL")
 
     def test_two_independent_families_can_reach_a(self):
         result = evaluate_consensus([

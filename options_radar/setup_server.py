@@ -1123,13 +1123,6 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                 badge = f'<span class="badge {badge_cls}">{html.escape(direction)}</span>'
                 flow_only = str(item.get("data_quality", "")).startswith("仅") or item.get("analyst_count") is not None
                 source_badge = '<span class="badge watch">仅flow</span>' if flow_only else f'<span class="badge watch">分析师{n_html if (n_html := html.escape(str(item.get("analyst_count", ""))) if item.get("analyst_count") is not None else "") else ""}</span>'
-                votes = item.get("votes") if isinstance(item.get("votes"), list) else []
-                fpd_trade = any(
-                    isinstance(v, Mapping) and v.get("analyst") == "fpd" and v.get("decision") == "TRADE"
-                    for v in votes
-                )
-                fpd_badge = '<span class="badge up">fpd确认</span>' if fpd_trade else ''
-                buy_badge = '<span class="badge watch">买方短线</span>' if item.get("strategy_type") == "buy" else ''
                 score = item.get("score")
                 score_html = f'{float(score):.1f}' if isinstance(score, (int, float)) else html.escape(str(score))
                 grade = html.escape(str(item.get("grade", "-")))
@@ -1166,7 +1159,7 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                     remaining = "评分组成：" + reason.split("评分组成：", 1)[1].split("风险提示", 1)[0]
                 return (
                     '<section class="card">'
-                    f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:18px">{key}</h2><span class="muted" style="font-size:13px">交易量 {premium_text}</span>{badge}{source_badge}{fpd_badge}{buy_badge}</div>'
+                    f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:18px">{key}</h2><span class="muted" style="font-size:13px">交易量 {premium_text}</span>{badge}{source_badge}</div>'
                     f'<div style="margin:8px 0 4px"><span style="font-size:24px;font-weight:700">{score_html}</span>'
                     f'<span class="muted" style="margin-left:8px">{grade}级</span></div>'
                     f'<p style="margin:2px 0" class="muted">{quote_line}</p>'
@@ -1178,10 +1171,8 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                 )
             sections = []
             sell_block = ('<div class="grid">' + "".join(render_card(item) for item in sell) + '</div>') if sell else '<div class="card"><p>暂无卖方推荐（等待 DTE 14~60 的信号确认）</p></div>'
-            buy_block = ('<div class="grid">' + "".join(render_card(item) for item in buy) + '</div>') if buy else '<div class="card"><p>暂无买方短线信号（等待 fpd 短线确认）</p></div>'
-            sections.append('<h2 style="margin:20px 0 6px">卖方推荐（DTE 14~60）</h2>' + sell_block)
-            sections.append('<h2 style="margin:20px 0 6px">买方短线推荐（DTE 7~14，仅 fpd）</h2>' + buy_block)
-            return market_banner + snapshot_note + "".join(sections) + '<details class="card" style="margin-top:16px"><summary>评分体系说明</summary><p>候选从 Discord 异常期权/分析师频道采集（解析成交额、持仓、分析师卡片），再叠加以下五维评分。每个维度都用<strong>可验证的数据</strong>计算，不是主观打分：</p><table><tr><th>维度</th><th>权重</th><th>依据</th></tr><tr><td>方向共识</td><td>40%</td><td>四个分析家族按<strong>回测方向正确率加权</strong>（贝叶斯收缩映射，fpd 流价背离权重最高）；fpd 单独确认即可高分，无 fpd 的随机家族共识封顶 64</td></tr><tr><td>历史胜率</td><td>20%</td><td>分析师<strong>卖方策略回测</strong>（BULL 卖平值 PUT / BEAR 卖平值 CALL，到期口径）动态校准权重</td></tr><tr><td>信号质量</td><td>15%</td><td>分析师卡片是否给出方向、置信度、入场/止盈/止损、理由等字段的完整程度</td></tr><tr><td>行情质量</td><td>15%</td><td><strong>流动性优先</strong>：买卖价差、Open Interest（卖方进出成本）；卖方持有到期，行情实时性降权</td></tr><tr><td>组合适配</td><td>10%</td><td>标的是否已在持仓/自选、仓位集中度是否过高——对应风控的集中度限制</td></tr></table><p>评级：A≥80（飞书提醒）｜B 65-79（合格）｜C 50-64（观察榜）｜D&lt;50（过滤）。仅flow=异常期权事件但分析师尚未确认。休市/行情缺失只影响「可执行性」，不压低信号评分。</p><p class="muted">数据来源：Discord 频道文本（成交额/分析师观点）、富途 OpenD 实时行情（盘口/OI/IV/希腊字母）、Alpaca 历史行情（回测）、DeepSeek 仅做翻译与文字整理，不参与任何数值决策。</p></details>'
+            sections.append('<h2 style="margin:20px 0 6px">卖方推荐（DTE 14~60，卖 ATM 期权）</h2>' + sell_block)
+            return market_banner + snapshot_note + "".join(sections) + '<details class="card" style="margin-top:16px"><summary>评分体系说明</summary><p>候选从 Discord 异常期权/分析师频道采集（解析成交额、持仓、分析师卡片），再叠加以下五维评分。每个维度都用<strong>可验证的数据</strong>计算，不是主观打分：</p><table><tr><th>维度</th><th>权重</th><th>依据</th></tr><tr><td>权利金质量</td><td>40%</td><td>卖方 alpha 核心：<strong>IV 溢价</strong>（ATM 隐含波动率 − 正股历史波动率 VRP，越高越值得卖）+ 买卖价差 + Open Interest + 成交量</td></tr><tr><td>信号质量</td><td>20%</td><td>分析师卡片是否给出方向、置信度、入场/止盈/止损、理由等字段的完整程度</td></tr><tr><td>组合适配</td><td>15%</td><td>标的是否已在持仓/自选、仓位集中度是否过高——对应风控的集中度限制</td></tr><tr><td>方向共识</td><td>15%</td><td>多分析家族方向投票（90 天回测显示方向正确率≈50%，故降权，仅作参考）</td></tr><tr><td>历史胜率</td><td>10%</td><td>分析师卖方策略回测胜率动态校准（弱化）</td></tr></table><p>评级：A≥80（飞书提醒）｜B 65-79（合格）｜C 50-64（观察榜）｜D&lt;50（过滤）。仅flow=异常期权事件但分析师尚未确认。休市/行情缺失只影响「可执行性」，不压低信号评分。</p><p class="muted">数据来源：Discord 频道文本（成交额/分析师观点）、富途 OpenD 实时行情（盘口/OI/IV/希腊字母）、Alpaca 历史行情（回测）、DeepSeek 仅做翻译与文字整理，不参与任何数值决策。</p></details>'
         if path == "/signals" and isinstance(data, list):
             def format_premium(value: Any) -> str:
                 try:
@@ -1475,7 +1466,7 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                     '<tr><th>分析师</th><th>1 日</th><th>2 日</th><th>3 日</th><th>持有到期</th></tr>'
                     + "".join(bs_rows) + '</table></div>'
                     '<p class="muted">买方 = BULL 买 CALL / BEAR 买 PUT（信号关联的原始合约，次日开盘买入，收益率按权利金口径，括号内为胜率）。'
-                    'fpd 是唯一正期望家族，且持有到期收益最高（gamma 持续放大）。</p></details>'
+                    '90 天数据显示买原始合约整体期望为负（各家族到期口径均亏损），故买方短线流已关闭，此表仅供对照参考。</p></details>'
                 )
 
             # -- 2.6 正股计划回测（分析师入场/目标/止损，持有到期） --

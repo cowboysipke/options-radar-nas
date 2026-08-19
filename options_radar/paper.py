@@ -101,15 +101,15 @@ def build_candidate(
         strategy = "WATCH_ONLY"
         quantity = 0
     elif not native_execution:
-        strategy = "PENDING_TRIGGER_CALL" if evaluation.final_direction == "BULL" else "PENDING_TRIGGER_PUT"
+        strategy = "PENDING_SHORT_PUT" if evaluation.final_direction == "BULL" else "PENDING_SHORT_CALL"
     else:
-        strategy = "LONG_CALL" if evaluation.final_direction == "BULL" else "LONG_PUT"
+        strategy = "SHORT_PUT" if evaluation.final_direction == "BULL" else "SHORT_CALL"
     if native_execution and quantity < 1 and entry and quantity_status == "available":
-        strategy = "DEBIT_SPREAD_REQUIRED"
+        strategy = "CREDIT_SPREAD_REQUIRED"
     if native_execution and market.implied_volatility is not None and market.implied_volatility >= float(settings.get("high_iv_threshold", 0.80)):
-        strategy = "DEBIT_SPREAD_REQUIRED"
-    take_profit_pct = float(settings.get("take_profit_pct", 0.35))
-    stop_loss_pct = float(settings.get("stop_loss_pct", 0.25))
+        strategy = "CREDIT_SPREAD_REQUIRED"
+    take_profit_pct = float(settings.get("take_profit_pct", 0.50))
+    stop_loss_pct = float(settings.get("stop_loss_pct", 0.50))
     risk_per_contract = sizing_price * 100.0 if sizing_price else None
     valid_until = add_business_days(now.date(), int(settings.get("max_holding_business_days", 5)))
     try:
@@ -132,8 +132,8 @@ def build_candidate(
         entry_debit=entry,
         quantity=max(0, quantity),
         max_loss=(sizing_price * 100.0 * quantity) if sizing_price and quantity else None,
-        take_profit=(entry * (1.0 + take_profit_pct)) if entry else None,
-        stop_loss=(entry * (1.0 - stop_loss_pct)) if entry else None,
+        take_profit=(entry * (1.0 - take_profit_pct)) if entry else None,
+        stop_loss=(entry * (1.0 + stop_loss_pct)) if entry else None,
         invalidation="；".join(invalidation_parts),
         underlying_entry=underlying_entry,
         underlying_target=underlying_target,
@@ -167,7 +167,7 @@ class PaperEngine:
         self.settings = settings
 
     def maybe_open(self, candidate: OptionCandidate, recommendation_id: int, expiry: date) -> Optional[int]:
-        if not candidate.evaluation.eligible or candidate.strategy not in {"LONG_CALL", "LONG_PUT"}:
+        if not candidate.evaluation.eligible or candidate.strategy not in {"SHORT_PUT", "SHORT_CALL"}:
             return None
         if candidate.quantity < 1 or candidate.entry_debit is None:
             return None
@@ -199,9 +199,9 @@ class PaperEngine:
             if price is None:
                 continue
             reason = None
-            if price >= float(trade["take_profit_price"]):
+            if price <= float(trade["take_profit_price"]):
                 reason = "take_profit"
-            elif price <= float(trade["stop_loss_price"]):
+            elif price >= float(trade["stop_loss_price"]):
                 reason = "stop_loss"
             elif business_days_between(date.fromisoformat(str(trade["opened_at"])[:10]), now.date()) >= max_days:
                 reason = "max_holding_days"

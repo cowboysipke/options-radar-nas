@@ -156,7 +156,7 @@ class RecommendationBacktestTests(unittest.TestCase):
         self.assertIn(candidate.underlying_entry, {101.0, 103.0})
         self.assertEqual(candidate.quantity, 0)
         self.assertEqual(candidate.quantity_status, "portfolio_stale")
-        self.assertTrue(candidate.strategy.startswith("PENDING_TRIGGER"))
+        self.assertTrue(candidate.strategy.startswith("PENDING_SHORT"))
 
     def test_unique_symbol_top_three(self):
         market1 = MarketSnapshot("US.TEST|2026-10-16|100|C", datetime.now(), last=2, data_status="eod")

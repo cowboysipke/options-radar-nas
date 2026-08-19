@@ -103,6 +103,63 @@ def _market_quality(market: Optional[MarketSnapshot], risk_flags: List[str]) -> 
     return clamp(score)
 
 
+def _premium_quality(market: Optional[MarketSnapshot], risk_flags: List[str]) -> float:
+    """Premium quality for a short-premium (sell-side) strategy.
+
+    Scores IV premium (VRP), spread, open interest, and volume. This is the
+    primary alpha source for premium collection, independent of direction.
+    """
+    if market is None:
+        risk_flags.append("暂未取到实时行情，等待数据源恢复")
+        return 50.0
+
+    score = 0.0
+    if market.atm_iv is not None and market.underlying_hv is not None and market.underlying_hv > 0:
+        vrp = market.atm_iv - market.underlying_hv
+    else:
+        vrp = None
+    if vrp is None:
+        score += 20.0
+        risk_flags.append("IV溢价未知")
+    elif vrp > 0.20:
+        score += 40.0
+    elif vrp >= 0:
+        score += 20.0 + vrp * 100.0
+    else:
+        score += max(0.0, 20.0 + vrp * 100.0)
+
+    spread = market.spread_pct
+    if spread is None:
+        score += 15.0
+        risk_flags.append("盘口价差未知")
+    elif spread <= 0.08:
+        score += 30.0
+    elif spread <= 0.12:
+        score += 20.0
+        risk_flags.append("流动性风险：价差超过8%")
+    elif spread <= 0.20:
+        score += 10.0
+        risk_flags.append("流动性风险：价差超过12%")
+    else:
+        risk_flags.append("流动性风险：价差超过20%")
+
+    if market.open_interest is None:
+        score += 10.0
+    elif market.open_interest >= 1000:
+        score += 20.0
+    elif market.open_interest >= 100:
+        score += 12.0
+    else:
+        risk_flags.append("流动性风险：Open Interest低于100")
+
+    if market.volume is None:
+        score += 5.0
+    elif market.volume >= 50:
+        score += 10.0
+
+    return clamp(score)
+
+
 def _portfolio_quality(portfolio: PortfolioContext, risk_flags: List[str]) -> float:
     if not portfolio.eligible:
         return 20.0
@@ -132,7 +189,6 @@ def evaluate_consensus(
     if not votes_source:
         raise ValueError("at least one signal is required")
     weights = analyst_weights or {}
-    alphas = family_alphas or {}
     portfolio = portfolio or PortfolioContext(symbol=votes_source[0].symbol)
     now = now or datetime.now(timezone.utc).replace(tzinfo=None)
     risk_flags: List[str] = []
@@ -146,14 +202,13 @@ def evaluate_consensus(
         value = sum(DIRECTION_VALUE[signal.direction] * weight for signal, weight in items) / denominator
         family_values.append(value)
         family_strengths.append(abs(value))
-        family_weights.append(alphas.get(family, 1.0))
+        family_weights.append(1.0)
         if len({signal.direction for signal, _ in items}) > 1:
             risk_flags.append(f"{family}家族内部方向冲突")
 
     active_families = len(family_votes)
     if family_values:
-        # Family-level alpha-weighted consensus: a high-alpha family (e.g. fpd)
-        # dominates the direction instead of every family counting equally.
+        # Family-level consensus: every active family counts equally.
         total_alpha = sum(family_weights) or 1.0
         family_direction = sum(v * w for v, w in zip(family_values, family_weights)) / total_alpha
         consensus_strength = abs(family_direction)
@@ -189,7 +244,7 @@ def evaluate_consensus(
     freshness = clamp(100.0 - 4.0 * age_hours)
     signal_quality = 100.0 * (0.45 * completeness + 0.35 * confidence) + 0.20 * freshness
 
-    market_quality = _market_quality(market, risk_flags)
+    market_quality = _premium_quality(market, risk_flags)
     portfolio_quality = _portfolio_quality(portfolio, risk_flags)
     components = {
         "consensus": round(consensus_score, 2),
@@ -199,11 +254,11 @@ def evaluate_consensus(
         "portfolio_fit": round(portfolio_quality, 2),
     }
     score = (
-        0.40 * consensus_score
-        + 0.20 * historical_score
-        + 0.15 * signal_quality
-        + 0.15 * market_quality
-        + 0.10 * portfolio_quality
+        0.40 * market_quality      # 权利金质量（卖方 alpha 核心）
+        + 0.20 * signal_quality    # 信号质量
+        + 0.15 * portfolio_quality # 组合适配
+        + 0.15 * consensus_score   # 方向共识（弱化）
+        + 0.10 * historical_score  # 历史胜率（弱化）
     )
 
     dte = next((signal.dte for signal in votes_source if signal.dte is not None), None)
@@ -215,11 +270,6 @@ def evaluate_consensus(
         risk_flags.append("多数分析师选择观望")
     if active_families == 0:
         score = min(score, 49.0)
-    elif "flow_positioning" not in family_votes:
-        # No flow-price-divergence (fpd) confirmation: the remaining families
-        # are statistically close to random, so cap their consensus.
-        score = min(score, 64.0)
-        risk_flags.append("无流价背离(fpd)确认，仅随机家族")
     if disagreement:
         score = min(score, 64.0)
 

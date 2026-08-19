@@ -9,6 +9,7 @@ returns no bars.  Both adapters expose the same small interface used by
 from __future__ import annotations
 
 import logging
+import math
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -32,6 +33,16 @@ def _num(value: Any) -> Optional[float]:
         return None
 
 
+def _annualized_volatility(closes: Sequence[Optional[float]]) -> Optional[float]:
+    prices = [price for price in closes if price is not None]
+    if len(prices) < 5:
+        return None
+    returns = [math.log(prices[i] / prices[i - 1]) for i in range(1, len(prices))]
+    mean = sum(returns) / len(returns)
+    variance = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+    return math.sqrt(variance) * math.sqrt(252)
+
+
 class MassiveHistoryAdapter:
     """Expose :class:`MassiveClient` with the BacktestCoordinator contract."""
 
@@ -53,10 +64,10 @@ class MassiveHistoryAdapter:
             bars = self.massive.aggregate_bars(symbol, end - timedelta(days=lookback_days), end, 1, "day")
         except Exception as exc:
             logger.debug("massive underlying bars failed: %s", type(exc).__name__)
-            return {"high": None, "low": None, "atr": None, "trend": None}
+            return {"high": None, "low": None, "atr": None, "trend": None, "hv": None}
         complete = [bar for bar in bars if _num(bar.get("h")) is not None and _num(bar.get("l")) is not None and _num(bar.get("c")) is not None]
         if not complete:
-            return {"high": None, "low": None, "atr": None, "trend": None}
+            return {"high": None, "low": None, "atr": None, "trend": None, "hv": None}
         latest = complete[-1]
         ranges: List[float] = []
         prior_close: Optional[float] = None
@@ -72,9 +83,11 @@ class MassiveHistoryAdapter:
         if closes:
             mean = sum(closes) / len(closes)
             trend = 1.0 if closes[-1] > mean else -1.0 if closes[-1] < mean else 0.0
+        hv = _annualized_volatility([_num(bar["c"]) for bar in complete[-21:]])
         return {
             "high": _num(latest["h"]), "low": _num(latest["l"]),
             "atr": sum(ranges[-14:]) / min(14, len(ranges)), "trend": trend,
+            "hv": hv,
         }
 
 
@@ -113,7 +126,7 @@ class AlpacaHistoryAdapter:
         )
         complete = [item for item in bars if None not in (item.high, item.low, item.close)]
         if not complete:
-            return {"high": None, "low": None, "atr": None, "trend": None}
+            return {"high": None, "low": None, "atr": None, "trend": None, "hv": None}
         latest = complete[-1]
         ranges: List[float] = []
         previous_close: Optional[float] = None
@@ -125,10 +138,12 @@ class AlpacaHistoryAdapter:
             previous_close = float(item.close)
         closes = [float(item.close) for item in complete[-20:]]
         average = sum(closes) / len(closes)
+        hv = _annualized_volatility([float(item.close) for item in complete[-21:]])
         return {
             "high": float(latest.high), "low": float(latest.low),
             "atr": sum(ranges[-14:]) / min(14, len(ranges)),
             "trend": 1.0 if closes[-1] > average else -1.0 if closes[-1] < average else 0.0,
+            "hv": hv,
         }
 
 

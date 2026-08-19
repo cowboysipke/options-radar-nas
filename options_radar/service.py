@@ -35,7 +35,7 @@ from .futu_provider import (
     FutuOptionContract,
     FutuProvider,
 )
-from .history_adapters import CompositeHistoryAdapter, SyntheticHistoryAdapter
+from .history_adapters import AlpacaHistoryAdapter, SyntheticHistoryAdapter
 from .ibkr_flex import IBKRFlexClient
 from .ibkr_provider import IBKRProvider
 from .massive_client import MassiveClient
@@ -44,7 +44,7 @@ from .paper import build_candidate
 from .parser import parse_analyst_message, parse_flow_message
 from .reports import daily_report, portfolio_markdown
 from .rulebook import RulebookCompiler
-from .scoring import evaluate_buy_side, evaluate_consensus
+from .scoring import evaluate_consensus
 from .provider_adapters import FutuUnifiedProvider, MassiveUnifiedProvider
 from .provider_registry import ProviderRegistry, market_snapshot_from_composite
 from .timeutil import us_session_date_from_china_time
@@ -334,11 +334,10 @@ class OptionsRadarService:
             conflict_threshold_pct=float(execution_config.get("conflict_threshold_pct", 15)),
         )
         market_priority = list(provider_config.get("market_priority", default_priority))
-        # Consensus-recommendation replay uses Massive 5-minute bars (its OCC
-        # aggregates are verified). Analyst signal back-test uses Alpaca daily
-        # bars below: /v1beta1/options/bars serves history without the paid
-        # OPRA agreement (only real-time option quotes need OPRA).
-        self.history_market = CompositeHistoryAdapter(self.massive, None)
+        # Underlying-feature enrichment (HV/ATR/trend) uses Alpaca daily bars:
+        # it is far faster (200 req/min vs Massive 5 req/min) and covers more
+        # symbols. Analyst signal back-test also uses Alpaca daily bars below.
+        self.history_market = AlpacaHistoryAdapter(self.alpaca_history)
         backtest_config = self.config.section("backtest")
         if bool(backtest_config.get("use_synthetic_when_unavailable", True)):
             self.history_market = SyntheticHistoryAdapter(self.history_market, enabled=True)
@@ -582,9 +581,11 @@ class OptionsRadarService:
         snapshot.underlying_previous_high = features["high"]
         snapshot.underlying_previous_low = features["low"]
         snapshot.underlying_atr14 = features["atr"]
+        snapshot.underlying_hv = features.get("hv")
         futu_candidate = composite.candidates.get("futu")
         if futu_candidate:
             snapshot.futu_code = futu_candidate.instrument_code
+        snapshot.atm_iv = self._atm_iv(event, snapshot)
         self.database.save_market_data_points(
             event.contract_key,
             {name: {
@@ -593,6 +594,27 @@ class OptionsRadarService:
             } for name, point in composite.fields.items()},
         )
         return snapshot
+
+    def _atm_iv(self, event: FlowEvent, snapshot: MarketSnapshot) -> Optional[float]:
+        """ATM implied volatility for the same expiry, used for the VRP premium check.
+
+        The back-test sells the ATM strike, so the IV premium must be measured on
+        the ATM option, not the (possibly ITM/OTM) flow contract whose IV carries
+        skew. ATM put/call IV are nearly identical by put-call parity, so one leg
+        suffices.
+        """
+        spot = snapshot.underlying_price
+        expiry = event.expiry
+        if spot is None or not expiry:
+            return None
+        root = str(event.contract_key).split("|", 1)[0]
+        atm_key = f"{root}|{expiry.isoformat()}|{int(round(spot))}|P"
+        try:
+            atm_composite = self.providers.composite_snapshot(atm_key)
+            point = atm_composite.fields.get("implied_volatility")
+            return float(point.value) if point is not None and point.value is not None else None
+        except Exception:
+            return None
 
     def _evaluate(self, target_date: date, limit: Optional[int] = None, sync: bool = True) -> List[Dict[str, Any]]:
         if sync:
@@ -623,7 +645,6 @@ class OptionsRadarService:
             ))
             dte = event.dte if event.dte is not None else (event.expiry - target_date).days
             max_dte = int(scoring.get("max_dte", 60))
-            min_buy_dte = int(scoring.get("min_buy_dte", 7))
 
             if 14 <= dte <= max_dte:
                 # -- 卖方流：DTE 14~60，卖 ATM PUT/CALL --
@@ -686,30 +707,6 @@ class OptionsRadarService:
                     "grade": evaluation.grade, "score": evaluation.score,
                     "direction": evaluation.final_direction, "eligible": evaluation.eligible,
                     "strategy_type": "sell", **execution,
-                })
-            elif min_buy_dte <= dte < 14:
-                # -- 买方短线流：DTE 7~14，仅 fpd 有交易计划 --
-                evaluation = evaluate_buy_side(signals, market)
-                if evaluation.score <= 0:
-                    continue
-                recommendation_id = self.database.save_recommendation(
-                    evaluation, [int(item.id) for item in signals if item.id], target_date, strategy_type="buy"
-                )
-                vote = evaluation.votes[0] if evaluation.votes else None
-                execution = {
-                    "strategy": "LONG_CALL" if evaluation.final_direction == "BULL" else "LONG_PUT",
-                    "contract_key": evaluation.contract_key,
-                    "underlying_entry": vote.underlying_entry if vote else None,
-                    "underlying_target": vote.underlying_target if vote else None,
-                    "underlying_stop": vote.underlying_stop if vote else None,
-                    "market_status": market.data_status,
-                }
-                self.database.attach_execution(recommendation_id, execution)
-                output.append({
-                    "recommendation_id": recommendation_id, "contract_key": evaluation.contract_key,
-                    "grade": evaluation.grade, "score": evaluation.score,
-                    "direction": evaluation.final_direction, "eligible": False,
-                    "strategy_type": "buy", **execution,
                 })
         output.sort(key=lambda item: float(item["score"]), reverse=True)
         return output
