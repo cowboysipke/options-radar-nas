@@ -493,6 +493,7 @@ GET_APIS = {
     "/api/audit-review": "audit_review",
     "/api/providers": "providers",
     "/api/signals": "signals",
+    "/api/gex": "gex",
 }
 
 POST_APIS = {
@@ -858,6 +859,59 @@ function attachTableFilters(opts) {{
 }}
 attachTableFilters({{search:'signal-search',selects:['signal-dir','signal-status'],expand:'signal-expand',collapse:'signal-collapse'}});
 attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand:'portfolio-expand',collapse:'portfolio-collapse'}});
+function renderGexChart(container, data) {{
+  if (!data || !data.strikes || !data.strikes.length) {{
+    container.innerHTML = '<span class="muted">暂无 GEX 数据</span>'; return;
+  }}
+  const W = 560, H = 190, padL = 46, padR = 14, padT = 16, padB = 28;
+  const strikes = data.strikes, gex = data.net_gex;
+  const minS = Math.min.apply(null, strikes), maxS = Math.max.apply(null, strikes);
+  const span = (maxS - minS) || 1;
+  const maxAbs = Math.max.apply(null, gex.map(function(g){{ return Math.abs(g); }}).concat([1e-9]));
+  const x = function(s){{ return padL + (s - minS) / span * (W - padL - padR); }};
+  const y = function(g){{ return padT + (H - padT - padB) / 2 - (g / maxAbs) * ((H - padT - padB) / 2); }};
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;background:#fff;border:1px solid #e8e8ed;border-radius:8px">';
+  svg += '<line x1="' + padL + '" y1="' + y(0) + '" x2="' + (W - padR) + '" y2="' + y(0) + '" stroke="#c9c9cf" stroke-width="1"/>';
+  let pts = '';
+  for (let i = 0; i < strikes.length; i++) {{
+    pts += (i ? ' ' : '') + x(strikes[i]).toFixed(1) + ',' + y(gex[i]).toFixed(1);
+  }}
+  svg += '<polyline points="' + pts + '" fill="none" stroke="#0071e3" stroke-width="2"/>';
+  if (data.spot) {{
+    const sx = x(data.spot);
+    svg += '<line x1="' + sx + '" y1="' + padT + '" x2="' + sx + '" y2="' + (H - padB) + '" stroke="#d70015" stroke-width="1.5" stroke-dasharray="4,3"/>';
+    svg += '<text x="' + sx + '" y="' + (H - padB + 14) + '" text-anchor="middle" fill="#d70015" font-size="10">' + data.spot + '</text>';
+  }}
+  function mark(strike, color, label) {{
+    if (strike == null) return;
+    const sx = x(strike);
+    svg += '<line x1="' + sx + '" y1="' + padT + '" x2="' + sx + '" y2="' + (H - padB) + '" stroke="' + color + '" stroke-width="1" stroke-dasharray="2,2"/>';
+    svg += '<text x="' + sx + '" y="' + (padT + 11) + '" text-anchor="middle" fill="' + color + '" font-size="9">' + label + '</text>';
+  }}
+  mark(data.call_wall, '#00a651', 'Call Wall');
+  mark(data.put_wall, '#d70015', 'Put Wall');
+  mark(data.gamma_flip, '#f0a500', 'Flip');
+  svg += '<text x="' + padL + '" y="' + (H - padB + 14) + '" fill="#86868b" font-size="9">' + minS + '</text>';
+  svg += '<text x="' + (W - padR) + '" y="' + (H - padB + 14) + '" text-anchor="end" fill="#86868b" font-size="9">' + maxS + '</text>';
+  svg += '</svg>';
+  container.innerHTML = svg;
+}}
+document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
+  btn.addEventListener('click', async function() {{
+    const chart = btn.parentElement.querySelector('.gex-chart');
+    if (!chart) return;
+    if (chart.style.display !== 'none') {{ chart.style.display = 'none'; return; }}
+    chart.style.display = 'block';
+    chart.innerHTML = '<span class="muted">加载中…</span>';
+    try {{
+      const r = await fetch('/api/gex?symbol=' + encodeURIComponent(btn.getAttribute('data-gex')));
+      const data = await r.json();
+      renderGexChart(chart, data);
+    }} catch (e) {{
+      chart.innerHTML = '<span class="muted">加载失败</span>';
+    }}
+  }});
+}});
 (function(){{
   const rows=document.querySelectorAll('tr.analyst-row');
   if(!rows.length) return;
@@ -1157,6 +1211,38 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                 remaining = ""
                 if "评分组成" in reason:
                     remaining = "评分组成：" + reason.split("评分组成：", 1)[1].split("风险提示", 1)[0]
+                strategy_hint = str(item.get("strategy_hint", ""))
+                iv_rank_val = item.get("iv_rank")
+                hint_segment = ""
+                if strategy_hint:
+                    iv_text = f"IV Rank {iv_rank_val:.0f}" if isinstance(iv_rank_val, (int, float)) else ""
+                    hint_segment = (
+                        '<div style="margin:6px 0 0;padding:8px 10px;background:#eef7ef;border-radius:8px;font-size:13px">'
+                        f'<b>策略</b> {html.escape(strategy_hint)}'
+                        + (f' <span class="muted">· {html.escape(iv_text)}</span>' if iv_text else '')
+                        + '</div>'
+                    )
+                gex = item.get("gex") if isinstance(item.get("gex"), Mapping) else None
+                gex_segment = ""
+                if gex:
+                    symbol = str(item.get("contract_key", "")).split("|", 1)[0].split(".", 1)[-1]
+                    regime_map = {"positive": "正 Gamma", "negative": "负 Gamma", "mixed": "混合"}
+                    regime_text = regime_map.get(str(gex.get("regime", "")), "—")
+                    walls = []
+                    if gex.get("call_wall") is not None:
+                        walls.append(f"Call Wall ${gex.get('call_wall')}")
+                    if gex.get("put_wall") is not None:
+                        walls.append(f"Put Wall ${gex.get('put_wall')}")
+                    if gex.get("gamma_flip") is not None:
+                        walls.append(f"Flip ${gex.get('gamma_flip')}")
+                    wall_text = " · ".join(walls) if walls else ""
+                    gex_segment = (
+                        '<div style="margin:6px 0 0;padding:8px 10px;background:#f7f7fb;border-radius:8px;font-size:13px">'
+                        f'<b>GEX</b> {html.escape(regime_text)} {html.escape(wall_text)}'
+                        f'<button type="button" class="secondary" style="margin-left:8px;padding:3px 10px" data-gex="{html.escape(symbol)}">曲线</button>'
+                        f'<div class="gex-chart" data-symbol="{html.escape(symbol)}" style="display:none;margin-top:8px"></div>'
+                        '</div>'
+                    )
                 return (
                     '<section class="card">'
                     f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:18px">{key}</h2><span class="muted" style="font-size:13px">交易量 {premium_text}</span>{badge}{source_badge}</div>'
@@ -1166,6 +1252,8 @@ attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand
                     f'{vote_segment}'
                     f'<p style="margin:2px 0" class="muted">入场 {entry} · 止盈 {take_profit} · 止损 {stop_loss}</p>'
                     f'{risk_segment}'
+                    f'{hint_segment}'
+                    f'{gex_segment}'
                     f'<p style="margin:6px 0 0" class="muted">{html.escape(remaining) if remaining else ""}</p>'
                     '</section>'
                 )

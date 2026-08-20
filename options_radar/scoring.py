@@ -114,21 +114,29 @@ def _premium_quality(market: Optional[MarketSnapshot], risk_flags: List[str]) ->
         return 50.0
 
     score = 0.0
-    # VRP = IV - HV in decimal terms: Futu IV is a percentage (e.g. 79.37),
-    # while HV is annualised decimal volatility (e.g. 0.89), so normalise IV.
-    if market.atm_iv is not None and market.underlying_hv is not None and market.underlying_hv > 0:
+    # IV premium: prefer Futu's historical IV rank (0-100 percentile); fall back
+    # to VRP = ATM IV - HV when rank is unavailable.
+    iv_rank = market.iv_rank
+    if iv_rank is not None:
+        if iv_rank >= 80.0:
+            score += 40.0
+        elif iv_rank >= 50.0:
+            score += 20.0 + (iv_rank - 50.0) * (20.0 / 30.0)
+        elif iv_rank >= 20.0:
+            score += 10.0 + (iv_rank - 20.0) * (10.0 / 30.0)
+        else:
+            score += iv_rank * 0.5
+    elif market.atm_iv is not None and market.underlying_hv is not None and market.underlying_hv > 0:
         vrp = market.atm_iv / 100.0 - market.underlying_hv
+        if vrp > 0.20:
+            score += 40.0
+        elif vrp >= 0:
+            score += 20.0 + vrp * 100.0
+        else:
+            score += max(0.0, 20.0 + vrp * 100.0)
     else:
-        vrp = None
-    if vrp is None:
         score += 20.0
         risk_flags.append("IV溢价未知")
-    elif vrp > 0.20:
-        score += 40.0
-    elif vrp >= 0:
-        score += 20.0 + vrp * 100.0
-    else:
-        score += max(0.0, 20.0 + vrp * 100.0)
 
     spread = market.spread_pct
     if spread is None:

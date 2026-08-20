@@ -129,6 +129,8 @@ class MarketSnapshot:
     underlying_atr14: Optional[float] = None
     underlying_hv: Optional[float] = None
     atm_iv: Optional[float] = None
+    iv_rank: Optional[float] = None
+    hv_30d: Optional[float] = None
     provenance: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     data_conflicts: List[str] = field(default_factory=list)
 

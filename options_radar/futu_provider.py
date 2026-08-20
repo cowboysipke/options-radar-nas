@@ -621,6 +621,31 @@ class FutuProvider:
         finally:
             self._close(context)
 
+    def get_underlying_overview(self, symbols: Iterable[str]) -> Dict[str, Dict[str, Optional[float]]]:
+        """Underlying-level option stats (IV rank / HV) for premium judgement."""
+        codes = list(dict.fromkeys(_normalise_code(s) for s in symbols))
+        if not codes:
+            return {}
+        context = self._quote_context()
+        try:
+            ret, data = context.get_option_underlying_overview(codes)
+            if not self._ok(ret):
+                return {}
+            output: Dict[str, Dict[str, Optional[float]]] = {}
+            for row in _records(data):
+                code = str(row.get("code", "")).upper()
+                output[code] = {
+                    "iv": _float(row, "iv"),
+                    "iv_rank": _float(row, "iv_rank"),
+                    "iv_percentile": _float(row, "iv_percentile"),
+                    "hv_30d": _float(row, "hv_30d"),
+                    "call_open_interest": _float(row, "call_open_interest"),
+                    "put_open_interest": _float(row, "put_open_interest"),
+                }
+            return output
+        finally:
+            self._close(context)
+
     def get_snapshots(self, contract_codes: Iterable[str]) -> Dict[str, FutuMarketSnapshot]:
         codes = list(dict.fromkeys(_normalise_code(code) for code in contract_codes))
         if not codes:

@@ -35,6 +35,7 @@ from .futu_provider import (
     FutuOptionContract,
     FutuProvider,
 )
+from .gex import GexResult, compute_gex
 from .history_adapters import AlpacaHistoryAdapter, SyntheticHistoryAdapter
 from .ibkr_flex import IBKRFlexClient
 from .ibkr_provider import IBKRProvider
@@ -586,6 +587,10 @@ class OptionsRadarService:
         if futu_candidate:
             snapshot.futu_code = futu_candidate.instrument_code
         snapshot.atm_iv = self._atm_iv(event, snapshot)
+        overview = self._underlying_overview(str(event.symbol))
+        if overview:
+            snapshot.iv_rank = overview.get("iv_rank")
+            snapshot.hv_30d = overview.get("hv_30d")
         self.database.save_market_data_points(
             event.contract_key,
             {name: {
@@ -632,6 +637,81 @@ class OptionsRadarService:
             return float(stock.last) if stock is not None and stock.last is not None else None
         except Exception:
             return None
+
+    def _underlying_overview(self, symbol: str) -> Dict[str, Optional[float]]:
+        """Futu underlying-level IV rank / HV stats (cached per process)."""
+        cache = getattr(self, "_overview_cache", None)
+        if cache is None:
+            cache = {}
+            self._overview_cache = cache
+        if symbol in cache:
+            return cache[symbol]
+        try:
+            overview = self.futu.get_underlying_overview([f"US.{symbol}"])
+            result = overview.get(f"US.{symbol}", {}) if overview else {}
+        except Exception:
+            result = {}
+        cache[symbol] = result
+        return result
+
+    def get_gex(self, symbol: str) -> Optional[GexResult]:
+        """Compute (and cache) dealer gamma exposure for one underlying."""
+        cache = getattr(self, "_gex_cache", None)
+        if cache is None:
+            cache = {}
+            self._gex_cache = cache
+        if symbol in cache:
+            return cache[symbol]
+        try:
+            spot = self._stock_spot(symbol)
+            if spot is None:
+                return None
+            result = compute_gex(self.futu, symbol, spot)
+            if result.strikes:
+                cache[symbol] = result
+            return result
+        except Exception:
+            return None
+
+    def gex_view(self, symbol: str = "", **_kwargs: Any) -> Dict[str, Any]:
+        """JSON-friendly GEX snapshot for the dashboard curve."""
+        symbol = str(symbol or "").strip()
+        if not symbol:
+            return {"status": "error", "message": "symbol required"}
+        result = self.get_gex(symbol)
+        if result is None:
+            return {"status": "empty", "symbol": symbol}
+        return {
+            "status": "ok", "symbol": symbol, "spot": result.spot,
+            "strikes": result.strikes, "net_gex": result.net_gex,
+            "call_wall": result.call_wall, "put_wall": result.put_wall,
+            "gamma_flip": result.gamma_flip, "regime": result.regime,
+            "max_pos_gex": result.max_pos_gex, "max_neg_gex": result.max_neg_gex,
+            "expiry_count": result.expiry_count,
+        }
+
+    @staticmethod
+    def _strategy_hint(direction: str, iv_rank: Optional[float], regime: Optional[str]) -> str:
+        """Seller-first strategy hint from IV richness and gamma regime.
+
+        IV rank >= 70 (expensive) is the only strong sell-side edge; negative
+        gamma asks for defined-risk credit spreads instead of naked shorts.
+        """
+        if direction not in ("BULL", "BEAR"):
+            return "方向不明，观望"
+        expensive = iv_rank is not None and iv_rank >= 70.0
+        cheap = iv_rank is not None and iv_rank <= 30.0
+        neg_gamma = regime == "negative"
+        if expensive:
+            base = "Sell Put" if direction == "BULL" else "Sell Call"
+            if neg_gamma:
+                return f"{base}（负 Gamma，建议 Credit Spread 保护）"
+            return f"{base}（IV 贵 + 环境允许）"
+        if cheap:
+            if direction == "BULL":
+                return "IV 偏低，卖方无优势，优先 Buy Stock"
+            return "IV 偏低，卖方无优势，观望"
+        return "IV 中性，卖方机会一般"
 
     def _evaluate(self, target_date: date, limit: Optional[int] = None, sync: bool = True) -> List[Dict[str, Any]]:
         if sync:
@@ -718,6 +798,20 @@ class OptionsRadarService:
                     "market_status": candidate.market.data_status,
                     "market_observed_at": candidate.market.observed_at.isoformat(),
                 }
+                gex = self.get_gex(str(event.symbol))
+                if gex is not None:
+                    execution["gex"] = {
+                        "regime": gex.regime,
+                        "call_wall": gex.call_wall,
+                        "put_wall": gex.put_wall,
+                        "gamma_flip": gex.gamma_flip,
+                        "spot": gex.spot,
+                    }
+                execution["iv_rank"] = market.iv_rank
+                execution["strategy_hint"] = self._strategy_hint(
+                    evaluation.final_direction, market.iv_rank,
+                    gex.regime if gex is not None else None,
+                )
                 self.database.attach_execution(recommendation_id, execution)
                 output.append({
                     "recommendation_id": recommendation_id, "contract_key": evaluation.contract_key,
@@ -1551,6 +1645,7 @@ class OptionsRadarService:
             "provider_action": provider_action,
             "market_provenance": lambda payload: self.market_provenance(**payload),
             "market_compare": lambda payload: self.market_compare(**payload),
+            "gex": lambda payload: self.gex_view(symbol=str(payload.get("symbol", ""))),
             "ibkr_sync": lambda payload: self.sync_ibkr(**payload),
             "collect": lambda payload: self.collect(bool(payload.get("backfill", False))),
             "reevaluate": lambda _payload: self.reevaluate_today(),
