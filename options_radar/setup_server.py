@@ -1221,8 +1221,21 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                 direction = str(item.get("direction", "-"))
                 badge_cls = "up" if direction in {"BULL", "看多", "多"} else "down" if direction in {"BEAR", "看空", "空"} else "watch"
                 badge = f'<span class="badge {badge_cls}">{html.escape(direction)}</span>'
-                flow_only = str(item.get("data_quality", "")).startswith("仅") or item.get("analyst_count") is not None
-                source_badge = '<span class="badge watch">仅flow</span>' if flow_only else f'<span class="badge watch">分析师{n_html if (n_html := html.escape(str(item.get("analyst_count", ""))) if item.get("analyst_count") is not None else "") else ""}</span>'
+                # Flow-only = no scored recommendation yet (dashboard falls back to raw flow).
+                # Do NOT key off analyst_count: scored cards also expose vote counts.
+                dq = str(item.get("data_quality", "") or "")
+                flow_only = dq in {"仅flow", "flow"} or str(item.get("market_status", "")) == "flow"
+                if flow_only:
+                    source_badge = '<span class="badge watch">仅flow</span>'
+                else:
+                    n_votes = item.get("analyst_count")
+                    if n_votes is None:
+                        votes = item.get("votes") if isinstance(item.get("votes"), list) else []
+                        n_votes = len(votes) if votes else None
+                    source_badge = (
+                        f'<span class="badge watch">分析师{html.escape(str(n_votes))}</span>'
+                        if n_votes is not None else '<span class="badge watch">已评分</span>'
+                    )
                 score = item.get("score")
                 score_html = f'{float(score):.1f}' if isinstance(score, (int, float)) else html.escape(str(score))
                 grade = html.escape(str(item.get("grade", "-")))

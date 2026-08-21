@@ -1158,6 +1158,8 @@ class OptionsRadarService:
             result["direction"] = result["final_direction"]
 
         votes = payload.get("votes") if isinstance(payload.get("votes"), list) else []
+        if result.get("analyst_count") is None and votes:
+            result["analyst_count"] = len(votes)
         vote_text = "、".join(
             f"{item.get('analyst', '?')}:{item.get('direction', '?')}/{item.get('decision', '?')}"
             for item in votes if isinstance(item, Mapping)
@@ -1199,6 +1201,47 @@ class OptionsRadarService:
         results = self._evaluate(target, sync=False)
         return {"status": "ok", "count": len(results), "date": target.isoformat()}
 
+    def _enrich_view_gex(self, view: Dict[str, Any]) -> None:
+        """Fill GEX/vol on a recommendation card from cache (or one live fetch)."""
+        if view.get("gex"):
+            return
+        symbol = str(view.get("contract_key", "")).split("|", 1)[0].split(".", 1)[-1]
+        if not symbol:
+            return
+        try:
+            gex = self.get_gex(symbol)
+        except Exception:
+            return
+        if gex is None or not gex.strikes:
+            return
+        gex_payload = {
+            "regime": gex.regime,
+            "call_wall": gex.call_wall,
+            "put_wall": gex.put_wall,
+            "gamma_flip": gex.gamma_flip,
+            "spot": gex.spot,
+        }
+        view["gex"] = gex_payload
+        execution = view.get("execution") if isinstance(view.get("execution"), dict) else {}
+        execution = dict(execution)
+        execution["gex"] = gex_payload
+        if gex.atm_iv is not None or gex.put_skew is not None or gex.call_skew is not None:
+            vol_payload = {"atm_iv": gex.atm_iv, "put_skew": gex.put_skew, "call_skew": gex.call_skew}
+            view["vol"] = vol_payload
+            execution["vol"] = vol_payload
+        view["execution"] = execution
+        if not view.get("strategy_hint"):
+            view["strategy_hint"] = self._strategy_hint(
+                str(view.get("final_direction") or view.get("direction") or ""),
+                view.get("iv_rank"),
+                gex.regime,
+            )
+        if not view.get("strike_hint"):
+            view["strike_hint"] = self._strike_hint(
+                str(view.get("final_direction") or view.get("direction") or ""),
+                gex,
+            )
+
     def dashboard_recommendations(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         date_str = str((_payload or {}).get("date", "")).strip()
         session = date.fromisoformat(date_str) if date_str else self._dashboard_date()
@@ -1223,6 +1266,15 @@ class OptionsRadarService:
                 [v for v in views if v.get("strategy_type") == "buy"],
                 key=lambda item: float(item.get("score", 0)), reverse=True,
             )[:3]
+            # Lazy GEX for displayed cards so the curve button works even when
+            # the stored payload was written under Futu throttling.
+            seen_symbols = set()
+            for view in sell + buy:
+                sym = str(view.get("contract_key", "")).split("|", 1)[0].split(".", 1)[-1]
+                if sym in seen_symbols and view.get("gex"):
+                    continue
+                seen_symbols.add(sym)
+                self._enrich_view_gex(view)
             return {"sell": sell, "buy": buy, "session_date": session.isoformat(), "is_latest": session == self._dashboard_date()}
         # No analyst confirmation for this session yet: surface recent flow
         # events as observation candidates so the dashboard updates as new
