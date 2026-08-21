@@ -1243,6 +1243,15 @@ class OptionsRadarService:
         symbols = set(self._portfolio.keys())
         if not symbols:
             symbols = watch_symbols | set(metadata.keys())
+        overview: Dict[str, Dict[str, Optional[float]]] = {}
+        if watch_symbols:
+            try:
+                overview = self.futu.get_underlying_overview(
+                    [f"US.{s}" for s in sorted(watch_symbols)]
+                )
+            except Exception:
+                overview = {}
+        gex_cache = getattr(self, "_gex_cache", {})
         group_by_symbol = self._futu_group_cache()
         result = {}
         for symbol in sorted(symbols):
@@ -1261,6 +1270,11 @@ class OptionsRadarService:
             item["has_flow"] = symbol in flow_symbols
             if item["has_flow"]:
                 item["flow_contracts"] = flow_by_symbol.get(symbol, [])[:6]
+            ov = overview.get(f"US.{symbol}", {})
+            item["iv_rank"] = ov.get("iv_rank")
+            item["hv_30d"] = ov.get("hv_30d")
+            gex = gex_cache.get(symbol)
+            item["gex_regime"] = gex.regime if gex is not None else None
             result[symbol] = item
         return result
 

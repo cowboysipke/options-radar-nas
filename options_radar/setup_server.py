@@ -1251,11 +1251,30 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                     if gex.get("gamma_flip") is not None:
                         walls.append(f"Flip ${gex.get('gamma_flip')}")
                     wall_text = " · ".join(walls) if walls else ""
+                    position_bar = ""
+                    if gex.get("put_wall") is not None and gex.get("call_wall") is not None and gex.get("spot") is not None:
+                        try:
+                            _pw = float(gex.get("put_wall"))
+                            _cw = float(gex.get("call_wall"))
+                            _spot = float(gex.get("spot"))
+                            if _cw > _pw > 0:
+                                _pct = max(0.0, min(100.0, (_spot - _pw) / (_cw - _pw) * 100.0))
+                                position_bar = (
+                                    '<div style="margin-top:6px">'
+                                    '<div style="display:flex;justify-content:space-between;font-size:11px;color:#86868b">'
+                                    '<span>Put Wall $' + str(_pw) + '</span><span>Call Wall $' + str(_cw) + '</span></div>'
+                                    '<div style="position:relative;height:6px;background:linear-gradient(90deg,#d70015,#f0a500,#00a651);border-radius:3px;margin:3px 0">'
+                                    '<div style="position:absolute;left:' + str(round(_pct, 1)) + '%;top:-4px;width:3px;height:14px;background:#1d1d1f;border-radius:1px"></div></div>'
+                                    '<div style="font-size:11px;color:#1d1d1f">当前价 $' + str(_spot) + ' · 位置 ' + str(round(_pct)) + '%</div></div>'
+                                )
+                        except (TypeError, ValueError):
+                            pass
                     gex_segment = (
                         '<div style="margin:6px 0 0;padding:8px 10px;background:#f7f7fb;border-radius:8px;font-size:13px">'
                         f'<b>GEX</b> {html.escape(regime_text)} {html.escape(wall_text)}'
                         f'<button type="button" class="secondary" style="margin-left:8px;padding:3px 10px" data-gex="{html.escape(symbol)}">曲线</button>'
-                        f'<div class="gex-chart" data-symbol="{html.escape(symbol)}" style="display:none;margin-top:8px"></div>'
+                        + position_bar
+                        + f'<div class="gex-chart" data-symbol="{html.escape(symbol)}" style="display:none;margin-top:8px"></div>'
                         '</div>'
                     )
                 return (
@@ -1403,20 +1422,26 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                 flag = '<span class="badge up">异常期权</span>' if item.get("has_flow") else ""
                 held = float(item.get("held_quantity", 0) or 0)
                 held_token = "held" if held else "no-hold"
+                iv_rank = item.get("iv_rank")
+                iv_rank_str = f"{float(iv_rank):.0f}" if iv_rank is not None else "-"
+                gex_regime = str(item.get("gex_regime") or "")
+                regime_map = {"positive": "正", "negative": "负", "mixed": "混合"}
+                gex_str = regime_map.get(gex_regime, "-")
                 filter_text = "|".join([
                     str(symbol).lower(), str(item.get("company_name", "") or "").lower(),
                     str(item.get("group_name", "") or "").lower(), held_token,
                 ])
-                row = '<tr data-filter="{0}"><td>{1}{2}</td><td class="muted">{3}</td><td class="muted">{4}</td><td>{5}</td><td>{6}</td><td class="{7}">{8}</td><td>{9}</td><td>{10}</td></tr>'.format(
+                row = '<tr data-filter="{0}"><td>{1}{2}</td><td class="muted">{3}</td><td class="muted">{4}</td><td>{5}</td><td>{6}</td><td class="{7}">{8}</td><td>{9}</td><td>{10}</td><td>{11}</td><td>{12}</td></tr>'.format(
                     html.escape(filter_text),
                     html.escape(str(symbol)), flag, display_name, industry,
                     html.escape(str(item.get("held_quantity", 0))),
-                    price_str, change_cls, change_str, float(item.get("concentration", 0) or 0), updated,
+                    price_str, change_cls, change_str, iv_rank_str, gex_str,
+                    float(item.get("concentration", 0) or 0), updated,
                 )
                 contracts = item.get("flow_contracts") or []
                 if contracts:
                     detail = "".join(f'<li>{html.escape(str(c))}</li>' for c in contracts)
-                    row += f'<tr class="flow-detail"><td colspan="8"><details><summary>相关异常期权事件</summary><ul>{detail}</ul></details></td></tr>'
+                    row += f'<tr class="flow-detail"><td colspan="10"><details><summary>相关异常期权事件</summary><ul>{detail}</ul></details></td></tr>'
                 return row
             items = list(data.items())
             flow_rows = [render_row(s, v) for s, v in items if isinstance(v, Mapping) and v.get("has_flow")]
@@ -1433,8 +1458,8 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
             )
             sections = [toolbar]
             if flow_rows:
-                sections.append('<section class="card" id="portfolio-table"><h2>异常期权相关</h2><div class="table-wrap"><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + "".join(flow_rows) + '</table></div></section>')
-            sections.append('<section class="card" id="portfolio-table"><h2>全部自选</h2><div class="table-wrap"><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>集中度</th><th>更新</th></tr>' + ("".join(other_rows) or '<tr><td colspan="8">暂无组合快照</td></tr>') + '</table></div></section>')
+                sections.append('<section class="card" id="portfolio-table"><h2>异常期权相关</h2><div class="table-wrap"><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>IV Rank</th><th>GEX</th><th>集中度</th><th>更新</th></tr>' + "".join(flow_rows) + '</table></div></section>')
+            sections.append('<section class="card" id="portfolio-table"><h2>全部自选</h2><div class="table-wrap"><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>IV Rank</th><th>GEX</th><th>集中度</th><th>更新</th></tr>' + ("".join(other_rows) or '<tr><td colspan="10">暂无组合快照</td></tr>') + '</table></div></section>')
             return "".join(sections)
         if path == "/backtest" and isinstance(data, dict):
             paper = data.get("paper") or {}
