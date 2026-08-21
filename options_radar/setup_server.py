@@ -872,11 +872,18 @@ function renderGexChart(container, data) {{
   const y = function(g){{ return padT + (H - padT - padB) / 2 - (g / maxAbs) * ((H - padT - padB) / 2); }};
   let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;background:#fff;border:1px solid #e8e8ed;border-radius:8px">';
   svg += '<line x1="' + padL + '" y1="' + y(0) + '" x2="' + (W - padR) + '" y2="' + y(0) + '" stroke="#c9c9cf" stroke-width="1"/>';
-  let pts = '';
+  const barWidth = Math.max(2, (W - padL - padR) / strikes.length * 0.7);
   for (let i = 0; i < strikes.length; i++) {{
-    pts += (i ? ' ' : '') + x(strikes[i]).toFixed(1) + ',' + y(gex[i]).toFixed(1);
+    const g = gex[i];
+    const zeroY = y(0);
+    const barY = y(g);
+    const top = Math.min(zeroY, barY);
+    const h = Math.abs(zeroY - barY);
+    const color = g >= 0 ? '#00a651' : '#d70015';
+    if (h > 0.5) {{
+      svg += '<rect x="' + (x(strikes[i]) - barWidth / 2) + '" y="' + top + '" width="' + barWidth + '" height="' + h + '" fill="' + color + '" opacity="0.85"/>';
+    }}
   }}
-  svg += '<polyline points="' + pts + '" fill="none" stroke="#0071e3" stroke-width="2"/>';
   if (data.spot) {{
     const sx = x(data.spot);
     svg += '<line x1="' + sx + '" y1="' + padT + '" x2="' + sx + '" y2="' + (H - padB) + '" stroke="#d70015" stroke-width="1.5" stroke-dasharray="4,3"/>';
@@ -1220,7 +1227,10 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                 short_gamma_risk = str(item.get("short_gamma_risk", ""))
                 hint_segment = ""
                 if strategy_hint:
-                    iv_text = f"IV Rank {iv_rank_val:.0f}" if isinstance(iv_rank_val, (int, float)) else ""
+                    iv_text = ""
+                    if isinstance(iv_rank_val, (int, float)):
+                        iv_label = "历史高位" if iv_rank_val >= 70 else "历史低位" if iv_rank_val <= 30 else "历史中位"
+                        iv_text = f"IV Rank {iv_rank_val:.0f}/100（{iv_label}，数值越低 IV 越便宜）"
                     extra = ""
                     if strike_hint:
                         extra += f' · <b>{html.escape(strike_hint)}</b>'

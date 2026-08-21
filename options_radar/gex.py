@@ -53,14 +53,22 @@ def _fetch_chain(
 
 
 def _gamma_flip(strikes: List[float], net_gex: List[float]) -> Optional[float]:
-    previous_strike: Optional[float] = None
-    previous_value: Optional[float] = None
+    """Macro gamma flip: the strike where cumulative GEX crosses zero.
+
+    Per-strike GEX is jagged (OI concentrates at integer strikes), so a raw
+    sign change between adjacent strikes is noise. The cumulative-crossing
+    point is the meaningful dealer gamma flip.
+    """
+    cumulative = 0.0
+    prev_cum: Optional[float] = None
+    prev_strike: Optional[float] = None
     for strike, value in zip(strikes, net_gex):
-        if previous_strike is not None and previous_value is not None:
-            if (previous_value > 0.0 > value) or (previous_value < 0.0 < value):
-                return previous_strike if abs(previous_value) <= abs(value) else strike
-        previous_strike = strike
-        previous_value = value
+        cumulative += value
+        if prev_cum is not None and prev_strike is not None:
+            if (prev_cum < 0.0 < cumulative) or (prev_cum > 0.0 > cumulative):
+                return prev_strike if abs(prev_cum) <= abs(cumulative) else strike
+        prev_cum = cumulative
+        prev_strike = strike
     return None
 
 
@@ -144,13 +152,14 @@ def compute_gex(
 
         call_wall: Optional[float] = None
         put_wall: Optional[float] = None
-        if net_gex:
-            max_index = max(range(len(net_gex)), key=net_gex.__getitem__)
-            min_index = min(range(len(net_gex)), key=net_gex.__getitem__)
-            if net_gex[max_index] > 0.0:
-                call_wall = strikes[max_index]
-            if net_gex[min_index] < 0.0:
-                put_wall = strikes[min_index]
+        if call_gex:
+            peak = max(call_gex.values())
+            if peak > 0.0:
+                call_wall = max(call_gex, key=call_gex.get)
+        if put_gex:
+            trough = min(put_gex.values())
+            if trough < 0.0:
+                put_wall = min(put_gex, key=put_gex.get)
 
         max_pos_gex = max((value for value in net_gex if value > 0.0), default=0.0)
         max_neg_gex = min((value for value in net_gex if value < 0.0), default=0.0)
