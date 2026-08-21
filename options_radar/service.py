@@ -667,8 +667,13 @@ class OptionsRadarService:
             spot = self._stock_spot(symbol)
             if spot is None:
                 return None
-            result = compute_gex(self.futu, symbol, spot)
-            if result.strikes:
+            result: Optional[GexResult] = None
+            for attempt in range(2):
+                result = compute_gex(self.futu, symbol, spot)
+                if result.strikes:
+                    break
+                time.sleep(1.0)
+            if result is not None and result.strikes:
                 cache[symbol] = result
             return result
         except Exception:
@@ -885,7 +890,9 @@ class OptionsRadarService:
                     "market_observed_at": candidate.market.observed_at.isoformat(),
                 }
                 gex = self.get_gex(str(event.symbol))
-                if gex is not None:
+                gex_regime = None
+                if gex is not None and gex.strikes:
+                    gex_regime = gex.regime
                     execution["gex"] = {
                         "regime": gex.regime,
                         "call_wall": gex.call_wall,
@@ -895,8 +902,7 @@ class OptionsRadarService:
                     }
                 execution["iv_rank"] = market.iv_rank
                 execution["strategy_hint"] = self._strategy_hint(
-                    evaluation.final_direction, market.iv_rank,
-                    gex.regime if gex is not None else None,
+                    evaluation.final_direction, market.iv_rank, gex_regime,
                 )
                 event_risk = self._event_risk(str(event.symbol))
                 execution["event_risk"] = event_risk["event_risk"]
