@@ -898,13 +898,14 @@ function renderGexChart(container, data) {{
   svg += '<polyline points="' + pts + '" fill="none" stroke="#0071e3" stroke-width="2"/>';
   if (data.spot) {{
     const sx = x(data.spot);
-    svg += '<line x1="' + sx + '" y1="' + padT + '" x2="' + sx + '" y2="' + (H - padB) + '" stroke="#d70015" stroke-width="1.5" stroke-dasharray="4,3"/>';
-    svg += '<text x="' + sx + '" y="' + (H - padB + 14) + '" text-anchor="middle" fill="#d70015" font-size="11">' + data.spot + '</text>';
+    svg += '<line x1="' + sx + '" y1="' + padT + '" x2="' + sx + '" y2="' + (H - padB) + '" stroke="#86868b" stroke-width="1.5" stroke-dasharray="4,3"/>';
+    svg += '<text x="' + sx + '" y="' + (H - padB + 14) + '" text-anchor="middle" fill="#86868b" font-size="11">' + data.spot + '</text>';
   }}
-  if (data.gamma_flip != null) {{
-    const fx = x(data.gamma_flip);
-    svg += '<line x1="' + fx + '" y1="' + padT + '" x2="' + fx + '" y2="' + (H - padB) + '" stroke="#f0a500" stroke-width="2"/>';
-    svg += '<text x="' + fx + '" y="' + (padT + 13) + '" text-anchor="middle" fill="#f0a500" font-size="10">Flip ' + data.gamma_flip + '</text>';
+  if (data.zero_gamma != null) {{
+    const zx = x(data.zero_gamma);
+    svg += '<line x1="' + zx + '" y1="' + padT + '" x2="' + zx + '" y2="' + (H - padB) + '" stroke="#f0a500" stroke-width="2"/>';
+    const zlabel = (data.gamma_flip != null) ? ('Flip ' + data.gamma_flip) : ('≈零 Gamma ' + data.zero_gamma);
+    svg += '<text x="' + zx + '" y="' + (padT + 13) + '" text-anchor="middle" fill="#f0a500" font-size="10">' + zlabel + '</text>';
   }}
   function mark(strike, color, label) {{
     if (strike == null) return;
@@ -935,7 +936,7 @@ function openGexModal(symbol) {{
       + '<button type="button" class="secondary" data-zoom="1" style="padding:4px 12px">＋</button>'
       + '<button type="button" id="gex-modal-close" style="padding:4px 14px;margin-left:6px">关闭</button></div></div>'
       + '<div id="gex-modal-body" style="overflow-x:auto"></div>'
-      + '<p class="muted" style="font-size:11px;margin-top:8px">绿柱 = Call GEX（上方墙）｜红柱 = Put GEX（下方墙）｜蓝线 = 累计总 GEX｜橙线 = 零 Gamma（Flip）｜红虚线 = 当前价</p>'
+      + '<p class="muted" style="font-size:11px;margin-top:8px">绿柱 = Call GEX（上方墙）｜红柱 = Put GEX（下方墙）｜蓝线 = 累计总 GEX｜橙线 = 零 Gamma（Flip/≈近似）｜灰虚线 = 当前价</p>'
       + '</div>';
     document.body.appendChild(modal);
     modal.querySelector('#gex-modal-close').addEventListener('click', function(){{ modal.style.display = 'none'; }});

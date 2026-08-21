@@ -685,7 +685,8 @@ class OptionsRadarService:
             "status": "ok", "symbol": symbol, "spot": result.spot,
             "strikes": result.strikes, "net_gex": result.net_gex,
             "call_wall": result.call_wall, "put_wall": result.put_wall,
-            "gamma_flip": result.gamma_flip, "regime": result.regime,
+            "gamma_flip": result.gamma_flip, "zero_gamma": result.zero_gamma,
+            "regime": result.regime,
             "max_pos_gex": result.max_pos_gex, "max_neg_gex": result.max_neg_gex,
             "expiry_count": result.expiry_count,
         }

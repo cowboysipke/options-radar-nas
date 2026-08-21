@@ -31,6 +31,7 @@ class GexResult:
     call_wall: Optional[float] = None
     put_wall: Optional[float] = None
     gamma_flip: Optional[float] = None
+    zero_gamma: Optional[float] = None
     regime: str = "mixed"
     max_pos_gex: float = 0.0
     max_neg_gex: float = 0.0
@@ -70,6 +71,19 @@ def _gamma_flip(strikes: List[float], net_gex: List[float]) -> Optional[float]:
         prev_cum = cumulative
         prev_strike = strike
     return None
+
+
+def _closest_to_zero(strikes: List[float], net_gex: List[float]) -> Optional[float]:
+    """Strike where cumulative GEX is closest to zero (approx zero-gamma)."""
+    if not strikes:
+        return None
+    best = (float("inf"), None)
+    acc = 0.0
+    for strike, value in zip(strikes, net_gex):
+        acc += value
+        if abs(acc) < best[0]:
+            best = (abs(acc), strike)
+    return best[1]
 
 
 def _regime(net_gex: List[float]) -> str:
@@ -164,6 +178,9 @@ def compute_gex(
         max_pos_gex = max((value for value in net_gex if value > 0.0), default=0.0)
         max_neg_gex = min((value for value in net_gex if value < 0.0), default=0.0)
 
+        flip = _gamma_flip(strikes, net_gex)
+        zero_gamma = flip if flip is not None else _closest_to_zero(strikes, net_gex)
+
         return GexResult(
             symbol=symbol,
             spot=spot,
@@ -173,7 +190,8 @@ def compute_gex(
             put_gex=put_gex,
             call_wall=call_wall,
             put_wall=put_wall,
-            gamma_flip=_gamma_flip(strikes, net_gex),
+            gamma_flip=flip,
+            zero_gamma=zero_gamma,
             regime=_regime(net_gex),
             max_pos_gex=max_pos_gex,
             max_neg_gex=max_neg_gex,
