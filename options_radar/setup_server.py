@@ -1327,6 +1327,17 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                         + position_bar
                         + '</div>'
                     )
+                vol = item.get("vol") if isinstance(item.get("vol"), Mapping) else None
+                vol_segment = ""
+                if vol and (vol.get("atm_iv") is not None or vol.get("put_skew") is not None or vol.get("call_skew") is not None):
+                    parts = []
+                    if vol.get("atm_iv") is not None:
+                        parts.append(f"ATM IV {float(vol['atm_iv']):.0f}%")
+                    if vol.get("put_skew") is not None:
+                        parts.append(f"Put Skew {float(vol['put_skew']):+.1f}")
+                    if vol.get("call_skew") is not None:
+                        parts.append(f"Call Skew {float(vol['call_skew']):+.1f}")
+                    vol_segment = '<p style="margin:4px 0 0;font-size:12px" class="muted"><b>IV</b> ' + html.escape(" · ".join(parts)) + ' <span class="muted">（Put Skew 正=下跌保护贵，卖 Put 更划算）</span></p>'
                 return (
                     '<section class="card">'
                     f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:18px">{key}</h2><span class="muted" style="font-size:13px">交易量 {premium_text}</span>{badge}{source_badge}</div>'
@@ -1338,6 +1349,7 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                     f'{risk_segment}'
                     f'{hint_segment}'
                     f'{gex_segment}'
+                    f'{vol_segment}'
                     f'<p style="margin:6px 0 0" class="muted">{html.escape(remaining) if remaining else ""}</p>'
                     '</section>'
                 )

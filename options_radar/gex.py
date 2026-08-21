@@ -32,6 +32,9 @@ class GexResult:
     put_wall: Optional[float] = None
     gamma_flip: Optional[float] = None
     zero_gamma: Optional[float] = None
+    atm_iv: Optional[float] = None
+    put_skew: Optional[float] = None
+    call_skew: Optional[float] = None
     regime: str = "mixed"
     max_pos_gex: float = 0.0
     max_neg_gex: float = 0.0
@@ -96,6 +99,55 @@ def _regime(net_gex: List[float]) -> str:
     if total < 0.0:
         return "negative"
     return "mixed"
+
+
+def _vol_from_data(
+    eligible: List[FutuOptionContract],
+    snapshots: Dict[str, Any],
+    spot: float,
+) -> tuple:
+    """IV skew from already-fetched chain + snapshots (shared with GEX fetch)."""
+
+    def iv_of(contract: FutuOptionContract) -> Optional[float]:
+        snap = snapshots.get(contract.code)
+        return getattr(snap, "implied_volatility", None) if snap is not None else None
+
+    by_expiry: Dict[date, List[FutuOptionContract]] = {}
+    for contract in eligible:
+        by_expiry.setdefault(contract.expiry, []).append(contract)
+
+    atm_iv: Optional[float] = None
+    if by_expiry:
+        nearest = min(by_expiry)
+        near = by_expiry[nearest]
+        min_dist = min(abs(c.strike - spot) for c in near)
+        atm_cs = [c for c in near if abs(c.strike - spot) == min_dist]
+        atm_ivs = [iv for iv in (iv_of(c) for c in atm_cs) if iv is not None]
+        if atm_ivs:
+            atm_iv = sum(atm_ivs) / len(atm_ivs)
+
+    best_put = (999.0, None)
+    best_call = (999.0, None)
+    for contract in eligible:
+        snap = snapshots.get(contract.code)
+        if snap is None:
+            continue
+        delta = getattr(snap, "delta", None)
+        iv = getattr(snap, "implied_volatility", None)
+        if delta is None or iv is None:
+            continue
+        if contract.option_type == "P":
+            dist = abs(delta - (-0.25))
+            if dist < best_put[0]:
+                best_put = (dist, iv)
+        else:
+            dist = abs(delta - 0.25)
+            if dist < best_call[0]:
+                best_call = (dist, iv)
+
+    put_skew = (best_put[1] - atm_iv) if (best_put[1] is not None and atm_iv is not None) else None
+    call_skew = (best_call[1] - atm_iv) if (best_call[1] is not None and atm_iv is not None) else None
+    return atm_iv, put_skew, call_skew
 
 
 def compute_gex(
@@ -180,6 +232,10 @@ def compute_gex(
 
         flip = _gamma_flip(strikes, net_gex)
         zero_gamma = flip if flip is not None else _closest_to_zero(strikes, net_gex)
+        try:
+            atm_iv, put_skew, call_skew = _vol_from_data(eligible, snapshots, spot)
+        except Exception:
+            atm_iv, put_skew, call_skew = None, None, None
 
         return GexResult(
             symbol=symbol,
@@ -192,6 +248,9 @@ def compute_gex(
             put_wall=put_wall,
             gamma_flip=flip,
             zero_gamma=zero_gamma,
+            atm_iv=atm_iv,
+            put_skew=put_skew,
+            call_skew=call_skew,
             regime=_regime(net_gex),
             max_pos_gex=max_pos_gex,
             max_neg_gex=max_neg_gex,

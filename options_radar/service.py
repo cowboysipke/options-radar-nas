@@ -36,6 +36,7 @@ from .futu_provider import (
     FutuProvider,
 )
 from .gex import GexResult, compute_gex
+from .vol import VolSurface, compute_vol_surface
 from .history_adapters import AlpacaHistoryAdapter, SyntheticHistoryAdapter
 from .ibkr_flex import IBKRFlexClient
 from .ibkr_provider import IBKRProvider
@@ -673,6 +674,25 @@ class OptionsRadarService:
         except Exception:
             return None
 
+    def get_vol_surface(self, symbol: str) -> Optional[VolSurface]:
+        """Compute (and cache) IV skew + term structure for one underlying."""
+        cache = getattr(self, "_vol_cache", None)
+        if cache is None:
+            cache = {}
+            self._vol_cache = cache
+        if symbol in cache:
+            return cache[symbol]
+        try:
+            spot = self._stock_spot(symbol)
+            if spot is None:
+                return None
+            result = compute_vol_surface(self.futu, symbol, spot)
+            if result.atm_iv is not None or result.term_structure:
+                cache[symbol] = result
+            return result
+        except Exception:
+            return None
+
     def gex_view(self, symbol: str = "", **_kwargs: Any) -> Dict[str, Any]:
         """JSON-friendly GEX snapshot for the dashboard curve."""
         symbol = str(symbol or "").strip()
@@ -878,12 +898,18 @@ class OptionsRadarService:
                     evaluation.final_direction, market.iv_rank,
                     gex.regime if gex is not None else None,
                 )
-                event = self._event_risk(str(event.symbol))
-                execution["event_risk"] = event["event_risk"]
-                execution["next_earnings_days"] = event["next_earnings_days"]
-                execution["expected_move"] = event["expected_move"]
-                execution["short_gamma_risk"] = self._short_gamma_risk(gex, event["event_risk"])
+                event_risk = self._event_risk(str(event.symbol))
+                execution["event_risk"] = event_risk["event_risk"]
+                execution["next_earnings_days"] = event_risk["next_earnings_days"]
+                execution["expected_move"] = event_risk["expected_move"]
+                execution["short_gamma_risk"] = self._short_gamma_risk(gex, event_risk["event_risk"])
                 execution["strike_hint"] = self._strike_hint(evaluation.final_direction, gex)
+                if gex is not None and (gex.atm_iv is not None or gex.put_skew is not None or gex.call_skew is not None):
+                    execution["vol"] = {
+                        "atm_iv": gex.atm_iv,
+                        "put_skew": gex.put_skew,
+                        "call_skew": gex.call_skew,
+                    }
                 self.database.attach_execution(recommendation_id, execution)
                 output.append({
                     "recommendation_id": recommendation_id, "contract_key": evaluation.contract_key,
