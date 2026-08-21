@@ -646,6 +646,32 @@ class FutuProvider:
         finally:
             self._close(context)
 
+    def get_earnings_screener(self, count: int = 100) -> Dict[str, Dict[str, Any]]:
+        """Upcoming-earnings list keyed by underlying code (owner)."""
+        context = self._quote_context()
+        try:
+            ret, data = context.get_option_earnings_screener(
+                market=_enum(self.sdk, "OptionMarket", "US_SECURITY", "US_SECURITY"),
+                count=max(1, min(int(count), 500)),
+            )
+            if not self._ok(ret) or not isinstance(data, dict):
+                return {}
+            frame = data.get("item_list")
+            output: Dict[str, Dict[str, Any]] = {}
+            for row in _records(frame):
+                code = str(row.get("owner", "")).upper()
+                output[code] = {
+                    "earnings_time": _text(row, "earnings_time"),
+                    "earnings_pub_type": _text(row, "earnings_pub_type"),
+                    "expected_move_ratio": _float(row, "expected_move_ratio"),
+                    "iv_rank": _float(row, "iv_rank"),
+                    "last_report_iv_crush": _float(row, "last_report_iv_crush"),
+                    "history_report_iv_crush": _float(row, "history_report_iv_crush"),
+                }
+            return output
+        finally:
+            self._close(context)
+
     def get_snapshots(self, contract_codes: Iterable[str]) -> Dict[str, FutuMarketSnapshot]:
         codes = list(dict.fromkeys(_normalise_code(code) for code in contract_codes))
         if not codes:

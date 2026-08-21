@@ -713,6 +713,71 @@ class OptionsRadarService:
             return "IV 偏低，卖方无优势，观望"
         return "IV 中性，卖方机会一般"
 
+    def _earnings(self) -> Dict[str, Dict[str, Any]]:
+        cache = getattr(self, "_earnings_cache", None)
+        if cache is None:
+            cache = {"_loaded": False}
+            self._earnings_cache = cache
+        if cache.get("_loaded"):
+            return cache
+        try:
+            cache.update(self.futu.get_earnings_screener(100))
+        except Exception:
+            pass
+        cache["_loaded"] = True
+        return cache
+
+    def _event_risk(self, symbol: str) -> Dict[str, Any]:
+        info = self._earnings().get(f"US.{symbol}") or {}
+        earnings_time = str(info.get("earnings_time") or "")
+        if not earnings_time:
+            return {"event_risk": "LOW", "next_earnings_days": None, "expected_move": None}
+        days = None
+        try:
+            earnings_date = date.fromisoformat(earnings_time[:10])
+            days = (earnings_date - date.today()).days
+        except ValueError:
+            pass
+        if days is not None and days <= 7:
+            risk = "HIGH"
+        elif days is not None and days <= 14:
+            risk = "MEDIUM"
+        else:
+            risk = "LOW"
+        return {
+            "event_risk": risk,
+            "next_earnings_days": days,
+            "expected_move": info.get("expected_move_ratio"),
+        }
+
+    @staticmethod
+    def _short_gamma_risk(gex: Optional[GexResult], event_risk: str) -> str:
+        if gex is None:
+            return "LOW"
+        flags = 0
+        if gex.regime == "negative":
+            flags += 1
+        if gex.gamma_flip is not None and gex.spot is not None and gex.spot > 0:
+            if abs(gex.spot - gex.gamma_flip) / gex.spot <= 0.03:
+                flags += 1
+        if event_risk == "HIGH":
+            flags += 1
+        if flags >= 2:
+            return "HIGH"
+        if flags == 1:
+            return "MEDIUM"
+        return "LOW"
+
+    @staticmethod
+    def _strike_hint(direction: str, gex: Optional[GexResult]) -> Optional[str]:
+        if gex is None:
+            return None
+        if direction == "BULL" and gex.put_wall is not None:
+            return f"优先行权价 ${gex.put_wall}（Put Wall 支撑）"
+        if direction == "BEAR" and gex.call_wall is not None:
+            return f"优先行权价 ${gex.call_wall}（Call Wall 阻力）"
+        return None
+
     def _evaluate(self, target_date: date, limit: Optional[int] = None, sync: bool = True) -> List[Dict[str, Any]]:
         if sync:
             try:
@@ -812,6 +877,12 @@ class OptionsRadarService:
                     evaluation.final_direction, market.iv_rank,
                     gex.regime if gex is not None else None,
                 )
+                event = self._event_risk(str(event.symbol))
+                execution["event_risk"] = event["event_risk"]
+                execution["next_earnings_days"] = event["next_earnings_days"]
+                execution["expected_move"] = event["expected_move"]
+                execution["short_gamma_risk"] = self._short_gamma_risk(gex, event["event_risk"])
+                execution["strike_hint"] = self._strike_hint(evaluation.final_direction, gex)
                 self.database.attach_execution(recommendation_id, execution)
                 output.append({
                     "recommendation_id": recommendation_id, "contract_key": evaluation.contract_key,

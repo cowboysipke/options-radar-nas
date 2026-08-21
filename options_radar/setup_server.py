@@ -1213,13 +1213,28 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                     remaining = "评分组成：" + reason.split("评分组成：", 1)[1].split("风险提示", 1)[0]
                 strategy_hint = str(item.get("strategy_hint", ""))
                 iv_rank_val = item.get("iv_rank")
+                strike_hint = str(item.get("strike_hint", ""))
+                event_risk = str(item.get("event_risk", ""))
+                next_earn = item.get("next_earnings_days")
+                expected_move = item.get("expected_move")
+                short_gamma_risk = str(item.get("short_gamma_risk", ""))
                 hint_segment = ""
                 if strategy_hint:
                     iv_text = f"IV Rank {iv_rank_val:.0f}" if isinstance(iv_rank_val, (int, float)) else ""
+                    extra = ""
+                    if strike_hint:
+                        extra += f' · <b>{html.escape(strike_hint)}</b>'
+                    if event_risk == "HIGH":
+                        earn_txt = f"财报 {int(next_earn)} 天后" if isinstance(next_earn, (int, float)) else "财报临近"
+                        move_txt = f"预期波动 {expected_move:.1f}%" if isinstance(expected_move, (int, float)) else ""
+                        extra += f' · <span style="color:#d70015">⚠ 事件风险 HIGH（{html.escape(earn_txt)}{" " + html.escape(move_txt) if move_txt else ""}）</span>'
+                    if short_gamma_risk == "HIGH":
+                        extra += ' · <span style="color:#d70015">⚠ Short Gamma 风险 HIGH，避免裸卖</span>'
                     hint_segment = (
                         '<div style="margin:6px 0 0;padding:8px 10px;background:#eef7ef;border-radius:8px;font-size:13px">'
                         f'<b>策略</b> {html.escape(strategy_hint)}'
                         + (f' <span class="muted">· {html.escape(iv_text)}</span>' if iv_text else '')
+                        + extra
                         + '</div>'
                     )
                 gex = item.get("gex") if isinstance(item.get("gex"), Mapping) else None
