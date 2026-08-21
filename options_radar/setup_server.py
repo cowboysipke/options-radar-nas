@@ -859,65 +859,103 @@ function attachTableFilters(opts) {{
 }}
 attachTableFilters({{search:'signal-search',selects:['signal-dir','signal-status'],expand:'signal-expand',collapse:'signal-collapse'}});
 attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand:'portfolio-expand',collapse:'portfolio-collapse'}});
+let gexZoom = 1;
+function gexCumulative(gex) {{
+  const cum = []; let acc = 0;
+  for (let i = 0; i < gex.length; i++) {{ acc += gex[i]; cum.push(acc); }}
+  return cum;
+}}
 function renderGexChart(container, data) {{
   if (!data || !data.strikes || !data.strikes.length) {{
     container.innerHTML = '<span class="muted">暂无 GEX 数据</span>'; return;
   }}
-  const W = 560, H = 190, padL = 46, padR = 14, padT = 16, padB = 28;
   const strikes = data.strikes, gex = data.net_gex;
+  const cum = gexCumulative(gex);
+  const W = 800, H = 320, padL = 56, padR = 20, padT = 30, padB = 32;
   const minS = Math.min.apply(null, strikes), maxS = Math.max.apply(null, strikes);
   const span = (maxS - minS) || 1;
   const maxAbs = Math.max.apply(null, gex.map(function(g){{ return Math.abs(g); }}).concat([1e-9]));
+  const maxCum = Math.max.apply(null, cum.map(function(c){{ return Math.abs(c); }}).concat([1e-9]));
   const x = function(s){{ return padL + (s - minS) / span * (W - padL - padR); }};
-  const y = function(g){{ return padT + (H - padT - padB) / 2 - (g / maxAbs) * ((H - padT - padB) / 2); }};
-  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%;background:#fff;border:1px solid #e8e8ed;border-radius:8px">';
-  svg += '<line x1="' + padL + '" y1="' + y(0) + '" x2="' + (W - padR) + '" y2="' + y(0) + '" stroke="#c9c9cf" stroke-width="1"/>';
+  const yBar = function(g){{ return padT + (H - padT - padB) / 2 - (g / maxAbs) * ((H - padT - padB) / 2); }};
+  const yCum = function(c){{ return padT + (H - padT - padB) / 2 - (c / maxCum) * ((H - padT - padB) / 2); }};
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:' + (gexZoom * 100) + '%;background:#fff;border:1px solid #e8e8ed;border-radius:8px">';
+  svg += '<line x1="' + padL + '" y1="' + yBar(0) + '" x2="' + (W - padR) + '" y2="' + yBar(0) + '" stroke="#c9c9cf" stroke-width="1"/>';
   const barWidth = Math.max(2, (W - padL - padR) / strikes.length * 0.7);
   for (let i = 0; i < strikes.length; i++) {{
     const g = gex[i];
-    const zeroY = y(0);
-    const barY = y(g);
-    const top = Math.min(zeroY, barY);
-    const h = Math.abs(zeroY - barY);
+    const zeroY = yBar(0), barY = yBar(g);
+    const top = Math.min(zeroY, barY), h = Math.abs(zeroY - barY);
     const color = g >= 0 ? '#00a651' : '#d70015';
     if (h > 0.5) {{
       svg += '<rect x="' + (x(strikes[i]) - barWidth / 2) + '" y="' + top + '" width="' + barWidth + '" height="' + h + '" fill="' + color + '" opacity="0.85"/>';
     }}
   }}
+  let pts = '';
+  for (let i = 0; i < strikes.length; i++) {{
+    pts += (i ? ' ' : '') + x(strikes[i]).toFixed(1) + ',' + yCum(cum[i]).toFixed(1);
+  }}
+  svg += '<polyline points="' + pts + '" fill="none" stroke="#0071e3" stroke-width="2"/>';
   if (data.spot) {{
     const sx = x(data.spot);
     svg += '<line x1="' + sx + '" y1="' + padT + '" x2="' + sx + '" y2="' + (H - padB) + '" stroke="#d70015" stroke-width="1.5" stroke-dasharray="4,3"/>';
-    svg += '<text x="' + sx + '" y="' + (H - padB + 14) + '" text-anchor="middle" fill="#d70015" font-size="10">' + data.spot + '</text>';
+    svg += '<text x="' + sx + '" y="' + (H - padB + 14) + '" text-anchor="middle" fill="#d70015" font-size="11">' + data.spot + '</text>';
+  }}
+  if (data.gamma_flip != null) {{
+    const fx = x(data.gamma_flip);
+    svg += '<line x1="' + fx + '" y1="' + padT + '" x2="' + fx + '" y2="' + (H - padB) + '" stroke="#f0a500" stroke-width="2"/>';
+    svg += '<text x="' + fx + '" y="' + (padT + 13) + '" text-anchor="middle" fill="#f0a500" font-size="10">Flip ' + data.gamma_flip + '</text>';
   }}
   function mark(strike, color, label) {{
     if (strike == null) return;
     const sx = x(strike);
     svg += '<line x1="' + sx + '" y1="' + padT + '" x2="' + sx + '" y2="' + (H - padB) + '" stroke="' + color + '" stroke-width="1" stroke-dasharray="2,2"/>';
-    svg += '<text x="' + sx + '" y="' + (padT + 11) + '" text-anchor="middle" fill="' + color + '" font-size="9">' + label + '</text>';
+    svg += '<text x="' + sx + '" y="' + (padT + 26) + '" text-anchor="middle" fill="' + color + '" font-size="9">' + label + '</text>';
   }}
   mark(data.call_wall, '#00a651', 'Call Wall');
   mark(data.put_wall, '#d70015', 'Put Wall');
-  mark(data.gamma_flip, '#f0a500', 'Flip');
-  svg += '<text x="' + padL + '" y="' + (H - padB + 14) + '" fill="#86868b" font-size="9">' + minS + '</text>';
-  svg += '<text x="' + (W - padR) + '" y="' + (H - padB + 14) + '" text-anchor="end" fill="#86868b" font-size="9">' + maxS + '</text>';
+  svg += '<text x="' + padL + '" y="' + (H - padB + 14) + '" fill="#86868b" font-size="10">' + minS + '</text>';
+  svg += '<text x="' + (W - padR) + '" y="' + (H - padB + 14) + '" text-anchor="end" fill="#86868b" font-size="10">' + maxS + '</text>';
   svg += '</svg>';
   container.innerHTML = svg;
 }}
+function gexModalFetch(symbol) {{
+  return fetch('/api/gex?symbol=' + encodeURIComponent(symbol)).then(function(r){{ return r.json(); }});
+}}
+function openGexModal(symbol) {{
+  let modal = document.getElementById('gex-modal');
+  if (!modal) {{
+    modal = document.createElement('div');
+    modal.id = 'gex-modal';
+    modal.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;overflow:auto;padding:30px';
+    modal.innerHTML = '<div style="background:#fff;margin:0 auto;max-width:980px;border-radius:14px;padding:20px">'
+      + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:10px">'
+      + '<b id="gex-modal-title" style="font-size:16px">GEX 曲线</b>'
+      + '<div style="white-space:nowrap"><button type="button" class="secondary" data-zoom="-1" style="padding:4px 12px">−</button>'
+      + '<button type="button" class="secondary" data-zoom="1" style="padding:4px 12px">＋</button>'
+      + '<button type="button" id="gex-modal-close" style="padding:4px 14px;margin-left:6px">关闭</button></div></div>'
+      + '<div id="gex-modal-body" style="overflow-x:auto"></div>'
+      + '<p class="muted" style="font-size:11px;margin-top:8px">绿柱 = Call GEX（上方墙）｜红柱 = Put GEX（下方墙）｜蓝线 = 累计总 GEX｜橙线 = 零 Gamma（Flip）｜红虚线 = 当前价</p>'
+      + '</div>';
+    document.body.appendChild(modal);
+    modal.querySelector('#gex-modal-close').addEventListener('click', function(){{ modal.style.display = 'none'; }});
+    modal.querySelectorAll('button[data-zoom]').forEach(function(zb) {{
+      zb.addEventListener('click', function() {{
+        gexZoom = Math.max(0.5, Math.min(4, gexZoom + parseFloat(zb.getAttribute('data-zoom')) * 0.5));
+        gexModalFetch(symbol).then(function(data){{ renderGexChart(document.getElementById('gex-modal-body'), data); }});
+      }});
+    }});
+    modal.addEventListener('click', function(e){{ if (e.target === modal) modal.style.display = 'none'; }});
+  }}
+  modal.style.display = 'block';
+  document.getElementById('gex-modal-title').textContent = 'GEX 曲线 - ' + symbol;
+  document.getElementById('gex-modal-body').innerHTML = '<span class="muted">加载中…</span>';
+  gexModalFetch(symbol).then(function(data) {{
+    renderGexChart(document.getElementById('gex-modal-body'), data);
+  }}).catch(function(){{ document.getElementById('gex-modal-body').innerHTML = '<span class="muted">加载失败</span>'; }});
+}}
 document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
-  btn.addEventListener('click', async function() {{
-    const chart = btn.parentElement.querySelector('.gex-chart');
-    if (!chart) return;
-    if (chart.style.display !== 'none') {{ chart.style.display = 'none'; return; }}
-    chart.style.display = 'block';
-    chart.innerHTML = '<span class="muted">加载中…</span>';
-    try {{
-      const r = await fetch('/api/gex?symbol=' + encodeURIComponent(btn.getAttribute('data-gex')));
-      const data = await r.json();
-      renderGexChart(chart, data);
-    }} catch (e) {{
-      chart.innerHTML = '<span class="muted">加载失败</span>';
-    }}
-  }});
+  btn.addEventListener('click', function(){{ openGexModal(btn.getAttribute('data-gex')); }});
 }});
 (function(){{
   const rows=document.querySelectorAll('tr.analyst-row');
@@ -1251,7 +1289,7 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                 gex_segment = ""
                 if gex:
                     symbol = str(item.get("contract_key", "")).split("|", 1)[0].split(".", 1)[-1]
-                    regime_map = {"positive": "正 Gamma", "negative": "负 Gamma", "mixed": "混合"}
+                    regime_map = {"positive": "正 Gamma（抑制波动）", "negative": "负 Gamma（放大波动）", "mixed": "混合 Gamma（敞口平衡）"}
                     regime_text = regime_map.get(str(gex.get("regime", "")), "—")
                     walls = []
                     if gex.get("call_wall") is not None:
@@ -1260,6 +1298,8 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                         walls.append(f"Put Wall ${gex.get('put_wall')}")
                     if gex.get("gamma_flip") is not None:
                         walls.append(f"Flip ${gex.get('gamma_flip')}")
+                    else:
+                        walls.append("无 Flip（累计 GEX 未跨零）")
                     wall_text = " · ".join(walls) if walls else ""
                     position_bar = ""
                     if gex.get("put_wall") is not None and gex.get("call_wall") is not None and gex.get("spot") is not None:
@@ -1284,8 +1324,7 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                         f'<b>GEX</b> {html.escape(regime_text)} {html.escape(wall_text)}'
                         f'<button type="button" class="secondary" style="margin-left:8px;padding:3px 10px" data-gex="{html.escape(symbol)}">曲线</button>'
                         + position_bar
-                        + f'<div class="gex-chart" data-symbol="{html.escape(symbol)}" style="display:none;margin-top:8px"></div>'
-                        '</div>'
+                        + '</div>'
                     )
                 return (
                     '<section class="card">'
