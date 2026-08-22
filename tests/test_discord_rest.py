@@ -9,15 +9,22 @@ from options_radar.discord_rest import (
 from options_radar.models import SourceCursor
 
 
+def _discord_ts(value):
+    """Render a datetime as a real Discord API timestamp (UTC, trailing Z)."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
 def _message(item_id, content, timestamp, author="flow_bot", edited=None):
     payload = {
         "id": str(item_id),
         "content": content,
-        "timestamp": timestamp.isoformat() + "Z",
+        "timestamp": _discord_ts(timestamp),
         "author": {"username": author},
     }
     if edited:
-        payload["edited_timestamp"] = edited.isoformat() + "Z"
+        payload["edited_timestamp"] = _discord_ts(edited)
     else:
         payload["edited_timestamp"] = None
     return payload
@@ -128,7 +135,7 @@ class DiscordRestSourceTests(unittest.TestCase):
         payload = {"messages": [{
             "id": "5002",
             "content": "SPY 2026-08-21 580 C",
-            "timestamp": new.isoformat() + "Z",
+            "timestamp": _discord_ts(new),
             "edited_timestamp": None,
             "author": {"username": "mr"},
             "embeds": [{
