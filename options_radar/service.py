@@ -347,6 +347,8 @@ class OptionsRadarService:
         self.analyst_backtests = AnalystBacktestCoordinator(
             self.database, CompositeBarsSource(self.alpaca_history, self.massive),
         )
+        # Dealer-chart / spark-line daily bars: Alpaca first, Massive fallback.
+        self.bars_source = CompositeBarsSource(self.alpaca_history, self.massive)
         self.rulebook = RulebookCompiler(self.database, self.config.section("analyst_families"))
         self._last_backtest: Optional[Dict[str, Any]] = None
         self._last_backtest_at: float = 0.0
@@ -584,6 +586,8 @@ class OptionsRadarService:
         snapshot.underlying_previous_low = features["low"]
         snapshot.underlying_atr14 = features["atr"]
         snapshot.underlying_hv = features.get("hv")
+        snapshot.underlying_ma20 = features.get("ma20")
+        snapshot.underlying_ma50 = features.get("ma50")
         futu_candidate = composite.candidates.get("futu")
         if futu_candidate:
             snapshot.futu_code = futu_candidate.instrument_code
@@ -698,6 +702,21 @@ class OptionsRadarService:
         except Exception:
             return None
 
+    @staticmethod
+    def _gex_payload(result: GexResult) -> Dict[str, Any]:
+        """JSON-friendly GEX snapshot shared by the curve and dealer APIs."""
+        return {
+            "spot": result.spot,
+            "strikes": result.strikes, "net_gex": result.net_gex,
+            "call_wall": result.call_wall, "put_wall": result.put_wall,
+            "gamma_flip": result.gamma_flip, "zero_gamma": result.zero_gamma,
+            "regime": result.regime,
+            "max_pos_gex": result.max_pos_gex, "max_neg_gex": result.max_neg_gex,
+            "expiry_count": result.expiry_count,
+            "term_structure": result.term_structure,
+            "heatmap": result.heatmap,
+        }
+
     def gex_view(self, symbol: str = "", **_kwargs: Any) -> Dict[str, Any]:
         """JSON-friendly GEX snapshot for the dashboard curve."""
         symbol = str(symbol or "").strip()
@@ -706,25 +725,298 @@ class OptionsRadarService:
         result = self.get_gex(symbol)
         if result is None:
             return {"status": "empty", "symbol": symbol}
-        return {
-            "status": "ok", "symbol": symbol, "spot": result.spot,
-            "strikes": result.strikes, "net_gex": result.net_gex,
-            "call_wall": result.call_wall, "put_wall": result.put_wall,
-            "gamma_flip": result.gamma_flip, "zero_gamma": result.zero_gamma,
-            "regime": result.regime,
-            "max_pos_gex": result.max_pos_gex, "max_neg_gex": result.max_neg_gex,
-            "expiry_count": result.expiry_count,
-        }
+        payload = self._gex_payload(result)
+        payload.update({"status": "ok", "symbol": symbol})
+        return payload
+
+    def _cached_daily_bars(self, symbol: str, days: int = 30) -> List[Dict[str, object]]:
+        """Last ~``days`` daily bars for one underlying, cached 30 minutes."""
+        cache = getattr(self, "_spark_cache", None)
+        if cache is None:
+            cache = {}
+            self._spark_cache = cache
+        cache_key = (symbol, int(days))
+        entry = cache.get(cache_key)
+        now = time.monotonic()
+        if entry is not None and now - entry[0] < 1800:
+            return entry[1]
+        end = date.today()
+        start = end - timedelta(days=max(7, int(days)) + 5)
+        try:
+            bars = self.bars_source.aggregate_bars(symbol, start, end, 1, "day")
+        except Exception:
+            bars = []
+        clean = [
+            bar for bar in bars
+            if isinstance(bar, Mapping) and bar.get("t") is not None
+            and None not in (bar.get("o"), bar.get("h"), bar.get("l"), bar.get("c"))
+        ]
+        cache[cache_key] = (now, clean[-max(1, int(days)):])
+        return cache[cache_key][1]
 
     @staticmethod
-    def _strategy_hint(direction: str, iv_rank: Optional[float], regime: Optional[str]) -> str:
-        """Seller-first strategy hint from IV richness and gamma regime.
+    def _price_structure_from_bars(bars: List[Dict[str, object]]) -> Dict[str, Any]:
+        """MA20/MA50 series + 20-day support/resistance from a daily-bar list."""
+        closes = []
+        for bar in bars:
+            try:
+                closes.append(float(bar.get("c")))
+            except (TypeError, ValueError):
+                continue
+
+        def ma_series(window):
+            series = []
+            buffer = []
+            for close in closes:
+                buffer.append(close)
+                if len(buffer) > window:
+                    buffer.pop(0)
+                series.append(sum(buffer) / len(buffer) if len(buffer) == window else None)
+            return series
+
+        highs = []
+        lows = []
+        for bar in bars[-20:]:
+            try:
+                highs.append(float(bar.get("h")))
+                lows.append(float(bar.get("l")))
+            except (TypeError, ValueError):
+                continue
+        return {
+            "ma20": ma_series(20),
+            "ma50": ma_series(50),
+            "support": min(lows) if lows else None,
+            "resistance": max(highs) if highs else None,
+        }
+
+    def dealer_view(self, symbol: str = "", **_kwargs: Any) -> Dict[str, Any]:
+        """Dealer-chart payload: 30d daily bars + GEX walls + recent flow events."""
+        symbol = str(symbol or "").strip().upper()
+        if not symbol:
+            return {"status": "error", "message": "symbol required"}
+        gex = self.get_gex(symbol)
+        gex_payload = self._gex_payload(gex) if gex is not None else None
+        bars_all = self._cached_daily_bars(symbol, 70)
+        bars = bars_all[-30:]
+        structure = self._price_structure_from_bars(bars_all)
+        cut = len(bars_all) - len(bars)
+        if cut > 0:
+            structure = {
+                key: (value[cut:] if isinstance(value, list) else value)
+                for key, value in structure.items()
+            }
+        spot = gex.spot if gex is not None and gex.spot is not None else None
+        if spot is None and bars:
+            try:
+                spot = float(bars[-1].get("c"))
+            except (TypeError, ValueError):
+                spot = None
+        events = []
+        try:
+            events = [
+                {
+                    "contract_key": event.contract_key,
+                    "option_type": event.option_type,
+                    "strike": event.strike,
+                    "expiry": event.expiry.isoformat(),
+                    "premium": event.premium,
+                    "average_price": event.average_price,
+                    "observed_at": event.observed_at.isoformat(),
+                }
+                for event in self.database.flow_events_recent_for_symbol(symbol, 30)
+            ]
+        except Exception:
+            events = []
+        return {
+            "status": "ok", "symbol": symbol, "spot": spot,
+            "bars": bars, "gex": gex_payload, "flow_events": events,
+            "price_structure": structure,
+        }
+
+    def spark_view(self, symbol: str = "", **_kwargs: Any) -> Dict[str, Any]:
+        """Compact static 30-day daily-bar series for portfolio spark lines."""
+        symbol = str(symbol or "").strip().upper()
+        if not symbol:
+            return {"status": "error", "message": "symbol required"}
+        bars = self._cached_daily_bars(symbol, 30)
+        return {
+            "status": "ok", "symbol": symbol,
+            "bars": [
+                {"t": bar.get("t"), "o": bar.get("o"), "h": bar.get("h"),
+                 "l": bar.get("l"), "c": bar.get("c")}
+                for bar in bars
+            ],
+        }
+
+    def snapshot_gex(self, target_date: Optional[date] = None, limit: int = 0, **_kwargs: Any) -> Dict[str, Any]:
+        """Record strike-level GEX for every symbol touched by flow on a session.
+
+        GEX has no historical OI, so forward validation starts by snapshotting
+        each trading day's dealer positioning after the close. Serial on
+        purpose: Futu option chains and snapshots are rate limited.
+        """
+        target = target_date or self._trade_date()
+        if isinstance(target, str):
+            try:
+                target = date.fromisoformat(str(target))
+            except ValueError:
+                target = self._trade_date()
+        try:
+            events = self.database.flow_events_for_date(target)
+        except Exception:
+            events = []
+        symbols = []
+        for event in events:
+            symbol = str(event.symbol or "").strip().upper()
+            if symbol and symbol not in symbols:
+                symbols.append(symbol)
+        cap = int(limit) if limit else 0
+        if cap > 0:
+            symbols = symbols[:cap]
+        saved = 0
+        failed = []
+        for symbol in symbols:
+            try:
+                gex = self.get_gex(symbol)
+            except Exception as exc:
+                gex = None
+                failed.append(f"{symbol}:{type(exc).__name__}")
+            if gex is None or not gex.strikes:
+                failed.append(f"{symbol}:empty")
+                continue
+            try:
+                saved += self.database.save_gex_snapshot(target, symbol, gex)
+            except Exception as exc:
+                failed.append(f"{symbol}:save:{type(exc).__name__}")
+        return {
+            "status": "ok", "date": target.isoformat(),
+            "symbols": len(symbols), "rows": saved,
+            "failed": failed[:20],
+        }
+
+    def check_alerts(self) -> Dict[str, Any]:
+        """Doc 12.2: Feishu alerts for wall/flip proximity, regime flips, rich IV.
+
+        Each alert text is sent at most once per trading session. Uses the
+        process GEX cache; new symbols are fetched serially (Futu rate limit).
+        """
+        target = self._trade_date()
+        try:
+            events = self.database.flow_events_for_date(target)
+        except Exception:
+            events = []
+        symbols = []
+        for event in events:
+            symbol = str(event.symbol or "").strip().upper()
+            if symbol and symbol not in symbols:
+                symbols.append(symbol)
+        alerts = []
+        for symbol in symbols:
+            try:
+                gex = self.get_gex(symbol)
+            except Exception:
+                gex = None
+            if gex is None or not gex.strikes or not gex.spot:
+                continue
+            spot = float(gex.spot)
+            for name, wall in (("Put Wall", gex.put_wall), ("Call Wall", gex.call_wall), ("Flip", gex.gamma_flip)):
+                if wall and spot > 0 and abs(spot - float(wall)) / spot <= 0.01:
+                    alerts.append(f"⚠ {symbol} 现价 ${spot:g} 逼近 {name} ${float(wall):g}（±1%）")
+            try:
+                previous = self.database.latest_gex_regime_before(symbol, target)
+            except Exception:
+                previous = None
+            if previous and previous != gex.regime:
+                alerts.append(f"🔁 {symbol} Gamma Regime 翻转：{previous} → {gex.regime}")
+            try:
+                overview = self._underlying_overview(symbol)
+                iv_rank = overview.get("iv_rank")
+            except Exception:
+                iv_rank = None
+            if iv_rank is not None and float(iv_rank) >= 80:
+                alerts.append(f"💧 {symbol} IV Rank {float(iv_rank):.0f}（≥80，期权偏贵）")
+        date_key = target.isoformat()
+        sent_keys = getattr(self, "_last_alert_keys", set())
+        if getattr(self, "_last_alert_date", None) != date_key:
+            sent_keys = set()
+            self._last_alert_date = date_key
+        new_alerts = [text for text in alerts if text not in sent_keys]
+        if new_alerts:
+            self.feishu.enqueue_card(
+                build_card("GEX 预警", "\n".join(new_alerts), "red"),
+                source_message_id="gex-alerts-" + date_key,
+            )
+            sent_keys.update(new_alerts)
+            self._last_alert_keys = sent_keys
+        return {"status": "ok", "alerts": len(new_alerts), "checked": len(symbols)}
+
+    @staticmethod
+    def _deterministic_flow_type(text: str) -> str:
+        """Keyword pass for flow type; conservative Unknown when ambiguous."""
+        lowered = str(text or "").lower()
+        if not lowered.strip():
+            return "Unknown"
+        if any(k in lowered for k in ("spread", "butterfly", "iron condor", "straddle", "strangle", "calendar")):
+            return "Spread"
+        if any(k in lowered for k in ("hedge", "hedging", "collar", "protective")):
+            return "Hedging"
+        if any(k in lowered for k in ("closing", "close position", "roll out", "roll to", "stc ", "btc ")):
+            return "Closing"
+        if any(k in lowered for k in ("sweep", "bought", "sold", "order flow", "block")):
+            return "Directional"
+        return "Unknown"
+
+    def classify_flow_events(self, limit: int = 20, **_kwargs: Any) -> Dict[str, Any]:
+        """Doc 4 (P2): attach Flow Type + Flow Strength to recent flow events.
+
+        Deterministic keyword pass first; DeepSeek refines the remaining
+        Unknown messages. Strength is the premium percentile, computed by the
+        program — AI never does arithmetic or picks numbers.
+        """
+        pending = self.database.unclassified_flow_events(int(limit) if limit else 20)
+        classified = 0
+        ai_calls = 0
+        for event_key, raw_message_id in pending:
+            text = ""
+            if raw_message_id is not None:
+                try:
+                    text = str(self.database.raw_message_text(raw_message_id) or "")
+                except Exception:
+                    text = ""
+            flow_type = self._deterministic_flow_type(text)
+            source = "rule"
+            if flow_type == "Unknown" and text.strip():
+                try:
+                    flow_type = self.ai.classify_flow_type(text)
+                    source = "ai"
+                    ai_calls += 1
+                except Exception:
+                    flow_type = "Unknown"
+            try:
+                premium = self.database.flow_premium_for_event(event_key)
+                strength = self.database.premium_percentile(float(premium)) if premium is not None else None
+            except Exception:
+                strength = None
+            try:
+                self.database.save_flow_classification(event_key, flow_type, strength, source)
+                classified += 1
+            except Exception:
+                continue
+        return {"status": "ok", "classified": classified, "ai_calls": ai_calls}
+
+    @staticmethod
+    def _strategy_hint(
+        direction: str, iv_rank: Optional[float], regime: Optional[str],
+        event_risk: str = "LOW", trend: Optional[float] = None,
+    ) -> str:
+        """Seller-first strategy hint from IV richness and gamma regime (matrix 9.1).
 
         IV rank >= 70 (expensive) is the only strong sell-side edge; negative
         gamma asks for defined-risk credit spreads instead of naked shorts.
+        Mixed gamma or a missing direction means "no trade".
         """
-        if direction not in ("BULL", "BEAR"):
-            return "方向不明，观望"
+        if direction not in ("BULL", "BEAR") or regime == "mixed":
+            return "方向不明或 Gamma 混合，不交易"
         expensive = iv_rank is not None and iv_rank >= 70.0
         cheap = iv_rank is not None and iv_rank <= 30.0
         neg_gamma = regime == "negative"
@@ -734,10 +1026,41 @@ class OptionsRadarService:
                 return f"{base}（负 Gamma，建议 Credit Spread 保护）"
             return f"{base}（IV 贵 + 环境允许）"
         if cheap:
-            if direction == "BULL":
-                return "IV 偏低，卖方无优势，优先 Buy Stock"
+            if direction == "BULL" and trend == 1:
+                if event_risk == "HIGH":
+                    return "IV 偏低 + 趋势向上，事件驱动：Buy Stock / Bull Call Spread（防财报）"
+                return "IV 偏低 + 趋势向上，卖方无优势，优先 Buy Stock"
             return "IV 偏低，卖方无优势，观望"
         return "IV 中性，卖方机会一般"
+
+    @staticmethod
+    def _short_gamma_plan(risk: str) -> str:
+        """Structured per-strategy guidance for elevated short-gamma risk (doc 9.2)."""
+        if risk == "HIGH":
+            return "Naked Short Call BLOCK｜Naked Short Put BLOCK｜Credit Spread CAUTION｜Defined Risk PREFERRED"
+        if risk == "MEDIUM":
+            return "Naked Short CAUTION｜Credit Spread CAUTION｜Defined Risk PREFERRED"
+        return ""
+
+    @staticmethod
+    def _expiration_hint(
+        dte: Optional[int], event_risk: str, next_earnings_days: Optional[float],
+    ) -> Optional[str]:
+        """Expiration band guidance: avoid the earnings week, else theta vs buffer."""
+        if event_risk == "HIGH" and next_earnings_days is not None:
+            days = int(next_earnings_days)
+            if days <= 7:
+                return "到期选财报后一期（本周财报，避免事件周）"
+            return f"到期选财报后（{days} 天后财报，避免事件周）"
+        if dte is None:
+            return None
+        if dte <= 7:
+            return "到期 本周（Theta 最大，波动风险高）"
+        if dte <= 14:
+            return "到期 下周（Theta 与事件缓冲平衡）"
+        if dte <= 30:
+            return "到期 2W~1M（标准卖方窗口）"
+        return "到期 1M+（事件缓冲充足）"
 
     def _earnings(self) -> Dict[str, Dict[str, Any]]:
         cache = getattr(self, "_earnings_cache", None)
@@ -888,7 +1211,17 @@ class OptionsRadarService:
                     "invalidation": candidate.invalidation, "data_quality": candidate.data_quality,
                     "market_status": candidate.market.data_status,
                     "market_observed_at": candidate.market.observed_at.isoformat(),
+                    "trend": market.trend_alignment,
                 }
+                price_structure = {
+                    "ma20": market.underlying_ma20,
+                    "ma50": market.underlying_ma50,
+                    "high": market.underlying_previous_high,
+                    "low": market.underlying_previous_low,
+                    "spot": market.underlying_price,
+                }
+                if any(value is not None for value in price_structure.values()):
+                    execution["price_structure"] = price_structure
                 gex = self.get_gex(str(event.symbol))
                 gex_regime = None
                 if gex is not None and gex.strikes:
@@ -901,21 +1234,29 @@ class OptionsRadarService:
                         "spot": gex.spot,
                     }
                 execution["iv_rank"] = market.iv_rank
-                execution["strategy_hint"] = self._strategy_hint(
-                    evaluation.final_direction, market.iv_rank, gex_regime,
-                )
                 event_risk = self._event_risk(str(event.symbol))
                 execution["event_risk"] = event_risk["event_risk"]
                 execution["next_earnings_days"] = event_risk["next_earnings_days"]
                 execution["expected_move"] = event_risk["expected_move"]
+                execution["strategy_hint"] = self._strategy_hint(
+                    evaluation.final_direction, market.iv_rank, gex_regime,
+                    event_risk=event_risk["event_risk"], trend=market.trend_alignment,
+                )
                 execution["short_gamma_risk"] = self._short_gamma_risk(gex, event_risk["event_risk"])
+                execution["short_gamma_plan"] = self._short_gamma_plan(execution["short_gamma_risk"])
                 execution["strike_hint"] = self._strike_hint(evaluation.final_direction, gex)
+                execution["expiration_hint"] = self._expiration_hint(
+                    dte, event_risk["event_risk"], event_risk["next_earnings_days"],
+                )
                 if gex is not None and (gex.atm_iv is not None or gex.put_skew is not None or gex.call_skew is not None):
-                    execution["vol"] = {
+                    vol_payload = {
                         "atm_iv": gex.atm_iv,
                         "put_skew": gex.put_skew,
                         "call_skew": gex.call_skew,
                     }
+                    if gex.term_structure:
+                        vol_payload["term_structure"] = dict(gex.term_structure)
+                    execution["vol"] = vol_payload
                 self.database.attach_execution(recommendation_id, execution)
                 output.append({
                     "recommendation_id": recommendation_id, "contract_key": evaluation.contract_key,
@@ -1191,14 +1532,15 @@ class OptionsRadarService:
         result["reason"] = "；".join(reasons) or "暂无可引用的分析理由。"
         return result
 
-    def reevaluate_today(self) -> Dict[str, Any]:
+    def reevaluate_today(self, limit: Optional[int] = None, **_kwargs: Any) -> Dict[str, Any]:
         """Re-score today's recommendations from the latest market data and weights.
 
         Unlike collect(), this does not re-sync Discord messages or IBKR
-        positions, so it returns quickly and only refreshes scores.
+        positions, so it returns quickly and only refreshes scores. ``limit``
+        bounds the event count for a fast partial refresh.
         """
         target = self._trade_date()
-        results = self._evaluate(target, sync=False)
+        results = self._evaluate(target, sync=False, limit=limit)
         return {"status": "ok", "count": len(results), "date": target.isoformat()}
 
     def _enrich_view_gex(self, view: Dict[str, Any]) -> None:
@@ -1227,6 +1569,8 @@ class OptionsRadarService:
         execution["gex"] = gex_payload
         if gex.atm_iv is not None or gex.put_skew is not None or gex.call_skew is not None:
             vol_payload = {"atm_iv": gex.atm_iv, "put_skew": gex.put_skew, "call_skew": gex.call_skew}
+            if gex.term_structure:
+                vol_payload["term_structure"] = dict(gex.term_structure)
             view["vol"] = vol_payload
             execution["vol"] = vol_payload
         view["execution"] = execution
@@ -1235,6 +1579,8 @@ class OptionsRadarService:
                 str(view.get("final_direction") or view.get("direction") or ""),
                 view.get("iv_rank"),
                 gex.regime,
+                event_risk=str(view.get("event_risk") or "LOW"),
+                trend=view.get("trend"),
             )
         if not view.get("strike_hint"):
             view["strike_hint"] = self._strike_hint(
@@ -1267,14 +1613,18 @@ class OptionsRadarService:
                 key=lambda item: float(item.get("score", 0)), reverse=True,
             )[:3]
             # Lazy GEX for displayed cards so the curve button works even when
-            # the stored payload was written under Futu throttling.
-            seen_symbols = set()
-            for view in sell + buy:
-                sym = str(view.get("contract_key", "")).split("|", 1)[0].split(".", 1)[-1]
-                if sym in seen_symbols and view.get("gex"):
-                    continue
-                seen_symbols.add(sym)
-                self._enrich_view_gex(view)
+            # the stored payload was written under Futu throttling. Only the
+            # latest session gets live enrichment: historical snapshots must
+            # not mix today's dealer positioning into a past session, and
+            # skipping the Futu round-trips keeps date switching instant.
+            if session == self._dashboard_date():
+                seen_symbols = set()
+                for view in sell + buy:
+                    sym = str(view.get("contract_key", "")).split("|", 1)[0].split(".", 1)[-1]
+                    if sym in seen_symbols and view.get("gex"):
+                        continue
+                    seen_symbols.add(sym)
+                    self._enrich_view_gex(view)
             return {"sell": sell, "buy": buy, "session_date": session.isoformat(), "is_latest": session == self._dashboard_date()}
         # No analyst confirmation for this session yet: surface recent flow
         # events as observation candidates so the dashboard updates as new
@@ -1358,6 +1708,7 @@ class OptionsRadarService:
             ov = overview.get(f"US.{symbol}", {})
             item["iv_rank"] = ov.get("iv_rank")
             item["hv_30d"] = ov.get("hv_30d")
+            item["iv"] = ov.get("iv")
             gex = gex_cache.get(symbol)
             item["gex_regime"] = gex.regime if gex is not None else None
             result[symbol] = item
@@ -1530,10 +1881,16 @@ class OptionsRadarService:
         return {"status": "queued", "message": "持仓刷新已开始，稍后刷新页面查看结果。"}
 
     def dashboard_signals(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
-        date_str = str((_payload or {}).get("date", "")).strip()
-        session = date.fromisoformat(date_str) if date_str else self._dashboard_date()
+        payload = _payload if isinstance(_payload, Mapping) else {}
+        symbol = str(payload.get("symbol", "") or "").strip().upper()
+        if symbol:
+            events = self.database.flow_events_recent_for_symbol(symbol, 30)
+        else:
+            date_str = str(payload.get("date", "")).strip()
+            session = date.fromisoformat(date_str) if date_str else self._dashboard_date()
+            events = self.database.flow_events_for_date(session)
         rows = []
-        for event in self.database.flow_events_for_date(session):
+        for event in events:
             rows.append({
                 "event_key": event.event_key,
                 "contract_key": event.contract_key,
@@ -1542,6 +1899,12 @@ class OptionsRadarService:
                 "observed_at": event.observed_at.isoformat(),
                 "signals": [_as_jsonable(signal) for signal in self.database.signals_for_event(event.event_key)],
             })
+        try:
+            class_map = self.database.flow_classification_map([row["event_key"] for row in rows])
+        except Exception:
+            class_map = {}
+        for row in rows:
+            row["classification"] = class_map.get(str(row["event_key"])) or {}
         return rows
 
     def dashboard_rules(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
@@ -1647,6 +2010,19 @@ class OptionsRadarService:
             self._analyst_backtest_running = True
         threading.Thread(target=self._analyst_backtest_worker, daemon=True).start()
 
+    def _validation_summary(self) -> Dict[str, Any]:
+        """Test D summaries (HV-stratified + score-stratified), cached 10 min."""
+        cache = getattr(self, "_validation_cache", None)
+        now = time.monotonic()
+        if cache is not None and now - cache[0] < 600:
+            return cache[1]
+        summary = {
+            "hv": self.database.hv_stratified_outcomes(0),
+            "score": self.database.score_stratified_outcomes(0),
+        }
+        self._validation_cache = (now, summary)
+        return summary
+
     def dashboard_backtest(self, _payload: Optional[Mapping[str, Any]] = None) -> Any:
         payload = _payload if isinstance(_payload, Mapping) else {}
         raw = payload.get("horizon_days")
@@ -1671,6 +2047,7 @@ class OptionsRadarService:
             "plan": {
                 "summary": self.database.analyst_plan_summary(),
             },
+            "validation": self._validation_summary(),
         }
 
     def _ensure_horizon_settled(self, horizon_days: int) -> None:
@@ -1816,9 +2193,14 @@ class OptionsRadarService:
             "market_provenance": lambda payload: self.market_provenance(**payload),
             "market_compare": lambda payload: self.market_compare(**payload),
             "gex": lambda payload: self.gex_view(symbol=str(payload.get("symbol", ""))),
+            "gex_snapshot": lambda payload: self.snapshot_gex(**{k: v for k, v in payload.items() if k in ("target_date", "limit")}),
+            "alerts_check": lambda _payload: self.check_alerts(),
+            "flow_classify": lambda payload: self.classify_flow_events(**{k: v for k, v in payload.items() if k in ("limit",)}),
+            "dealer": lambda payload: self.dealer_view(symbol=str(payload.get("symbol", ""))),
+            "spark": lambda payload: self.spark_view(symbol=str(payload.get("symbol", ""))),
             "ibkr_sync": lambda payload: self.sync_ibkr(**payload),
             "collect": lambda payload: self.collect(bool(payload.get("backfill", False))),
-            "reevaluate": lambda _payload: self.reevaluate_today(),
+            "reevaluate": lambda payload: self.reevaluate_today(**{k: v for k, v in payload.items() if k in ("limit",)}),
             "analyst_backtest_detail": lambda payload: self.analyst_backtest_detail(**payload),
             "audit_sample": lambda payload: self.audit_sample(**payload),
             "audit_review": lambda payload: self.audit_review(**payload),
@@ -1878,12 +2260,27 @@ class OptionsRadarService:
             timezone=self.config.raw.get("timezone", "Asia/Shanghai"), daemon=True,
             executors={"default": ThreadPoolExecutor(1)},
         )
-        # Poll the Discord flow/analyst channels only during the US cash session
-        # (Mon-Fri 09:30-16:00 ET). Outside that window the channels produce no
-        # new actionable cards, so polling is paused to keep resources idle.
-        cash_cron = dict(day_of_week="mon-fri", hour="9-15", timezone="America/New_York")
+        # Poll the Discord flow/analyst channels only during the configured US
+        # cash-session window. The window and cadence are configurable from
+        # /setup; outside it the channels produce no new actionable cards.
+        schedule_cfg = self.config.section("schedule")
+        try:
+            poll_minutes = int(schedule_cfg.get("discord_poll_minutes", 6) or 6)
+        except (TypeError, ValueError):
+            poll_minutes = 6
+        poll_minutes = max(1, min(60, poll_minutes))
+        try:
+            start_hour = int(schedule_cfg.get("session_start_hour", 9) or 9)
+            end_hour = int(schedule_cfg.get("session_end_hour", 16) or 16)
+        except (TypeError, ValueError):
+            start_hour, end_hour = 9, 16
+        start_hour = max(0, min(23, start_hour))
+        end_hour = max(0, min(23, end_hour))
+        if start_hour > end_hour:
+            start_hour, end_hour = end_hour, start_hour
+        cash_cron = dict(day_of_week="mon-fri", hour=f"{start_hour}-{end_hour}", timezone="America/New_York")
         self._scheduler.add_job(
-            self.collect, CronTrigger(minute="*/6", **cash_cron),
+            self.collect, CronTrigger(minute=f"*/{poll_minutes}", **cash_cron),
             id="discord-poll", max_instances=1, coalesce=True,
         )
         self._scheduler.add_job(
@@ -1902,6 +2299,18 @@ class OptionsRadarService:
         self._scheduler.add_job(self.publish_daily, CronTrigger(hour=17, minute=15, timezone="America/New_York"), id="daily-report")
         self._scheduler.add_job(self.run_backtests, CronTrigger(hour=18, minute=0, timezone="America/New_York"), id="daily-backtest")
         self._scheduler.add_job(self.create_backup, CronTrigger(hour=3, minute=0, timezone="Asia/Shanghai"), id="daily-backup")
+        self._scheduler.add_job(
+            self.snapshot_gex, CronTrigger(hour=16, minute=45, timezone="America/New_York"),
+            id="gex-daily-snapshot", max_instances=1, coalesce=True,
+        )
+        self._scheduler.add_job(
+            self.check_alerts, CronTrigger(minute="*/10", **cash_cron),
+            id="gex-alerts", max_instances=1, coalesce=True,
+        )
+        self._scheduler.add_job(
+            self.classify_flow_events, CronTrigger(minute="*/30", **cash_cron),
+            id="flow-classify", max_instances=1, coalesce=True,
+        )
         self._scheduler.add_job(self.run_optimizer, CronTrigger(day_of_week="sun", hour=9, minute=0, timezone="Asia/Shanghai"), id="weekly-optimizer")
         self._scheduler.add_job(self.check_ai_budget, "interval", hours=1, id="ai-budget")
         self._scheduler.start()
@@ -1949,6 +2358,10 @@ class OptionsRadarService:
             "watchlist_count": len(self._watch_symbols()),
             "last_backtest": self._last_backtest, "last_optimization": self._last_optimization,
         }
+        try:
+            result["gex_snapshots"] = self.database.gex_snapshot_summary()
+        except Exception:
+            result["gex_snapshots"] = {"days": 0, "symbols": 0, "latest_date": None}
         with self._health_cache_lock:
             self._health_cache = result
             self._health_cache_at = time.monotonic()

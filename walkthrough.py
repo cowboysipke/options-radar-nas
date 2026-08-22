@@ -46,6 +46,11 @@ def extract_csrf(html_text):
 
 
 def main():
+    # GBK console (Chinese Windows) cannot encode the ✅/❌ summary marks;
+    # force UTF-8 so the report prints cleanly and exits 0.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
     # ---------- 1. 首页 ----------
     try:
         status, html, _ = get("/")
@@ -64,7 +69,9 @@ def main():
     try:
         status, html, _ = get("/?date=2026-08-11")
         has_select = 'selected' in html and '2026-08-11' in html
-        has_recs = "GTLB" in html or "QQQ" in html or "SM" in html or "recommendation" in html.lower()
+        # Cards render as rec-top sections; symbol names of that day's top-3
+        # vary with data, so also accept any rendered recommendation card.
+        has_recs = "rec-top" in html or "GTLB" in html or "QQQ" in html or "SM" in html
         log("2. 日期切换 2026-08-11", status == 200 and has_select and has_recs,
             f"select={has_select} 推荐数据={has_recs}")
     except Exception as e:
@@ -98,11 +105,11 @@ def main():
     try:
         status, html, _ = get("/backtest")
         markers = {
-            "历史回放": "历史回放" in html,
+            "分析师信号回测": "分析师信号回测" in html,
             "结算笔数": "结算笔数" in html or "filled" in html,
             "平均收益": "平均收益" in html or "avg_net_return" in html,
         }
-        log("5. 回测 /backtest", status == 200 and markers["历史回放"],
+        log("5. 回测 /backtest", status == 200 and markers["分析师信号回测"],
             json.dumps(markers, ensure_ascii=False))
     except Exception as e:
         log("5. 回测 /backtest", False, str(e))

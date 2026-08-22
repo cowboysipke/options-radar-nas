@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
@@ -402,7 +403,33 @@ CREATE TABLE IF NOT EXISTS instrument_metadata (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS gex_snapshots (
+    id INTEGER PRIMARY KEY,
+    snapshot_date TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    strike REAL NOT NULL,
+    call_gex REAL,
+    put_gex REAL,
+    net_gex REAL,
+    spot REAL,
+    regime TEXT,
+    call_wall REAL,
+    put_wall REAL,
+    gamma_flip REAL,
+    created_at TEXT NOT NULL,
+    UNIQUE(snapshot_date, symbol, strike)
+);
+
+CREATE TABLE IF NOT EXISTS flow_classifications (
+    event_key TEXT PRIMARY KEY,
+    flow_type TEXT NOT NULL,
+    flow_strength REAL,
+    source TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_signal_contract_time ON parsed_signals(contract_key, observed_at);
+CREATE INDEX IF NOT EXISTS idx_gex_snap_date ON gex_snapshots(snapshot_date, symbol);
 CREATE INDEX IF NOT EXISTS idx_rec_time ON recommendations(evaluated_at);
 CREATE INDEX IF NOT EXISTS idx_trade_status ON paper_trades(status);
 CREATE INDEX IF NOT EXISTS idx_outcome_rec ON signal_outcomes(recommendation_id);
@@ -619,6 +646,261 @@ class Database:
             observed_at=datetime.fromisoformat(str(row["observed_at"])),
             session_date=date.fromisoformat(str(row["session_date"])),
         ) for row in rows]
+
+    def flow_events_recent_for_symbol(self, symbol: str, days: int = 30) -> List[FlowEvent]:
+        """All flow events for one underlying within the last ``days`` days."""
+        since = (datetime.utcnow() - timedelta(days=max(1, int(days)))).isoformat()
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM flow_events WHERE symbol = ? AND observed_at >= ? ORDER BY observed_at DESC",
+                (str(symbol).upper(), since),
+            ).fetchall()
+        return [FlowEvent(
+            id=int(row["id"]), event_key=str(row["event_key"]), raw_message_id=row["raw_message_id"],
+            contract_key=str(row["contract_key"]), symbol=str(row["symbol"]),
+            expiry=date.fromisoformat(str(row["expiry"])), strike=float(row["strike"]),
+            option_type=str(row["option_type"]), premium=float(row["premium"]),
+            average_price=float(row["average_price"]) if row["average_price"] is not None else None,
+            dte=int(row["dte"]) if row["dte"] is not None else None,
+            observed_at=datetime.fromisoformat(str(row["observed_at"])),
+            session_date=date.fromisoformat(str(row["session_date"])),
+        ) for row in rows]
+
+    def save_gex_snapshot(self, snapshot_date: date, symbol: str, gex: Any) -> int:
+        """Persist one strike-level GEX snapshot for forward validation.
+
+        Upserts per (snapshot_date, symbol, strike) so a re-run on the same
+        trading day refreshes rather than duplicates.
+        """
+        strikes = list(getattr(gex, "strikes", []) or [])
+        net_gex = list(getattr(gex, "net_gex", []) or [])
+        call_gex = dict(getattr(gex, "call_gex", {}) or {})
+        put_gex = dict(getattr(gex, "put_gex", {}) or {})
+        created = datetime.utcnow().isoformat()
+        rows = []
+        for index, strike in enumerate(strikes):
+            rows.append((
+                snapshot_date.isoformat(), str(symbol).upper(), float(strike),
+                call_gex.get(strike), put_gex.get(strike),
+                float(net_gex[index]) if index < len(net_gex) else None,
+                getattr(gex, "spot", None), str(getattr(gex, "regime", "") or ""),
+                getattr(gex, "call_wall", None), getattr(gex, "put_wall", None),
+                getattr(gex, "gamma_flip", None), created,
+            ))
+        if not rows:
+            return 0
+        with self.connect() as connection:
+            connection.executemany(
+                """INSERT INTO gex_snapshots
+                (snapshot_date, symbol, strike, call_gex, put_gex, net_gex, spot,
+                 regime, call_wall, put_wall, gamma_flip, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(snapshot_date, symbol, strike) DO UPDATE SET
+                 call_gex=excluded.call_gex, put_gex=excluded.put_gex,
+                 net_gex=excluded.net_gex, spot=excluded.spot, regime=excluded.regime,
+                 call_wall=excluded.call_wall, put_wall=excluded.put_wall,
+                 gamma_flip=excluded.gamma_flip, created_at=excluded.created_at""",
+                rows,
+            )
+        return len(rows)
+
+    def gex_snapshot_summary(self) -> Dict[str, object]:
+        """Coverage of the GEX forward-validation store."""
+        with self.connect() as connection:
+            days = connection.execute(
+                "SELECT COUNT(DISTINCT snapshot_date) FROM gex_snapshots"
+            ).fetchone()[0]
+            symbols = connection.execute(
+                "SELECT COUNT(DISTINCT symbol) FROM gex_snapshots"
+            ).fetchone()[0]
+            latest = connection.execute(
+                "SELECT MAX(snapshot_date) FROM gex_snapshots"
+            ).fetchone()[0]
+        return {"days": int(days), "symbols": int(symbols), "latest_date": latest}
+
+    @staticmethod
+    def _hv_from_bars_json(payload: str) -> Optional[float]:
+        """Annualized 20-day close-to-close HV from a stored underlying series."""
+        try:
+            items = json.loads(payload)
+        except (ValueError, TypeError):
+            return None
+        if not isinstance(items, list):
+            return None
+        closes = []
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            try:
+                closes.append(float(item["c"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        if len(closes) < 10:
+            return None
+        returns = [math.log(closes[i] / closes[i - 1]) for i in range(1, len(closes))]
+        if len(returns) < 2:
+            return None
+        mean = sum(returns) / len(returns)
+        variance = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+        return math.sqrt(variance) * math.sqrt(252)
+
+    def hv_stratified_outcomes(self, horizon_days: int = 0) -> List[Dict[str, object]]:
+        """Test D: sell-side outcomes bucketed by historical HV at entry."""
+        with self.connect() as connection:
+            pairs = connection.execute(
+                """SELECT o.strategy_pnl_pct, o.strategy_premium_pct, s.underlying_bars_json
+                   FROM analyst_backtest_outcomes o
+                   JOIN analyst_backtest_series s
+                     ON s.analyst = o.analyst AND s.contract_key = o.contract_key
+                   WHERE o.horizon_days = ? AND o.strategy_pnl_pct IS NOT NULL""",
+                (int(horizon_days),),
+            ).fetchall()
+        buckets = {"低 HV <30%": [], "中 HV 30-60%": [], "高 HV >60%": [], "HV 未知": []}
+        for row in pairs:
+            hv = self._hv_from_bars_json(str(row["underlying_bars_json"] or ""))
+            pnl = float(row["strategy_pnl_pct"])
+            if hv is None:
+                key = "HV 未知"
+            elif hv < 0.30:
+                key = "低 HV <30%"
+            elif hv <= 0.60:
+                key = "中 HV 30-60%"
+            else:
+                key = "高 HV >60%"
+            buckets[key].append((pnl, row["strategy_premium_pct"]))
+        output = []
+        for key in ("低 HV <30%", "中 HV 30-60%", "高 HV >60%", "HV 未知"):
+            items = buckets[key]
+            if not items:
+                continue
+            pnls = [pnl for pnl, _ in items]
+            premiums = [premium for premium in (pr for _, pr in items) if premium is not None]
+            output.append({
+                "bucket": key, "n": len(items),
+                "win_rate": sum(1 for pnl in pnls if pnl > 0) / len(pnls),
+                "avg_pnl_pct": sum(pnls) / len(pnls),
+                "avg_premium_pct": sum(premiums) / len(premiums) if premiums else None,
+            })
+        return output
+
+    def score_stratified_outcomes(self, horizon_days: int = 0) -> List[Dict[str, object]]:
+        """Test D: sell-side outcomes bucketed by the stored recommendation score."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT r.payload_json, o.strategy_pnl_pct
+                   FROM recommendations r
+                   JOIN analyst_backtest_outcomes o ON o.contract_key = r.contract_key
+                   WHERE r.strategy_type = 'sell' AND o.horizon_days = ?
+                     AND o.strategy_pnl_pct IS NOT NULL""",
+                (int(horizon_days),),
+            ).fetchall()
+        buckets = {"≥65（B+）": [], "50-64（C）": [], "<50（D）": []}
+        for row in rows:
+            try:
+                payload = json.loads(str(row["payload_json"]))
+                score = float(payload.get("score", 0))
+            except (ValueError, TypeError):
+                continue
+            pnl = float(row["strategy_pnl_pct"])
+            if score >= 65:
+                key = "≥65（B+）"
+            elif score >= 50:
+                key = "50-64（C）"
+            else:
+                key = "<50（D）"
+            buckets[key].append(pnl)
+        output = []
+        for key in ("≥65（B+）", "50-64（C）", "<50（D）"):
+            pnls = buckets[key]
+            if not pnls:
+                continue
+            output.append({
+                "bucket": key, "n": len(pnls),
+                "win_rate": sum(1 for pnl in pnls if pnl > 0) / len(pnls),
+                "avg_pnl_pct": sum(pnls) / len(pnls),
+                "avg_premium_pct": None,
+            })
+        return output
+
+    def latest_gex_regime_before(self, symbol: str, before_date: date) -> Optional[str]:
+        """Most recent stored regime for a symbol strictly before a session."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT regime FROM gex_snapshots WHERE symbol = ? AND snapshot_date < ? "
+                "ORDER BY snapshot_date DESC LIMIT 1",
+                (str(symbol).upper(), before_date.isoformat()),
+            ).fetchone()
+        return str(row["regime"]) if row and row["regime"] else None
+
+    def save_flow_classification(
+        self, event_key: str, flow_type: str, strength: Optional[float], source: str,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                """INSERT INTO flow_classifications (event_key, flow_type, flow_strength, source, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(event_key) DO UPDATE SET flow_type=excluded.flow_type,
+                flow_strength=excluded.flow_strength, source=excluded.source,
+                updated_at=excluded.updated_at""",
+                (str(event_key), str(flow_type), strength, str(source), datetime.utcnow().isoformat()),
+            )
+
+    def flow_classification_map(self, event_keys: Sequence[str]) -> Dict[str, Dict[str, object]]:
+        keys = [str(key) for key in event_keys]
+        if not keys:
+            return {}
+        marks = ",".join("?" for _ in keys)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT event_key, flow_type, flow_strength, source FROM flow_classifications "
+                f"WHERE event_key IN ({marks})", keys,
+            ).fetchall()
+        return {
+            str(row["event_key"]): {
+                "flow_type": str(row["flow_type"]),
+                "flow_strength": row["flow_strength"],
+                "source": str(row["source"]),
+            }
+            for row in rows
+        }
+
+    def unclassified_flow_events(self, limit: int = 20) -> List[Tuple[str, Optional[int]]]:
+        """Recent flow events without a classification: (event_key, raw_message_id)."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                """SELECT f.event_key, f.raw_message_id
+                   FROM flow_events f
+                   LEFT JOIN flow_classifications c ON c.event_key = f.event_key
+                   WHERE c.event_key IS NULL
+                   ORDER BY f.observed_at DESC LIMIT ?""",
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [(str(row["event_key"]), row["raw_message_id"]) for row in rows]
+
+    def raw_message_text(self, raw_message_id: int) -> Optional[str]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT content FROM raw_messages WHERE id = ?", (int(raw_message_id),)
+            ).fetchone()
+        return str(row["content"]) if row else None
+
+    def flow_premium_for_event(self, event_key: str) -> Optional[float]:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT premium FROM flow_events WHERE event_key = ?", (str(event_key),)
+            ).fetchone()
+        return float(row["premium"]) if row and row["premium"] is not None else None
+
+    def premium_percentile(self, premium: float) -> float:
+        """0-100 percentile of one premium within all recorded flow events."""
+        with self.connect() as connection:
+            total = connection.execute("SELECT COUNT(*) FROM flow_events").fetchone()[0]
+            below = connection.execute(
+                "SELECT COUNT(*) FROM flow_events WHERE premium <= ?", (float(premium),)
+            ).fetchone()[0]
+        if not total:
+            return 0.0
+        return round(min(100.0, max(0.0, below / total * 100.0)), 1)
 
     def signals_for_session(self, session_date: date) -> List[ParsedSignal]:
         start = datetime.combine(session_date, datetime.min.time()).replace(hour=12)

@@ -1,7 +1,7 @@
 import json
 import tempfile
 import unittest
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 from options_radar.db import Database
@@ -74,6 +74,40 @@ class DashboardViewTests(unittest.TestCase):
         self.assertIn("US.B", content)
         self.assertIn("测试理由A", content)
         self.assertIn("59", content)
+
+    def test_gex_enrichment_only_for_latest_session(self):
+        class FakeDatabase:
+            def __init__(self, payloads):
+                self.payloads = payloads
+
+            def recommendations_for_date(self, session):
+                return [{"payload_json": json.dumps(p)} for p in self.payloads]
+
+            def flow_events_for_date(self, session):
+                return []
+
+        payloads = [
+            {"contract_key": "US.AAPL|2026-09-18|200|C", "score": 60, "strategy_type": "sell"},
+            {"contract_key": "US.NVDA|2026-09-18|200|P", "score": 55, "strategy_type": "buy"},
+        ]
+        service = object.__new__(OptionsRadarService)
+        service.database = FakeDatabase(payloads)
+        enriched = []
+
+        def fake_enrich(view):
+            enriched.append(view.get("contract_key"))
+
+        service._enrich_view_gex = fake_enrich
+        # Latest session: enrichment runs.
+        service._dashboard_date = lambda: date(2026, 8, 20)
+        service.dashboard_recommendations({"date": "2026-08-20"})
+        self.assertEqual(sorted(enriched), [
+            "US.AAPL|2026-09-18|200|C", "US.NVDA|2026-09-18|200|P",
+        ])
+        # Historical session: no live enrichment (instant, stored-only view).
+        enriched.clear()
+        service.dashboard_recommendations({"date": "2026-08-11"})
+        self.assertEqual(enriched, [])
 
     def test_portfolio_view_uses_cache_without_refreshing_ibkr(self):
         class FakeDatabase:

@@ -1,4 +1,4 @@
-﻿import http.client
+import http.client
 import hashlib
 import os
 import sqlite3
@@ -47,6 +47,9 @@ class SetupConfigTests(unittest.TestCase):
                 "flash_model": "deepseek-chat",
                 "pro_model": "deepseek-reasoner",
                 "report_delay": "75",
+                "poll_minutes": "10",
+                "session_start_hour": "9",
+                "session_end_hour": "16",
                 "deepseek_api_key": "must-not-be-saved",
                 "secret_refs.deepseek_api_key": "/tmp/attacker",
             }
@@ -73,6 +76,7 @@ class SetupConfigTests(unittest.TestCase):
                 "feishu_app_id": "cli_123",
                 "futu_user_id": "10001", "flash_model": "deepseek-chat",
                 "pro_model": "deepseek-reasoner", "report_delay": "75",
+                "poll_minutes": "6", "session_start_hour": "9", "session_end_hour": "16",
                 "futu_login_password": "login-secret",
             }
             saved = store.update_from_form(form)
@@ -89,7 +93,8 @@ class SetupConfigTests(unittest.TestCase):
                 "discord_server", "flow_channel", "pa_channel", "mr_channel", "qmr_channel", "fpd_channel",
                 "feishu_app_id", "ibkr_query_id",
             )}
-            values.update(timezone="UTC", flash_model="model-a", pro_model="model-b", report_delay="75")
+            values.update(timezone="UTC", flash_model="model-a", pro_model="model-b", report_delay="75",
+                          poll_minutes="6", session_start_hour="9", session_end_hour="16")
             with self.assertRaisesRegex(ValueError, "不可重复"):
                 store.update_from_form(values)
 

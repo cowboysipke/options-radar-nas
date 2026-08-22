@@ -64,10 +64,10 @@ class MassiveHistoryAdapter:
             bars = self.massive.aggregate_bars(symbol, end - timedelta(days=lookback_days), end, 1, "day")
         except Exception as exc:
             logger.debug("massive underlying bars failed: %s", type(exc).__name__)
-            return {"high": None, "low": None, "atr": None, "trend": None, "hv": None}
+            return {"high": None, "low": None, "atr": None, "trend": None, "hv": None, "ma20": None, "ma50": None}
         complete = [bar for bar in bars if _num(bar.get("h")) is not None and _num(bar.get("l")) is not None and _num(bar.get("c")) is not None]
         if not complete:
-            return {"high": None, "low": None, "atr": None, "trend": None, "hv": None}
+            return {"high": None, "low": None, "atr": None, "trend": None, "hv": None, "ma20": None, "ma50": None}
         latest = complete[-1]
         ranges: List[float] = []
         prior_close: Optional[float] = None
@@ -84,10 +84,13 @@ class MassiveHistoryAdapter:
             mean = sum(closes) / len(closes)
             trend = 1.0 if closes[-1] > mean else -1.0 if closes[-1] < mean else 0.0
         hv = _annualized_volatility([_num(bar["c"]) for bar in complete[-21:]])
+        ma20 = sum(closes[-20:]) / len(closes[-20:]) if closes else None
+        ma50_closes = [_num(bar["c"]) for bar in complete[-50:]]
+        ma50 = sum(ma50_closes) / len(ma50_closes) if ma50_closes else None
         return {
             "high": _num(latest["h"]), "low": _num(latest["l"]),
             "atr": sum(ranges[-14:]) / min(14, len(ranges)), "trend": trend,
-            "hv": hv,
+            "hv": hv, "ma20": ma20, "ma50": ma50,
         }
 
 
@@ -126,7 +129,7 @@ class AlpacaHistoryAdapter:
         )
         complete = [item for item in bars if None not in (item.high, item.low, item.close)]
         if not complete:
-            return {"high": None, "low": None, "atr": None, "trend": None, "hv": None}
+            return {"high": None, "low": None, "atr": None, "trend": None, "hv": None, "ma20": None, "ma50": None}
         latest = complete[-1]
         ranges: List[float] = []
         previous_close: Optional[float] = None
@@ -139,11 +142,14 @@ class AlpacaHistoryAdapter:
         closes = [float(item.close) for item in complete[-20:]]
         average = sum(closes) / len(closes)
         hv = _annualized_volatility([float(item.close) for item in complete[-21:]])
+        ma20 = sum(closes[-20:]) / len(closes[-20:]) if closes else None
+        ma50_closes = [float(item.close) for item in complete[-50:]]
+        ma50 = sum(ma50_closes) / len(ma50_closes) if ma50_closes else None
         return {
             "high": float(latest.high), "low": float(latest.low),
             "atr": sum(ranges[-14:]) / min(14, len(ranges)),
             "trend": 1.0 if closes[-1] > average else -1.0 if closes[-1] < average else 0.0,
-            "hv": hv,
+            "hv": hv, "ma20": ma20, "ma50": ma50,
         }
 
 

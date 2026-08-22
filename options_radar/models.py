@@ -128,6 +128,8 @@ class MarketSnapshot:
     underlying_previous_low: Optional[float] = None
     underlying_atr14: Optional[float] = None
     underlying_hv: Optional[float] = None
+    underlying_ma20: Optional[float] = None
+    underlying_ma50: Optional[float] = None
     atm_iv: Optional[float] = None
     iv_rank: Optional[float] = None
     hv_30d: Optional[float] = None

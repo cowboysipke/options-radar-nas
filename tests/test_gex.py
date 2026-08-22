@@ -15,9 +15,11 @@ class FakeOptionContract:
 
 
 class FakeSnapshot:
-    def __init__(self, open_interest, gamma):
+    def __init__(self, open_interest, gamma, iv=None, delta=None):
         self.open_interest = open_interest
         self.gamma = gamma
+        self.implied_volatility = iv
+        self.delta = delta
 
 
 class FakeFutu:
@@ -138,6 +140,51 @@ class GexTests(unittest.TestCase):
         self.assertEqual(result.strikes, [])
         self.assertEqual(result.regime, "mixed")
         self.assertEqual(result.expiry_count, 0)
+
+    def test_compute_gex_heatmap_rows_per_expiry_strike(self):
+        exp1 = date(2026, 8, 31)
+        exp2 = date(2026, 9, 30)
+        futu = FakeFutu(
+            contracts=[
+                FakeOptionContract("US.SPY|2026-08-31|95|C", "US.SPY|2026-08-31|95|C", exp1, 95.0, "C"),
+                FakeOptionContract("US.SPY|2026-08-31|95|P", "US.SPY|2026-08-31|95|P", exp1, 95.0, "P"),
+                FakeOptionContract("US.SPY|2026-09-30|105|C", "US.SPY|2026-09-30|105|C", exp2, 105.0, "C"),
+            ],
+            snapshots={
+                "US.SPY|2026-08-31|95|C": FakeSnapshot(100.0, 0.5),
+                "US.SPY|2026-08-31|95|P": FakeSnapshot(100.0, 0.25),
+                "US.SPY|2026-09-30|105|C": FakeSnapshot(100.0, 0.5),
+            },
+        )
+        result = compute_gex(futu, "SPY", 100.0, as_of=date(2026, 8, 1))
+        self.assertEqual(len(result.heatmap), 2)
+        by_key = {(row["expiry"], row["strike"]): row for row in result.heatmap}
+        self.assertEqual(by_key[("2026-08-31", 95.0)]["call_gex"], 5000.0)
+        self.assertEqual(by_key[("2026-08-31", 95.0)]["put_gex"], -2500.0)
+        self.assertEqual(by_key[("2026-08-31", 95.0)]["net_gex"], 2500.0)
+        self.assertEqual(by_key[("2026-09-30", 105.0)]["net_gex"], 5000.0)
+
+    def test_compute_gex_term_structure_from_same_snapshots(self):
+        exp1 = date(2026, 8, 31)
+        exp2 = date(2026, 9, 30)
+        futu = FakeFutu(
+            contracts=[
+                FakeOptionContract("US.SPY|2026-08-31|95|C", "US.SPY|2026-08-31|95|C", exp1, 95.0, "C"),
+                FakeOptionContract("US.SPY|2026-08-31|105|C", "US.SPY|2026-08-31|105|C", exp1, 105.0, "C"),
+                FakeOptionContract("US.SPY|2026-09-30|95|C", "US.SPY|2026-09-30|95|C", exp2, 95.0, "C"),
+                FakeOptionContract("US.SPY|2026-09-30|105|C", "US.SPY|2026-09-30|105|C", exp2, 105.0, "C"),
+            ],
+            snapshots={
+                "US.SPY|2026-08-31|95|C": FakeSnapshot(100.0, 0.5, iv=28.0),
+                "US.SPY|2026-08-31|105|C": FakeSnapshot(100.0, 0.5, iv=32.0),
+                "US.SPY|2026-09-30|95|C": FakeSnapshot(100.0, 0.5, iv=30.0),
+                "US.SPY|2026-09-30|105|C": FakeSnapshot(100.0, 0.5, iv=34.0),
+            },
+        )
+        result = compute_gex(futu, "SPY", 100.0, as_of=date(2026, 8, 1))
+        self.assertEqual(
+            result.term_structure, {"2026-08-31": 30.0, "2026-09-30": 32.0},
+        )
 
 
 if __name__ == "__main__":

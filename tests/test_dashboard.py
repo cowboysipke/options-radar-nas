@@ -36,6 +36,9 @@ class DashboardHttpTests(unittest.TestCase):
             "backtest": callback("backtest", {"win_rate": 0.61}),
             "providers": callback("providers", {"items": [{"provider": "ibkr", "connected": True}]}),
             "signals": callback("signals", []),
+            "gex": callback("gex", {"status": "empty", "symbol": "NVDA"}),
+            "dealer": callback("dealer", {"status": "ok", "symbol": "NVDA"}),
+            "spark": callback("spark", {"status": "ok", "symbol": "NVDA", "bars": []}),
             "provider_status": callback("provider_status", {"provider": "ibkr", "quality": "realtime"}),
             "provider_action": callback("provider_action", {"status": "ok"}),
             "market_provenance": callback("market_provenance", {"provider": "ibkr"}),
@@ -44,6 +47,7 @@ class DashboardHttpTests(unittest.TestCase):
             "ibkr_sync": callback("ibkr_sync", {"status": "ok", "positions": 2}),
             "futu_sync": callback("futu_sync", {"status": "ok", "synced": 4}),
             "feishu_test": callback("feishu_test", {"status": "queued", "queue_id": "q1"}),
+            "gex_snapshot": callback("gex_snapshot", {"status": "ok", "rows": 3}),
             "discord_login": callback("discord_login", {"status": "login_required", "message": "请登录"}),
         }
         self.server = create_setup_server(
@@ -112,6 +116,14 @@ class DashboardHttpTests(unittest.TestCase):
         self.assertIn("application/json; charset=utf-8", headers["Content-Type"])
         self.assertEqual(json.loads(body)["quote"], "实时")
 
+    def test_dealer_and_spark_get_apis_forward_symbol(self):
+        for path, name in (("/api/dealer", "dealer"), ("/api/spark", "spark")):
+            with self.subTest(path=path):
+                status, _, body = self.request("GET", path + "?symbol=nvda", headers={"Cookie": self.cookie})
+                self.assertEqual(status, 200)
+                self.assertEqual(json.loads(body)["symbol"], "NVDA")
+                self.assertIn((name, {"symbol": "nvda"}), self.calls)
+
     def test_post_callback_requires_csrf_and_forwards_payload(self):
         payload = json.dumps({"symbols": ["SAP"]}, ensure_ascii=False).encode("utf-8")
         headers = {"Cookie": self.cookie, "Content-Type": "application/json", "Content-Length": str(len(payload))}
@@ -124,6 +136,18 @@ class DashboardHttpTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["synced"], 4)
         self.assertIn(("futu_sync", {"symbols": ["SAP"]}), self.calls)
+
+    def test_gex_snapshot_action_requires_csrf_and_runs(self):
+        headers = {"Cookie": self.cookie, "X-CSRF-Token": self.csrf}
+        status, _, body = self.request("POST", "/api/actions/gex-snapshot", None, headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["rows"], 3)
+        self.assertIn(("gex_snapshot", {}), self.calls)
+        # Without CSRF the action is rejected.
+        no_csrf = {"Cookie": self.cookie}
+        status, _, body = self.request("POST", "/api/actions/gex-snapshot", None, no_csrf)
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body)["status"], "forbidden")
 
     def test_setup_page_only_exposes_one_time_futu_watchlist_import(self):
         status, _, page = self.request("GET", "/setup", headers={"Cookie": self.cookie})
@@ -138,6 +162,26 @@ class DashboardHttpTests(unittest.TestCase):
         self.assertIn("飞书 App Secret", page)
         self.assertIn("Massive API Key", page)
         self.assertIn("打开Discord登录", page)
+
+    def test_setup_page_exposes_discord_poll_settings(self):
+        status, _, page = self.request("GET", "/setup", headers={"Cookie": self.cookie})
+        self.assertEqual(status, 200)
+        self.assertIn('name="poll_minutes"', page)
+        self.assertIn('name="session_start_hour"', page)
+        self.assertIn('name="session_end_hour"', page)
+
+    def test_poll_schedule_parsers_validate(self):
+        from options_radar.setup_server import _hour, _minutes
+        self.assertEqual(_minutes("10"), 10)
+        with self.assertRaises(ValueError):
+            _minutes("0")
+        with self.assertRaises(ValueError):
+            _minutes("61")
+        self.assertEqual(_hour("23"), 23)
+        with self.assertRaises(ValueError):
+            _hour("24")
+        with self.assertRaises(ValueError):
+            _hour("-1")
 
     def test_json_serializes_datetime_results(self):
         from datetime import datetime

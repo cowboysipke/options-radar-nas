@@ -337,6 +337,30 @@ class DeepSeekProvider(AIProvider):
         }
         return self._text_operation("answer", prompt, use_pro=False)
 
+    def classify_flow_type(self, text: str) -> str:
+        """Doc 4 (P2): classify a flow message into Directional/Hedging/Spread/Closing/Unknown.
+
+        AI only reads the message semantics; the strength number stays
+        deterministic (premium percentile) on the caller side.
+        """
+        if not text or not text.strip():
+            return "Unknown"
+        prompt = {
+            "message": text.strip()[:900],
+            "instruction": (
+                "将该期权异常成交消息归类为 Directional / Hedging / Spread / Closing / Unknown 之一。"
+                "只返回分类单词本身，不要解释。"
+            ),
+        }
+        result = self._text_operation("classify_flow_type", prompt, use_pro=False)
+        if result.ai_degraded:
+            return "Unknown"
+        output = str(result.text or "").strip().lower()
+        for candidate in ("directional", "hedging", "spread", "closing"):
+            if candidate in output:
+                return candidate.capitalize()
+        return "Unknown"
+
     def translate_name(self, name: str) -> AITextResult:
         """Translate an English company name into simplified Chinese.
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .futu_provider import FutuOptionContract
 
@@ -35,6 +35,8 @@ class GexResult:
     atm_iv: Optional[float] = None
     put_skew: Optional[float] = None
     call_skew: Optional[float] = None
+    term_structure: Dict[str, float] = field(default_factory=dict)
+    heatmap: List[Dict[str, Any]] = field(default_factory=list)
     regime: str = "mixed"
     max_pos_gex: float = 0.0
     max_neg_gex: float = 0.0
@@ -147,7 +149,17 @@ def _vol_from_data(
 
     put_skew = (best_put[1] - atm_iv) if (best_put[1] is not None and atm_iv is not None) else None
     call_skew = (best_call[1] - atm_iv) if (best_call[1] is not None and atm_iv is not None) else None
-    return atm_iv, put_skew, call_skew
+
+    # Term structure: per-expiry ATM IV, from the same chain + snapshots.
+    term_structure: Dict[str, float] = {}
+    for expiry in sorted(by_expiry):
+        near = by_expiry[expiry]
+        min_dist = min(abs(c.strike - spot) for c in near)
+        atm_cs = [c for c in near if abs(c.strike - spot) == min_dist]
+        ivs = [iv for iv in (iv_of(c) for c in atm_cs) if iv is not None]
+        if ivs:
+            term_structure[expiry.isoformat()] = sum(ivs) / len(ivs)
+    return atm_iv, put_skew, call_skew, term_structure
 
 
 def compute_gex(
@@ -185,6 +197,7 @@ def compute_gex(
 
         call_gex: Dict[float, float] = {}
         put_gex: Dict[float, float] = {}
+        heat: Dict[Tuple[date, float], Tuple[float, float]] = {}
         expiries: Set[date] = set()
         for contract in eligible:
             snapshot = snapshots.get(contract.code)
@@ -208,7 +221,22 @@ def compute_gex(
                 contribution = -open_interest * lot_size * gamma
             bucket = call_gex if contract.option_type == "C" else put_gex
             bucket[contract.strike] = bucket.get(contract.strike, 0.0) + contribution
+            heat_key = (contract.expiry, contract.strike)
+            call_part, put_part = heat.get(heat_key, (0.0, 0.0))
+            if contract.option_type == "C":
+                heat[heat_key] = (call_part + contribution, put_part)
+            else:
+                heat[heat_key] = (call_part, put_part + contribution)
             expiries.add(contract.expiry)
+
+        heatmap = [
+            {
+                "expiry": expiry.isoformat(), "strike": strike,
+                "call_gex": call_part, "put_gex": put_part,
+                "net_gex": call_part + put_part,
+            }
+            for (expiry, strike), (call_part, put_part) in sorted(heat.items())
+        ]
 
         strikes = sorted(set(call_gex) | set(put_gex))
         net_gex = [
@@ -233,9 +261,9 @@ def compute_gex(
         flip = _gamma_flip(strikes, net_gex)
         zero_gamma = flip if flip is not None else _closest_to_zero(strikes, net_gex)
         try:
-            atm_iv, put_skew, call_skew = _vol_from_data(eligible, snapshots, spot)
+            atm_iv, put_skew, call_skew, term_structure = _vol_from_data(eligible, snapshots, spot)
         except Exception:
-            atm_iv, put_skew, call_skew = None, None, None
+            atm_iv, put_skew, call_skew, term_structure = None, None, None, {}
 
         return GexResult(
             symbol=symbol,
@@ -251,6 +279,8 @@ def compute_gex(
             atm_iv=atm_iv,
             put_skew=put_skew,
             call_skew=call_skew,
+            term_structure=term_structure,
+            heatmap=heatmap,
             regime=_regime(net_gex),
             max_pos_gex=max_pos_gex,
             max_neg_gex=max_neg_gex,

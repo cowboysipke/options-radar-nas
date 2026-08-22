@@ -1,4 +1,4 @@
-﻿"""Lightweight authenticated Chinese dashboard for the NAS container.
+"""Lightweight authenticated Chinese dashboard for the NAS container.
 
 The module intentionally uses only the Python standard library.  Runtime
 services are connected through named callbacks so the HTTP layer has no broker,
@@ -23,7 +23,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import yaml
 
@@ -97,7 +97,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "exit_before_expiry_days": 3,
     },
     "backtest": {"use_synthetic_when_unavailable": True},
-    "schedule": {"report_delay_minutes": 75},
+    "schedule": {"report_delay_minutes": 75, "discord_poll_minutes": 6,
+                 "session_start_hour": 9, "session_end_hour": 16},
     "secret_refs": {
         "deepseek_api_key": "/data/secrets/deepseek_api_key",
         "feishu_app_secret": "/data/secrets/feishu_app_secret",
@@ -192,6 +193,20 @@ def _delay(value: str) -> int:
     return result
 
 
+def _minutes(value: str) -> int:
+    result = int(value)
+    if not 1 <= result <= 60:
+        raise ValueError("间隔需为1至60分钟")
+    return result
+
+
+def _hour(value: str) -> int:
+    result = int(value)
+    if not 0 <= result <= 23:
+        raise ValueError("小时需为0至23")
+    return result
+
+
 FIELDS = (
     Field("timezone", "timezone", "时区", _plain),
     Field("discord_server", "discord.source_server", "Discord服务器", _plain),
@@ -204,6 +219,9 @@ FIELDS = (
     Field("flash_model", "ai.flash_model", "DeepSeek日常模型", _model),
     Field("pro_model", "ai.pro_model", "DeepSeek复核模型", _model),
     Field("report_delay", "schedule.report_delay_minutes", "收盘后日报延迟（分钟）", _delay),
+    Field("poll_minutes", "schedule.discord_poll_minutes", "Discord采集间隔（分钟）", _minutes),
+    Field("session_start_hour", "schedule.session_start_hour", "采集开始小时（美东0-23）", _hour),
+    Field("session_end_hour", "schedule.session_end_hour", "采集结束小时（美东0-23）", _hour),
 )
 
 
@@ -494,6 +512,8 @@ GET_APIS = {
     "/api/providers": "providers",
     "/api/signals": "signals",
     "/api/gex": "gex",
+    "/api/dealer": "dealer",
+    "/api/spark": "spark",
 }
 
 POST_APIS = {
@@ -505,6 +525,9 @@ POST_APIS = {
     "/api/actions/reevaluate": "reevaluate",
     "/api/actions/report": "report",
     "/api/actions/backup": "backup",
+    "/api/actions/gex-snapshot": "gex_snapshot",
+    "/api/actions/alerts-check": "alerts_check",
+    "/api/actions/flow-classify": "flow_classify",
     "/api/actions/feishu-test": "feishu_test",
     "/api/actions/discord-login": "discord_login",
     "/api/actions/discord-refresh-qr": "discord_refresh_qr",
@@ -775,20 +798,29 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
         return f'''<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(title)}</title>
 <style>
-:root{{--ink:#1d1d1f;--muted:#86868b;--bg:#f5f5f7;--card:#fff;--line:#e8e8ed;--up:#d70015;--down:#00a651;--accent:#0071e3}}
-*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}}
-header{{position:sticky;top:0;z-index:10;background:rgba(245,245,247,.82);backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid var(--line);padding:12px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}}
-.logo{{font-size:17px;font-weight:700;letter-spacing:-.01em;white-space:nowrap}}header small{{color:var(--muted);font-size:12px}}
-nav{{display:flex;gap:2px;margin-left:auto}}nav a{{color:var(--ink);text-decoration:none;padding:6px 12px;border-radius:20px;font-size:13px;white-space:nowrap}}nav a:hover{{background:#e5e5ea}}nav a.active{{background:var(--ink);color:#fff}}
-main{{max-width:1280px;margin:0 auto;padding:28px 20px 60px}}
-h1{{font-size:28px;font-weight:700;letter-spacing:-.02em;margin:0 0 4px}}h2{{font-size:20px;font-weight:600;margin:26px 0 10px}}.sub{{color:var(--muted);margin:0 0 18px}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:14px}}
+:root{{--ink:#1d1d1f;--muted:#86868b;--bg:#f5f5f7;--card:#fff;--line:#e8e8ed;--up:#d70015;--down:#00a651;--accent:#0071e3;--control-h:36px}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--ink);font:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased}}
+header{{position:sticky;top:0;z-index:10;background:rgba(245,245,247,.82);backdrop-filter:saturate(180%) blur(20px);border-bottom:1px solid var(--line);padding:10px 24px;display:flex;align-items:center;gap:20px;flex-wrap:wrap}}
+.logo{{font-size:16px;font-weight:700;letter-spacing:-.01em;white-space:nowrap}}header small{{color:var(--muted);font-size:12px}}
+nav{{display:flex;gap:2px;margin-left:auto}}nav a{{color:var(--ink);text-decoration:none;padding:6px 12px;border-radius:18px;font-size:13px;white-space:nowrap}}nav a:hover{{background:#e5e5ea}}nav a.active{{background:var(--ink);color:#fff}}
+main{{max-width:1440px;margin:0 auto;padding:24px 20px 60px}}
+h1{{font-size:26px;font-weight:700;letter-spacing:-.02em;margin:0 0 4px}}h2{{font-size:16px;font-weight:600;margin:0 0 10px}}.sub{{color:var(--muted);margin:0 0 14px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}}
+.tiles{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:16px 14px}}
+.tile b{{display:block;font-size:11px;font-weight:500;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}}
+.tile span{{display:block;font-size:17px;font-weight:600;margin-top:3px}}
 .table-wrap{{overflow-x:auto;-webkit-overflow-scrolling:touch}} .table-wrap table{{min-width:640px}}
-.card{{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.04)}}
+.card{{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.04)}}
 .metric{{font-size:26px;font-weight:700;letter-spacing:-.02em}}
 .muted{{color:var(--muted)}}small{{color:var(--muted)}}
 label{{display:block;margin:13px 0 5px;font-weight:600}}input{{width:100%;padding:10px 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:14px}}
 button,.button{{display:inline-block;margin:9px 6px 0 0;padding:9px 18px;border:0;border-radius:20px;background:var(--accent);color:#fff;font-weight:600;font-size:14px;text-decoration:none;cursor:pointer}}button:hover{{opacity:.88}}button.secondary{{background:#e5e5ea;color:var(--ink)}}
+.toolbar{{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 14px}}
+.toolbar input,.toolbar select{{height:var(--control-h);padding:0 12px;border:1px solid #d2d2d7;border-radius:10px;font-size:13px;margin:0}}
+.toolbar button{{height:var(--control-h);padding:0 16px;border-radius:10px;margin:0;font-size:13px}}
+.toolbar label{{margin:0;font-size:13px;font-weight:600;white-space:nowrap}}
+.form-grid{{display:grid;grid-template-columns:1fr 1fr;gap:0 20px}}
+.form-grid label{{margin:10px 0 4px}}
 .ok,.error{{padding:10px 14px;border-radius:10px}} .ok{{background:#e9f9ef}} .error{{background:#fdecec}}
 pre{{white-space:pre-wrap;word-break:break-word;background:#f0f0f2;color:#3a3a3c;padding:14px;border-radius:12px;max-height:520px;overflow:auto;font-size:12px}}code{{background:#eef0f3;padding:2px 6px;border-radius:5px}}
 .status{{display:grid;grid-template-columns:1fr auto;gap:8px}}
@@ -798,8 +830,49 @@ summary{{cursor:pointer;font-weight:600}}
 ul.analyst-votes{{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-wrap:wrap;gap:6px}}ul.analyst-votes li{{background:#f0f0f2;border:1px solid var(--line);border-radius:8px;padding:4px 10px;font-size:13px}}
 .market-banner{{background:#eef2ff;color:#0037c1;border:1px solid #d6e0f5;border-radius:10px;padding:8px 14px;font-size:13px;margin-bottom:14px}}
 .risk-inline{{margin:6px 0 0;font-size:12px;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px;align-items:center}}.risk-inline strong{{color:#b25000;font-size:12px}}.risk-chip{{background:#fff8f0;border:1px solid #f0dcc8;color:#8a5a2b;border-radius:6px;padding:2px 8px;font-size:11.5px;white-space:nowrap}}
+.rec .rec-top{{display:flex;justify-content:space-between;align-items:baseline;gap:10px;flex-wrap:wrap}}
+.rec-sym{{font-size:15px;font-weight:700}}
+.rec-leg{{font-size:12px;color:var(--muted);margin-left:6px}}
+.rec-score{{display:flex;align-items:baseline;gap:6px}}
+.rec-score .score-num{{font-size:26px;font-weight:700;letter-spacing:-.02em}}
+.rec-score .grade{{color:var(--muted);font-size:13px}}
+.rec-meta{{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0 10px;font-size:12px}}
+.rec-grid{{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:10px}}
+.rec-kv{{background:#f7f7fa;border-radius:10px;padding:6px 10px;min-width:0}}
+.rec-kv.bidask{{grid-column:1/-1}}
+.rec-kv b{{display:block;font-size:10.5px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.05em}}
+.rec-kv span{{display:block;font-size:13.5px;font-weight:600;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.rec-state{{padding:2px 8px;border-radius:8px;font-size:11px;font-weight:600}}
+.rec-state.ok{{background:#e9f9ef;color:#00a651}}
+.rec-state.flow{{background:#eef2ff;color:#0037c1}}
+.rec-state.warn{{background:#fff8f0;color:#b25000}}
+.rec-strategy{{margin-bottom:10px;padding:9px 11px;background:#eef7ef;border-radius:10px;font-size:13px}}
+.rec-strategy .rec-hint{{margin-top:4px;font-size:12.5px}}
+.rec-strategy .rec-warn{{color:#d70015;font-weight:600;margin-top:4px;font-size:12.5px}}
+.rec-gex{{padding:9px 11px;background:#f7f7fb;border-radius:10px;font-size:13px}}
+.rec-gex-head{{display:flex;align-items:center;gap:8px}}
+.rec-gex-head .gex-btn{{margin:0 0 0 auto;padding:3px 10px;font-size:12px}}
+.rec-walls{{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}}
+.wall-chip{{background:#fff;border:1px solid var(--line);border-radius:8px;padding:1px 8px;font-size:11.5px;font-weight:600}}
+.info{{position:relative;display:inline-block;cursor:help;color:var(--accent);font-size:14px;font-weight:700;padding:0 3px}}
+.info .tip{{display:none;position:absolute;left:30px;top:-8px;z-index:60;width:340px;max-width:78vw;background:#1d1d1f;color:#f5f5f7;border-radius:10px;padding:12px 14px;font-size:12.5px;line-height:1.65;text-align:left;box-shadow:0 10px 28px rgba(0,0,0,.3)}}
+.info:hover .tip{{display:block}}
+.spark svg{{display:block}}
+.layout{{display:grid;grid-template-columns:minmax(0,1fr) 292px;gap:18px;align-items:start}}
+.main-col{{min-width:0}}
+.sidebar{{display:flex;flex-direction:column;gap:12px;position:sticky;top:70px}}
+.sidebar #action-result:empty{{display:none}}
+.sidebar .card{{padding:14px;margin-bottom:0}}
+.sidebar form{{display:block;margin:0}}
+.sidebar form button{{width:100%;margin:5px 0 0;padding:8px 12px;font-size:13px;border-radius:14px}}
+.sidebar label{{margin:0 0 4px;font-size:13px}}
+.sidebar select{{width:100%;margin:0;padding:8px 10px}}
+.toolbar{{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 14px}}
+.grid .card:hover{{box-shadow:0 6px 16px rgba(0,0,0,.08)}}
+.card .grid .card{{margin-bottom:0}}
+@media(max-width:1080px){{.layout{{grid-template-columns:1fr}}.sidebar{{position:static;flex-direction:row;flex-wrap:wrap;align-items:flex-start}}.sidebar .card{{flex:1 1 240px}}}}
 @media(max-width:900px){{.grid{{grid-template-columns:repeat(auto-fill,minmax(200px,1fr))}}h1{{font-size:24px}}}}
-@media(max-width:640px){{header{{padding:10px 14px}}nav{{width:100%;margin-left:0;overflow-x:auto}}h1{{font-size:22px}}.grid{{grid-template-columns:1fr}}main{{padding:16px 12px 48px}}.card{{padding:14px}}}}
+@media(max-width:640px){{header{{padding:10px 14px}}nav{{width:100%;margin-left:0;overflow-x:auto}}h1{{font-size:22px}}.grid{{grid-template-columns:1fr}}main{{padding:16px 12px 48px}}.card{{padding:14px}}.form-grid{{grid-template-columns:1fr}}}}
 </style></head><body><header><span class="logo">Options Radar</span><small>版本 {html.escape(BUILD_VERSION)} · {html.escape(BUILD_SHA[:12])}</small><nav>{nav}</nav></header><main>{content}</main>
 <script>
 document.querySelectorAll('form[data-ajax="1"]').forEach(function(form){{
@@ -859,7 +932,13 @@ function attachTableFilters(opts) {{
 }}
 attachTableFilters({{search:'signal-search',selects:['signal-dir','signal-status'],expand:'signal-expand',collapse:'signal-collapse'}});
 attachTableFilters({{search:'portfolio-search',selects:['portfolio-hold'],expand:'portfolio-expand',collapse:'portfolio-collapse'}});
+document.querySelectorAll('select[data-goto]').forEach(function(sel) {{
+  sel.addEventListener('change', function() {{
+    location.href = sel.getAttribute('data-goto') + encodeURIComponent(sel.value);
+  }});
+}});
 let gexZoom = 1;
+let gexLayers = {{ma20: true, ma50: true, put_wall: true, call_wall: true, flip: true, spot: true, support: true, resistance: true, flow: true}};
 function gexCumulative(gex) {{
   const cum = []; let acc = 0;
   for (let i = 0; i < gex.length; i++) {{ acc += gex[i]; cum.push(acc); }}
@@ -882,6 +961,7 @@ function renderGexChart(container, data) {{
   let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:' + (gexZoom * 100) + '%;background:#fff;border:1px solid #e8e8ed;border-radius:8px">';
   svg += '<line x1="' + padL + '" y1="' + yBar(0) + '" x2="' + (W - padR) + '" y2="' + yBar(0) + '" stroke="#c9c9cf" stroke-width="1"/>';
   const barWidth = Math.max(2, (W - padL - padR) / strikes.length * 0.7);
+  const gexHits = [];
   for (let i = 0; i < strikes.length; i++) {{
     const g = gex[i];
     const zeroY = yBar(0), barY = yBar(g);
@@ -890,6 +970,7 @@ function renderGexChart(container, data) {{
     if (h > 0.5) {{
       svg += '<rect x="' + (x(strikes[i]) - barWidth / 2) + '" y="' + top + '" width="' + barWidth + '" height="' + h + '" fill="' + color + '" opacity="0.85"/>';
     }}
+    gexHits.push({{x: x(strikes[i]), strike: strikes[i], gex: g, cum: cum[i]}});
   }}
   let pts = '';
   for (let i = 0; i < strikes.length; i++) {{
@@ -918,12 +999,213 @@ function renderGexChart(container, data) {{
   svg += '<text x="' + padL + '" y="' + (H - padB + 14) + '" fill="#86868b" font-size="10">' + minS + '</text>';
   svg += '<text x="' + (W - padR) + '" y="' + (H - padB + 14) + '" text-anchor="end" fill="#86868b" font-size="10">' + maxS + '</text>';
   svg += '</svg>';
+  window.gexCurveHits = gexHits;
+  container.innerHTML = '<div style="position:relative">' + svg
+    + '<div id="gex-curve-tip" style="display:none;position:absolute;z-index:20;background:#1d1d1f;color:#fff;font-size:11.5px;line-height:1.5;padding:6px 10px;border-radius:8px;white-space:nowrap;pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,.25)"></div>'
+    + '</div>';
+}}
+function dealerFetch(symbol) {{
+  return fetch('/api/dealer?symbol=' + encodeURIComponent(symbol)).then(function(r){{ return r.json(); }});
+}}
+function escText(s) {{
+  const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML;
+}}
+function renderCandleChart(container, data) {{
+  const bars = (data && data.bars) || [];
+  if (!bars.length) {{ container.innerHTML = '<span class="muted">暂无日K数据</span>'; return; }}
+  const W = 800, H = 320, padL = 58, padR = 78, padT = 16, padB = 30;
+  function eventTime(iso) {{
+    let text = String(iso || '');
+    if (text && !/[zZ]|[+-]\d\d:?\d\d$/.test(text)) text += 'Z';  // DB stores naive UTC
+    try {{ return new Date(text).getTime(); }} catch(_) {{ return null; }}
+  }}
+  const events = (data.flow_events || []).map(function(ev) {{ return {{ev: ev, t: eventTime(ev.observed_at)}}; }})
+    .filter(function(item) {{ return item.t != null; }});
+  let minT = Infinity, maxT = -Infinity, minP = Infinity, maxP = -Infinity;
+  bars.forEach(function(b) {{
+    minT = Math.min(minT, b.t); maxT = Math.max(maxT, b.t);
+    minP = Math.min(minP, b.l); maxP = Math.max(maxP, b.h);
+  }});
+  events.forEach(function(item) {{ minT = Math.min(minT, item.t); maxT = Math.max(maxT, item.t); }});
+  if (data.spot != null) {{ minP = Math.min(minP, data.spot); maxP = Math.max(maxP, data.spot); }}
+  const gx = data.gex || {{}};
+  const ps = data.price_structure || {{}};
+  [gx.put_wall, gx.call_wall, gx.gamma_flip].forEach(function(w) {{
+    if (w != null) {{ minP = Math.min(minP, w); maxP = Math.max(maxP, w); }}
+  }});
+  [ps.support, ps.resistance].forEach(function(v) {{
+    if (v != null) {{ minP = Math.min(minP, v); maxP = Math.max(maxP, v); }}
+  }});
+  (ps.ma20 || []).concat(ps.ma50 || []).forEach(function(v) {{
+    if (v != null) {{ minP = Math.min(minP, v); maxP = Math.max(maxP, v); }}
+  }});
+  if (maxP === minP) maxP = minP + 1;
+  const x = function(t) {{ return padL + (t - minT) / ((maxT - minT) || 1) * (W - padL - padR); }};
+  const y = function(p) {{ return padT + (1 - (p - minP) / (maxP - minP)) * (H - padT - padB); }};
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:' + (gexZoom * 100) + '%;background:#fff;border:1px solid #e8e8ed;border-radius:8px">';
+  const cw = Math.max(2, (W - padL - padR) / bars.length * 0.65);
+  const hits = {{lines: [], maSeries: [], dots: [], candles: []}};
+  bars.forEach(function(b) {{
+    const up = b.c >= b.o;
+    const color = up ? '#d70015' : '#00a651';
+    const cx = x(b.t);
+    svg += '<line x1="' + cx + '" y1="' + y(b.h) + '" x2="' + cx + '" y2="' + y(b.l) + '" stroke="' + color + '" stroke-width="1"/>';
+    const bodyTop = y(Math.max(b.o, b.c));
+    const bodyH = Math.max(1, Math.abs(y(b.o) - y(b.c)));
+    svg += '<rect x="' + (cx - cw / 2) + '" y="' + bodyTop + '" width="' + cw + '" height="' + bodyH + '" fill="' + color + '"/>';
+    hits.candles.push({{cx: cx, t: b.t, o: b.o, h: b.h, l: b.l, c: b.c}});
+  }});
+  const L = gexLayers || {{}};
+  function hline(px, color, dash, key, label, explain) {{
+    if (px == null) return;
+    const py = y(px);
+    svg += '<line class="gex-layer" data-key="' + key + '" x1="' + padL + '" y1="' + py + '" x2="' + (W - padR) + '" y2="' + py + '" stroke="' + color + '" stroke-width="1.2" stroke-dasharray="' + dash + '" opacity="0.85"/>';
+    hits.lines.push({{key: key, y: py, text: label + ' $' + px + ' · ' + explain}});
+  }}
+  if (L.put_wall !== false) hline(gx.put_wall, '#d70015', '5,3', 'put_wall', 'Put Wall', '做市商下方支撑');
+  if (L.call_wall !== false) hline(gx.call_wall, '#00a651', '5,3', 'call_wall', 'Call Wall', '做市商上方阻力');
+  if (L.flip !== false) hline(gx.gamma_flip, '#f0a500', '3,3', 'flip', 'Gamma Flip', '净GEX由正转负，波动放大区');
+  if (L.support !== false) hline(ps.support, '#b25000', '1,3', 'support', '支撑', '近20日低点');
+  if (L.resistance !== false) hline(ps.resistance, '#8a6d2f', '1,3', 'resistance', '阻力', '近20日高点');
+  if (L.spot !== false && data.spot != null) {{
+    const spotPy = y(data.spot);
+    svg += '<line class="gex-layer" data-key="spot" x1="' + padL + '" y1="' + spotPy + '" x2="' + (W - padR) + '" y2="' + spotPy + '" stroke="#86868b" stroke-width="1.2" stroke-dasharray="2,3"/>';
+    hits.lines.push({{key: 'spot', y: spotPy, text: '现价 $' + Number(data.spot).toFixed(2)}});
+    const lastBar = bars[bars.length - 1];
+    const label = '$' + Number(data.spot).toFixed(2);
+    const tw = label.length * 6.1 + 10;
+    svg += '<rect x="' + (W - padR + 3) + '" y="' + (spotPy - 8) + '" width="' + tw + '" height="14" rx="3" fill="' + (lastBar && lastBar.c >= lastBar.o ? '#d70015' : '#00a651') + '" opacity="0.94"/>';
+    svg += '<text x="' + (W - padR + 8) + '" y="' + (spotPy + 2.5) + '" fill="#fff" font-size="10">' + escText(label) + '</text>';
+  }}
+  function maPolyline(values, color, key, label) {{
+    if (!values || !values.length) return;
+    let d = '';
+    const pts = [];
+    values.forEach(function(v, i) {{
+      if (v == null || bars[i] == null) {{ d = ''; return; }}
+      const px = x(bars[i].t), py = y(v);
+      d += (d ? ' ' : '') + px.toFixed(1) + ',' + py.toFixed(1);
+      pts.push({{x: px, y: py, price: v}});
+    }});
+    if (d) svg += '<polyline points="' + d + '" fill="none" stroke="' + color + '" stroke-width="1.4" opacity="0.95"/>';
+    hits.maSeries.push({{key: key, label: label, pts: pts}});
+  }}
+  if (L.ma20 !== false) maPolyline(ps.ma20, '#f0a500', 'ma20', 'MA20 均线');
+  if (L.ma50 !== false) maPolyline(ps.ma50, '#0071e3', 'ma50', 'MA50 均线');
+  if (L.flow !== false) {{
+    (data.flow_events || []).forEach(function(ev) {{
+      let t = eventTime(ev.observed_at);
+      if (t == null) return;
+      let closeP = null;
+      for (let i = 0; i < bars.length; i++) {{ if (bars[i].t >= t) {{ closeP = bars[i].c; break; }} }}
+      if (closeP == null) closeP = bars[bars.length - 1].c;
+      const color = (ev.option_type === 'P') ? '#d70015' : '#00a651';
+      const cx = x(t), cy = y(closeP);
+      svg += '<circle cx="' + cx + '" cy="' + cy + '" r="3.2" fill="' + color + '" stroke="#fff" stroke-width="1"/>';
+      hits.dots.push({{cx: cx, cy: cy, text: escText(ev.contract_key + ' · ' + (ev.option_type === 'P' ? 'PUT' : 'CALL') + ' · $' + ev.premium + ' · ' + String(ev.observed_at || '').slice(0, 16))}});
+    }});
+  }}
+  const divisions = 5;
+  for (let i = 0; i <= divisions; i++) {{
+    const pv = minP + (maxP - minP) * i / divisions;
+    const gy = y(pv);
+    svg += '<line x1="' + padL + '" y1="' + gy + '" x2="' + (W - padR) + '" y2="' + gy + '" stroke="#ececf0" stroke-width="1"/>';
+    svg += '<text x="' + (padL - 6) + '" y="' + (gy + 3.5) + '" text-anchor="end" fill="#86868b" font-size="10">' + Number(pv).toFixed(1) + '</text>';
+  }}
+  function dayLabel(t) {{
+    const d = new Date(t); return (d.getMonth() + 1) + '/' + d.getDate();
+  }}
+  svg += '<text x="' + padL + '" y="' + (H - 8) + '" fill="#86868b" font-size="10">' + dayLabel(minT) + '</text>';
+  const midT = minT + (maxT - minT) / 2;
+  svg += '<text x="' + x(midT) + '" y="' + (H - 8) + '" text-anchor="middle" fill="#86868b" font-size="10">' + dayLabel(midT) + '</text>';
+  svg += '<text x="' + (W - padR) + '" y="' + (H - 8) + '" text-anchor="end" fill="#86868b" font-size="10">' + dayLabel(maxT) + '</text>';
+  svg += '<line id="gex-cross" x1="0" y1="0" x2="0" y2="0" stroke="#1d1d1f" stroke-width="0.8" stroke-dasharray="3,3" display="none" pointer-events="none"/>';
+  svg += '</svg>';
+  window.gexCandleHits = hits;
+  function layerChip(key, color, label, value, dashed) {{
+    const on = gexLayers[key] !== false;
+    const shown = value == null ? '—' : (typeof value === 'number' ? '$' + value : value);
+    const swatch = '<span style="display:inline-block;width:20px;height:0;border-top:2px ' + (dashed === false ? 'solid' : 'dashed') + ' ' + color + ';vertical-align:middle;margin-right:6px"></span>';
+    return '<button type="button" data-layer="' + key + '" style="' + (on ? '' : 'opacity:.38;') + 'display:inline-flex;align-items:center;margin:2px 10px 2px 0;padding:3px 10px;border:1px solid ' + (on ? '#d2d2d7' : '#ececf0') + ';border-radius:14px;background:' + (on ? '#fafafa' : '#fff') + ';color:#1d1d1f;font-size:11.5px;cursor:pointer">' + swatch + escText(label) + ' ' + escText(shown) + '</button>';
+  }}
+  function lastValue(values) {{
+    if (!values) return null;
+    for (let i = values.length - 1; i >= 0; i--) {{ if (values[i] != null) return values[i]; }}
+    return null;
+  }}
+  const legend = '<div style="margin:2px 0 6px;color:#86868b;font-size:11px">图层（点击开关）：</div><div style="margin:0 0 8px">'
+    + layerChip('ma20', '#f0a500', 'MA20', lastValue(ps.ma20), false)
+    + layerChip('ma50', '#0071e3', 'MA50', lastValue(ps.ma50), false)
+    + layerChip('put_wall', '#d70015', 'Put Wall', gx.put_wall)
+    + layerChip('call_wall', '#00a651', 'Call Wall', gx.call_wall)
+    + layerChip('flip', '#f0a500', 'Flip', gx.gamma_flip)
+    + layerChip('spot', '#86868b', '现价', data.spot)
+    + layerChip('support', '#b25000', '支撑', ps.support)
+    + layerChip('resistance', '#8a6d2f', '阻力', ps.resistance)
+    + layerChip('flow', '#0071e3', 'Flow事件', (data.flow_events || []).length + ' 条', false)
+    + '</div>';
+  container.innerHTML = legend
+    + '<div style="position:relative">' + svg
+    + '<div id="gex-tip" style="display:none;position:absolute;z-index:20;background:#1d1d1f;color:#fff;font-size:11.5px;line-height:1.5;padding:6px 10px;border-radius:8px;white-space:nowrap;pointer-events:none;box-shadow:0 4px 14px rgba(0,0,0,.25)"></div>'
+    + '</div>';
+}}
+function renderHeatmap(container, gexData) {{
+  const cells = (gexData && gexData.heatmap) || [];
+  if (!cells.length) {{ container.innerHTML = '<span class="muted">暂无数据</span>'; return; }}
+  const expiries = [], strikes = [];
+  cells.forEach(function(c) {{
+    if (expiries.indexOf(c.expiry) < 0) expiries.push(c.expiry);
+    if (strikes.indexOf(c.strike) < 0) strikes.push(c.strike);
+  }});
+  expiries.sort(); strikes.sort(function(a, b) {{ return a - b; }});
+  const cellW = 36, cellH = 22, padL = 92, padT = 12, padR = 10, padB = 40;
+  const W = padL + padR + strikes.length * cellW;
+  const H = padT + padB + expiries.length * cellH;
+  const map = {{}};
+  cells.forEach(function(c) {{ map[c.expiry + '|' + c.strike] = c; }});
+  let maxAbs = 0;
+  cells.forEach(function(c) {{ maxAbs = Math.max(maxAbs, Math.abs(c.net_gex)); }});
+  maxAbs = maxAbs || 1;
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:' + W + 'px;max-width:100%;background:#fff;border:1px solid #e8e8ed;border-radius:8px">';
+  expiries.forEach(function(exp, ri) {{
+    svg += '<text x="' + (padL - 6) + '" y="' + (padT + ri * cellH + cellH / 2 + 4) + '" text-anchor="end" fill="#86868b" font-size="10">' + escText(exp.slice(5).replace('-', '/')) + '</text>';
+    strikes.forEach(function(strike, ci) {{
+      const cell = map[exp + '|' + strike];
+      const v = cell ? cell.net_gex : 0;
+      const x = padL + ci * cellW, y = padT + ri * cellH;
+      const color = v >= 0 ? '#00a651' : '#d70015';
+      const opacity = 0.12 + 0.88 * Math.min(1, Math.abs(v) / maxAbs);
+      svg += '<rect x="' + (x + 1) + '" y="' + (y + 1) + '" width="' + (cellW - 2) + '" height="' + (cellH - 2) + '" fill="' + color + '" opacity="' + opacity.toFixed(2) + '" rx="2">'
+        + '<title>' + escText(exp + ' · $' + strike + ' · Net GEX ' + Number(v).toFixed(0)) + '</title></rect>';
+    }});
+  }});
+  strikes.forEach(function(strike, ci) {{
+    const x = padL + ci * cellW + cellW / 2;
+    svg += '<text x="' + x + '" y="' + (H - padB + 16) + '" text-anchor="middle" fill="#86868b" font-size="9" transform="rotate(-60 ' + x + ' ' + (H - padB + 16) + ')">' + escText('$' + strike) + '</text>';
+  }});
+  svg += '</svg>';
   container.innerHTML = svg;
 }}
-function gexModalFetch(symbol) {{
-  return fetch('/api/gex?symbol=' + encodeURIComponent(symbol)).then(function(r){{ return r.json(); }});
+function renderFlowList(container, data) {{
+  const events = (data && data.flow_events) || [];
+  if (!events.length) {{
+    container.innerHTML = '<p class="muted" style="font-size:12px;margin-top:6px">近30天无异常期权事件</p>'; return;
+  }}
+  let rows = '';
+  events.forEach(function(ev) {{
+    const type = ev.option_type === 'P' ? 'PUT' : (ev.option_type === 'C' ? 'CALL' : escText(ev.option_type));
+    rows += '<tr><td>' + escText(ev.contract_key) + '</td><td>' + type + '</td>'
+      + '<td class="muted">' + escText(ev.expiry) + '</td><td class="muted">$' + Number(ev.premium || 0).toLocaleString() + '</td>'
+      + '<td class="muted">' + escText(String(ev.observed_at || '').slice(0, 16)) + '</td></tr>';
+  }});
+  container.innerHTML = '<details><summary>近30天异常期权（' + events.length + ' 条）</summary>'
+    + '<div class="table-wrap"><table><tr><th>合约</th><th>类型</th><th>到期</th><th>权利金</th><th>时间</th></tr>'
+    + rows + '</table></div></details>';
 }}
+let gexModalSymbol = null;
+let gexModalData = null;
 function openGexModal(symbol) {{
+  gexModalSymbol = symbol;
   let modal = document.getElementById('gex-modal');
   if (!modal) {{
     modal = document.createElement('div');
@@ -931,33 +1213,186 @@ function openGexModal(symbol) {{
     modal.style.cssText = 'display:none;position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:1000;overflow:auto;padding:30px';
     modal.innerHTML = '<div style="background:#fff;margin:0 auto;max-width:980px;border-radius:14px;padding:20px">'
       + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:10px">'
-      + '<b id="gex-modal-title" style="font-size:16px">GEX 曲线</b>'
+      + '<b id="gex-modal-title" style="font-size:16px">Dealer Chart</b>'
       + '<div style="white-space:nowrap"><button type="button" class="secondary" data-zoom="-1" style="padding:4px 12px">−</button>'
       + '<button type="button" class="secondary" data-zoom="1" style="padding:4px 12px">＋</button>'
       + '<button type="button" id="gex-modal-close" style="padding:4px 14px;margin-left:6px">关闭</button></div></div>'
-      + '<div id="gex-modal-body" style="overflow-x:auto"></div>'
-      + '<p class="muted" style="font-size:11px;margin-top:8px">绿柱 = Call GEX（上方墙）｜红柱 = Put GEX（下方墙）｜蓝线 = 累计总 GEX｜橙线 = 零 Gamma（Flip/≈近似）｜灰虚线 = 当前价</p>'
+      + '<div><b>价格日K（近30日）</b><div id="gex-modal-candle" style="overflow-x:auto"></div></div>'
+      + '<div style="margin-top:10px"><b>GEX 曲线</b><div id="gex-modal-body" style="overflow-x:auto"></div></div>'
+      + '<div id="gex-modal-flows" style="margin-top:10px"></div>'
+      + '<details style="margin-top:10px"><summary>GEX Heatmap（Strike × 到期，绿正红负，颜色越深 |GEX| 越大）</summary><div id="gex-modal-heat" style="overflow-x:auto"></div></details>'
+      + '<p class="muted" style="font-size:11px;margin-top:8px">蜡烛：红涨绿跌｜K线图上圆点 = 异常期权事件（红 PUT / 绿 CALL，悬停看合约）｜绿柱 = Call GEX（上方墙）｜红柱 = Put GEX（下方墙）｜蓝线 = 累计总 GEX｜橙线 = 零 Gamma（Flip）｜灰虚线 = 当前价｜−/＋ 同时缩放 K 线与 GEX 曲线</p>'
       + '</div>';
     document.body.appendChild(modal);
     modal.querySelector('#gex-modal-close').addEventListener('click', function(){{ modal.style.display = 'none'; }});
+    document.getElementById('gex-modal-candle').addEventListener('click', function(e) {{
+      const btn = e.target.closest('button[data-layer]');
+      if (!btn || !gexModalData) return;
+      const key = btn.getAttribute('data-layer');
+      gexLayers[key] = gexLayers[key] === false;
+      renderCandleChart(document.getElementById('gex-modal-candle'), gexModalData);
+    }});
+    document.getElementById('gex-modal-candle').addEventListener('mousemove', function(e) {{
+      const hits = window.gexCandleHits;
+      const svgEl = this.querySelector('svg');
+      const tip = this.querySelector('#gex-tip');
+      const cross = this.querySelector('#gex-cross');
+      if (!hits || !svgEl || !tip || !cross) return;
+      const rect = svgEl.getBoundingClientRect();
+      if (!rect.width) return;
+      const vb = svgEl.viewBox.baseVal;
+      const mx = (e.clientX - rect.left) / rect.width * vb.width;
+      const my = (e.clientY - rect.top) / rect.height * vb.height;
+      let text = null;
+      for (let i = 0; i < hits.dots.length; i++) {{
+        const d = hits.dots[i];
+        if (Math.abs(d.cx - mx) <= 8 && Math.abs(d.cy - my) <= 8) {{ text = d.text; break; }}
+      }}
+      if (!text) for (let i = 0; i < hits.lines.length; i++) {{
+        if (Math.abs(hits.lines[i].y - my) <= 7) {{ text = hits.lines[i].text; break; }}
+      }}
+      if (!text) for (let i = 0; i < hits.maSeries.length; i++) {{
+        const s = hits.maSeries[i];
+        for (let j = 0; j < s.pts.length; j++) {{
+          const p = s.pts[j];
+          if (Math.abs(p.x - mx) <= 8 && Math.abs(p.y - my) <= 8) {{
+            text = s.label + ' $' + Number(p.price).toFixed(2); break;
+          }}
+        }}
+        if (text) break;
+      }}
+      let candle = null;
+      for (let i = 0; i < hits.candles.length; i++) {{
+        if (Math.abs(hits.candles[i].cx - mx) <= 8) {{ candle = hits.candles[i]; break; }}
+      }}
+      if (candle) {{
+        const d = new Date(candle.t);
+        const up = candle.c >= candle.o;
+        const chg = candle.o ? ((candle.c - candle.o) / candle.o * 100).toFixed(2) : '';
+        const ohlc = (d.getMonth() + 1) + '/' + d.getDate() + ' 开 ' + candle.o + ' 高 ' + candle.h + ' 低 ' + candle.l + ' 收 ' + candle.c + (chg ? ' ' + (up ? '+' : '') + chg + '%' : '');
+        text = text || ohlc;
+        cross.setAttribute('x1', candle.cx); cross.setAttribute('x2', candle.cx);
+        cross.setAttribute('y1', 16); cross.setAttribute('y2', vb.height - 30);
+        cross.setAttribute('display', '');
+      }} else {{
+        cross.setAttribute('display', 'none');
+      }}
+      if (text) {{
+        tip.textContent = text;
+        const scale = rect.width / vb.width;
+        let left = mx * scale + 14;
+        const tipW = 250;
+        if (left + tipW > rect.width) left = mx * scale - tipW - 14;
+        tip.style.left = Math.max(0, left) + 'px';
+        tip.style.top = Math.max(0, my * scale + 12) + 'px';
+        tip.style.display = 'block';
+      }} else {{
+        tip.style.display = 'none';
+      }}
+    }});
+    document.getElementById('gex-modal-candle').addEventListener('mouseleave', function() {{
+      const tip = this.querySelector('#gex-tip');
+      const cross = this.querySelector('#gex-cross');
+      if (tip) tip.style.display = 'none';
+      if (cross) cross.setAttribute('display', 'none');
+    }});
+    document.getElementById('gex-modal-body').addEventListener('mousemove', function(e) {{
+      const hits = window.gexCurveHits;
+      const svgEl = this.querySelector('svg');
+      const tip = this.querySelector('#gex-curve-tip');
+      if (!hits || !svgEl || !tip) return;
+      const rect = svgEl.getBoundingClientRect();
+      if (!rect.width) return;
+      const vb = svgEl.viewBox.baseVal;
+      const mx = (e.clientX - rect.left) / rect.width * vb.width;
+      let best = null;
+      for (let i = 0; i < hits.length; i++) {{
+        if (Math.abs(hits[i].x - mx) <= 10) {{ best = hits[i]; break; }}
+      }}
+      if (best) {{
+        tip.textContent = '行权价 $' + best.strike + ' · Net GEX ' + Number(best.gex).toFixed(1) + ' · 累计 ' + Number(best.cum).toFixed(1);
+        const scale = rect.width / vb.width;
+        let left = best.x * scale + 14;
+        if (left + 250 > rect.width) left = best.x * scale - 264;
+        tip.style.left = Math.max(0, left) + 'px';
+        tip.style.top = Math.max(0, (e.clientY - rect.top) + 12) + 'px';
+        tip.style.display = 'block';
+      }} else {{
+        tip.style.display = 'none';
+      }}
+    }});
+    document.getElementById('gex-modal-body').addEventListener('mouseleave', function() {{
+      const tip = this.querySelector('#gex-curve-tip');
+      if (tip) tip.style.display = 'none';
+    }});
     modal.querySelectorAll('button[data-zoom]').forEach(function(zb) {{
       zb.addEventListener('click', function() {{
         gexZoom = Math.max(0.5, Math.min(4, gexZoom + parseFloat(zb.getAttribute('data-zoom')) * 0.5));
-        gexModalFetch(symbol).then(function(data){{ renderGexChart(document.getElementById('gex-modal-body'), data); }});
+        if (!gexModalData) return;
+        renderCandleChart(document.getElementById('gex-modal-candle'), gexModalData);
+        renderGexChart(document.getElementById('gex-modal-body'), gexModalData.gex || gexModalData);
       }});
     }});
     modal.addEventListener('click', function(e){{ if (e.target === modal) modal.style.display = 'none'; }});
   }}
   modal.style.display = 'block';
-  document.getElementById('gex-modal-title').textContent = 'GEX 曲线 - ' + symbol;
-  document.getElementById('gex-modal-body').innerHTML = '<span class="muted">加载中…</span>';
-  gexModalFetch(symbol).then(function(data) {{
-    renderGexChart(document.getElementById('gex-modal-body'), data);
-  }}).catch(function(){{ document.getElementById('gex-modal-body').innerHTML = '<span class="muted">加载失败</span>'; }});
+  document.getElementById('gex-modal-title').textContent = 'Dealer Chart - ' + symbol;
+  const candleEl = document.getElementById('gex-modal-candle');
+  const gexEl = document.getElementById('gex-modal-body');
+  const flowEl = document.getElementById('gex-modal-flows');
+  const heatEl = document.getElementById('gex-modal-heat');
+  candleEl.innerHTML = '<span class="muted">加载中…</span>';
+  gexEl.innerHTML = '<span class="muted">加载中…</span>';
+  flowEl.innerHTML = '';
+  heatEl.innerHTML = '';
+  dealerFetch(symbol).then(function(data) {{
+    gexModalData = data;
+    renderCandleChart(candleEl, data);
+    renderGexChart(gexEl, data.gex || data);
+    renderFlowList(flowEl, data);
+    renderHeatmap(heatEl, data.gex || data);
+  }}).catch(function() {{
+    candleEl.innerHTML = '<span class="muted">加载失败</span>';
+    gexEl.innerHTML = '<span class="muted">加载失败</span>';
+  }});
 }}
 document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
   btn.addEventListener('click', function(){{ openGexModal(btn.getAttribute('data-gex')); }});
 }});
+(function(){{
+  const cells = document.querySelectorAll('.spark[data-spark]');
+  if (!cells.length || !('IntersectionObserver' in window)) return;
+  function sparkSvg(bars) {{
+    if (!bars || bars.length < 2) return '<span class="muted">—</span>';
+    const W = 110, H = 30, pad = 3;
+    const closes = bars.map(function(b){{ return Number(b.c); }});
+    const min = Math.min.apply(null, closes), max = Math.max.apply(null, closes);
+    const span = (max - min) || 1;
+    const x = function(i){{ return pad + i / (closes.length - 1) * (W - pad * 2); }};
+    const y = function(v){{ return pad + (1 - (v - min) / span) * (H - pad * 2); }};
+    let pts = '';
+    closes.forEach(function(v, i){{ pts += (i ? ' ' : '') + x(i).toFixed(1) + ',' + y(v).toFixed(1); }});
+    const up = closes[closes.length - 1] >= closes[0];
+    const color = up ? '#d70015' : '#00a651';
+    const lastY = y(closes[closes.length - 1]).toFixed(1);
+    return '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:110px;height:30px">'
+      + '<line x1="' + pad + '" y1="' + lastY + '" x2="' + (W - pad) + '" y2="' + lastY + '" stroke="#e8e8ed" stroke-width="0.6" stroke-dasharray="1,2"/>'
+      + '<polyline points="' + pts + '" fill="none" stroke="' + color + '" stroke-width="1.5"/></svg>';
+  }}
+  const observer = new IntersectionObserver(function(entries) {{
+    entries.forEach(function(entry) {{
+      if (!entry.isIntersecting) return;
+      const el = entry.target;
+      observer.unobserve(el);
+      const symbol = el.getAttribute('data-spark');
+      el.textContent = '…';
+      fetch('/api/spark?symbol=' + encodeURIComponent(symbol)).then(function(r) {{ return r.json(); }})
+        .then(function(data) {{ el.innerHTML = sparkSvg(data.bars || []); }})
+        .catch(function() {{ el.textContent = '—'; }});
+    }});
+  }}, {{ rootMargin: '120px' }});
+  cells.forEach(function(el) {{ observer.observe(el); }});
+}})();
 (function(){{
   const rows=document.querySelectorAll('tr.analyst-row');
   if(!rows.length) return;
@@ -1116,31 +1551,57 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
         encoded = html.escape(json.dumps(data, ensure_ascii=False, indent=2, default=str))
         action_cards = ""
         if path == "/":
-            action_cards = self._action_forms(csrf, (("/api/actions/collect", "立即采集并生成推荐"), ("/api/actions/report", "生成飞书日报")))
+            actions = [("/api/actions/collect", "立即采集并生成推荐"), ("/api/actions/report", "生成飞书日报")]
             if isinstance(data, Mapping) and data.get("is_latest"):
-                action_cards += (
-                    '<div class="card"><b>刷新</b><div>'
-                    '<form data-ajax="1" data-reload="1" style="display:inline" method="post" action="/api/actions/reevaluate">'
-                    f'<input type="hidden" name="csrf" value="{html.escape(csrf)}">'
-                    '<button>刷新评分</button></form></div></div>'
-                )
+                actions.append(("/api/actions/reevaluate", "刷新评分"))
+            action_cards = self._action_forms(csrf, tuple(actions), reload_paths={"/api/actions/reevaluate"})
         elif path == "/portfolio":
             action_cards = self._action_forms(csrf, (("/futu/import-watchlist", "从富途导入自选"), ("/api/portfolio/refresh", "手动刷新持仓")))
+        elif path == "/signals":
+            action_cards = self._action_forms(csrf, (("/api/actions/flow-classify", "分类Flow类型"),), reload_paths={"/api/actions/flow-classify"})
         elif path == "/system":
             action_cards = self._action_forms(csrf, (
                 ("/api/providers/massive/test", "测试Massive"),
                 ("/api/actions/deepseek-test", "测试DeepSeek"),
                 ("/api/actions/feishu-test", "测试飞书"),
                 ("/api/actions/backup", "创建备份"),
+                ("/api/actions/gex-snapshot", "记录GEX快照"),
+                ("/api/actions/alerts-check", "检查GEX预警"),
             ))
         elif path == "/providers":
-            action_cards = self._provider_actions(csrf)
-        content = f'<h1>{html.escape(title)}</h1><p class="sub">{html.escape(description)}</p>{self._date_selector(path, params)}<div id="action-result"></div>{action_cards}{self._visual_summary(path, data)}<details class="card"><summary>查看原始数据</summary><pre>{encoded}</pre></details>'
+            action_cards = self._action_forms(csrf, (("/api/ibkr/sync", "同步 IBKR 持仓"),))
+        content = f'<h1>{html.escape(title)}</h1><p class="sub">{html.escape(description)}</p>'
+        sidebar_bits = []
+        if action_cards:
+            sidebar_bits.append(action_cards)
+        date_selector = self._date_selector(path, params)
+        if date_selector:
+            sidebar_bits.append(date_selector)
+        if sidebar_bits:
+            content += (
+                '<div class="layout">'
+                '<div class="main-col">'
+                f'{self._visual_summary(path, data, params, csrf)}'
+                f'<details class="card"><summary>查看原始数据</summary><pre>{encoded}</pre></details>'
+                '</div>'
+                '<aside class="sidebar">'
+                f'<div id="action-result"></div>'
+                + "".join(sidebar_bits)
+                + '</aside></div>'
+            )
+        else:
+            content += (
+                f'<div id="action-result"></div>{self._visual_summary(path, data, params, csrf)}'
+                f'<details class="card"><summary>查看原始数据</summary><pre>{encoded}</pre></details>'
+            )
         return self._shell(f"{title} - Options Radar", content, path)
 
     @staticmethod
     def _date_selector(path: str, params: Mapping[str, str]) -> str:
         if path not in {"/", "/signals"}:
+            return ""
+        if str(params.get("symbol", "") or "").strip():
+            # Symbol filter spans the last 30 days; the date selector is N/A.
             return ""
         if not _dashboard_date_cache:
             return ""
@@ -1158,14 +1619,16 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
         )
 
     @staticmethod
-    def _visual_summary(path: str, data: Any) -> str:
+    def _visual_summary(path: str, data: Any, params: Optional[Mapping[str, str]] = None, csrf: str = "") -> str:
+        if path == "/providers":
+            return SetupRequestHandler._provider_actions(csrf)
         if path == "/audit":
             return (
                 '<section class="card"><h2>数据复核</h2>'
                 '<p class="muted">随机抽样 TRADE 信号，对比原文本、解析方向与回测结果，用 AI 重新解析原文本以发现系统性解析错误。</p>'
-                '<div class="toolbar" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">'
+                '<div class="card toolbar">'
                 '<label style="margin:0;font-weight:600">抽样数量</label>'
-                '<input type="number" id="audit-n" value="50" min="1" max="200" style="width:90px;display:inline-block;margin:0">'
+                '<input type="number" id="audit-n" value="50" min="1" max="200" style="width:90px;margin:0">'
                 '<button type="button" id="audit-sample">随机抽取</button>'
                 '<button type="button" class="secondary" id="audit-review-all">全部 AI 复核</button>'
                 '<span class="muted" id="audit-summary"></span>'
@@ -1188,7 +1651,8 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
             is_latest = bool(data.get("is_latest", True))
             snapshot_note = "" if is_latest else (
                 '<div class="card" style="margin:10px 0;border-left:3px solid #d97706">'
-                '<b>历史快照</b>：此日期为历史数据，评分基于当日信号与行情，不随当前权重/行情重算。</div>'
+                '<b>历史快照</b>：此日期为历史数据，评分基于当日信号与行情，不随当前权重/行情重算；'
+                '卡片只展示当日已落库的 GEX/策略提示，不注入实时行情。</div>'
             )
             def format_price(value: Any) -> str:
                 if value is None:
@@ -1246,130 +1710,201 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                     market_state = "实时行情"
                 elif data_quality in {"仅flow", "flow"}:
                     market_state = "待采集"
-                quote_line = f'bid/ask {bid} / {ask} · 数据 {market_state} · 执行 {html.escape(str(item.get("execution_status", "待行情")))}'
+                exec_status = str(item.get("execution_status", "待行情"))
+                state_cls = "ok" if exec_status == "可执行" else ("flow" if flow_only else "warn")
+                state_badge = f'<span class="rec-state {state_cls}">{html.escape(exec_status)}</span>'
+                # ⓘ tooltip: analyst votes / score components / risks / IV / explanation.
                 reason = str(item.get("reason", ""))
-                vote_segment = ""
+                tip_parts = []
                 if "分析师判断" in reason:
                     vote_part = reason.split("评分组成", 1)[0].replace("分析师判断：", "").strip()
-                    vote_lines = []
-                    for vote in [part.strip().rstrip("；") for part in vote_part.split("、") if part.strip()]:
-                        vote_lines.append(f'<li>{html.escape(vote)}</li>')
+                    vote_lines = [html.escape(vote.strip().rstrip("；")) for vote in vote_part.split("、") if vote.strip()]
                     if vote_lines:
-                        vote_segment = '<ul class="analyst-votes">' + "".join(vote_lines) + '</ul>'
+                        tip_parts.append("<b>分析师投票</b><br>" + "<br>".join(vote_lines))
+                if "评分组成" in reason:
+                    components = reason.split("评分组成：", 1)[1].split("风险提示", 1)[0].strip().rstrip("；")
+                    if components:
+                        tip_parts.append("<b>评分组成</b><br>" + html.escape(components))
                 HOLDING_PATTERNS = ("行情时间戳已过期", "盘口与OI为过期数据", "暂未取到实时行情", "等待数据源恢复")
-                risk_segment = ""
                 if "风险提示" in reason:
                     risks = reason.split("风险提示：", 1)[1].split("；执行字段", 1)[0].split("；")
                     real_risks = [r.strip() for r in risks if r.strip() and not any(
                         pattern in r for pattern in HOLDING_PATTERNS
                     )]
                     if real_risks:
-                        risk_segment = '<div class="risk-inline"><strong>注意</strong>' + "".join(
-                            f'<span class="risk-chip">{html.escape(r)}</span>' for r in real_risks
-                        ) + '</div>'
-                remaining = ""
-                if "评分组成" in reason:
-                    remaining = "评分组成：" + reason.split("评分组成：", 1)[1].split("风险提示", 1)[0]
-                strategy_hint = str(item.get("strategy_hint", ""))
+                        tip_parts.append("<b>风险提示</b><br>" + "<br>".join(
+                            f"⚠ {html.escape(r)}" for r in real_risks
+                        ))
+                vol = item.get("vol") if isinstance(item.get("vol"), Mapping) else None
+                if vol and (vol.get("atm_iv") is not None or vol.get("put_skew") is not None or vol.get("call_skew") is not None):
+                    vol_parts = []
+                    if vol.get("atm_iv") is not None:
+                        vol_parts.append(f"ATM IV {float(vol['atm_iv']):.0f}%")
+                    if vol.get("put_skew") is not None:
+                        vol_parts.append(f"Put Skew {float(vol['put_skew']):+.1f}")
+                    if vol.get("call_skew") is not None:
+                        vol_parts.append(f"Call Skew {float(vol['call_skew']):+.1f}")
+                    term = vol.get("term_structure")
+                    if isinstance(term, Mapping) and term:
+                        term_items = []
+                        for expiry, iv in sorted(term.items()):
+                            label = str(expiry)[5:].replace("-", "/")
+                            try:
+                                term_items.append(f"{label} {float(iv):.0f}%")
+                            except (TypeError, ValueError):
+                                continue
+                        if term_items:
+                            vol_parts.append("期限 " + " · ".join(term_items))
+                    tip_parts.append("<b>IV / Skew</b><br>" + html.escape(
+                        " · ".join(vol_parts) + "（Put Skew 正=下跌保护贵，卖 Put 更划算）"
+                    ))
+                short_gamma_plan = str(item.get("short_gamma_plan") or "")
+                if short_gamma_plan:
+                    tip_parts.append("<b>Short Gamma 风控</b><br>" + html.escape(short_gamma_plan))
                 iv_rank_val = item.get("iv_rank")
+                if isinstance(iv_rank_val, (int, float)):
+                    iv_label = "历史高位" if iv_rank_val >= 70 else "历史低位" if iv_rank_val <= 30 else "历史中位"
+                    tip_parts.append(f"IV Rank {iv_rank_val:.0f}/100（{iv_label}，数值越低 IV 越便宜）")
+                ps = item.get("price_structure") if isinstance(item.get("price_structure"), Mapping) else None
+                if ps and any(ps.get(k) is not None for k in ("ma20", "ma50", "high", "low")):
+                    ps_parts = []
+                    if ps.get("spot") is not None:
+                        ps_parts.append(f"现价 ${float(ps['spot']):g}")
+                    if ps.get("ma20") is not None:
+                        ps_parts.append(f"MA20 ${float(ps['ma20']):g}")
+                    if ps.get("ma50") is not None:
+                        ps_parts.append(f"MA50 ${float(ps['ma50']):g}")
+                    if ps.get("high") is not None:
+                        ps_parts.append(f"20日高 ${float(ps['high']):g}")
+                    if ps.get("low") is not None:
+                        ps_parts.append(f"20日低 ${float(ps['low']):g}")
+                    tip_parts.append("<b>价格结构</b><br>" + html.escape(" · ".join(ps_parts)))
+                explanation = reason
+                for marker in ("分析师判断：", "评分组成：", "风险提示："):
+                    explanation = explanation.split(marker, 1)[0]
+                explanation = explanation.strip().rstrip("；")
+                if explanation:
+                    tip_parts.append("<b>解释</b><br>" + html.escape(explanation))
+                info_html = ""
+                if tip_parts:
+                    tip_html = "<br><br>".join(tip_parts)
+                    tip_plain = re.sub(r"<[^>]+>", " ", tip_html)
+                    info_html = (
+                        '<span class="info" title="' + html.escape(tip_plain, quote=True) + '">ⓘ'
+                        '<span class="tip">' + tip_html + '</span></span>'
+                    )
+                # 策略块：主策略 + 行权价/到期提示 + 风险警告分行展示，突出重点。
+                strategy_hint = str(item.get("strategy_hint", ""))
                 strike_hint = str(item.get("strike_hint", ""))
                 event_risk = str(item.get("event_risk", ""))
                 next_earn = item.get("next_earnings_days")
                 expected_move = item.get("expected_move")
                 short_gamma_risk = str(item.get("short_gamma_risk", ""))
-                hint_segment = ""
+                strategy_block = ""
                 if strategy_hint:
-                    iv_text = ""
-                    if isinstance(iv_rank_val, (int, float)):
-                        iv_label = "历史高位" if iv_rank_val >= 70 else "历史低位" if iv_rank_val <= 30 else "历史中位"
-                        iv_text = f"IV Rank {iv_rank_val:.0f}/100（{iv_label}，数值越低 IV 越便宜）"
-                    extra = ""
+                    lines = [f'<div class="rec-strategy-main"><b>策略</b> {html.escape(strategy_hint)}</div>']
                     if strike_hint:
-                        extra += f' · <b>{html.escape(strike_hint)}</b>'
+                        lines.append(f'<div class="rec-hint">🎯 {html.escape(strike_hint)}</div>')
+                    expiration_hint = str(item.get("expiration_hint") or "")
+                    if expiration_hint:
+                        lines.append(f'<div class="rec-hint">📅 {html.escape(expiration_hint)}</div>')
                     if event_risk == "HIGH":
                         earn_txt = f"财报 {int(next_earn)} 天后" if isinstance(next_earn, (int, float)) else "财报临近"
                         move_txt = f"预期波动 {expected_move:.1f}%" if isinstance(expected_move, (int, float)) else ""
-                        extra += f' · <span style="color:#d70015">⚠ 事件风险 HIGH（{html.escape(earn_txt)}{" " + html.escape(move_txt) if move_txt else ""}）</span>'
+                        lines.append(f'<div class="rec-warn">⚠ 事件风险 HIGH（{html.escape(earn_txt)}{" " + html.escape(move_txt) if move_txt else ""}）</div>')
                     if short_gamma_risk == "HIGH":
-                        extra += ' · <span style="color:#d70015">⚠ Short Gamma 风险 HIGH，避免裸卖</span>'
-                    hint_segment = (
-                        '<div style="margin:6px 0 0;padding:8px 10px;background:#eef7ef;border-radius:8px;font-size:13px">'
-                        f'<b>策略</b> {html.escape(strategy_hint)}'
-                        + (f' <span class="muted">· {html.escape(iv_text)}</span>' if iv_text else '')
-                        + extra
-                        + '</div>'
-                    )
+                        lines.append('<div class="rec-warn">⚠ Short Gamma 风险 HIGH，避免裸卖</div>')
+                    strategy_block = '<div class="rec-strategy">' + "".join(lines) + '</div>'
                 gex = item.get("gex") if isinstance(item.get("gex"), Mapping) else None
                 gex_segment = ""
                 if gex:
                     symbol = str(item.get("contract_key", "")).split("|", 1)[0].split(".", 1)[-1]
                     regime_map = {"positive": "正 Gamma（抑制波动）", "negative": "负 Gamma（放大波动）", "mixed": "混合 Gamma（敞口平衡）"}
                     regime_text = regime_map.get(str(gex.get("regime", "")), "—")
-                    walls = []
-                    if gex.get("call_wall") is not None:
-                        walls.append(f"Call Wall ${gex.get('call_wall')}")
-                    if gex.get("put_wall") is not None:
-                        walls.append(f"Put Wall ${gex.get('put_wall')}")
-                    if gex.get("gamma_flip") is not None:
-                        walls.append(f"Flip ${gex.get('gamma_flip')}")
+                    wall_chips = []
+                    _pw_v = gex.get("put_wall")
+                    _cw_v = gex.get("call_wall")
+                    _flip_v = gex.get("gamma_flip")
+                    if _pw_v is not None:
+                        wall_chips.append(f'<span class="wall-chip" style="color:#d70015;border-color:#f0c8cc">PW ${float(_pw_v):g}</span>')
+                    if _cw_v is not None:
+                        wall_chips.append(f'<span class="wall-chip" style="color:#00a651;border-color:#c8e8d5">CW ${float(_cw_v):g}</span>')
+                    if _flip_v is not None:
+                        wall_chips.append(f'<span class="wall-chip" style="color:#c47f00;border-color:#f0e0c0">Flip ${float(_flip_v):g}</span>')
                     else:
-                        walls.append("无 Flip（累计 GEX 未跨零）")
-                    wall_text = " · ".join(walls) if walls else ""
+                        wall_chips.append('<span class="wall-chip" style="color:#86868b">无 Flip</span>')
+                    # 位置条：有 spot 就渲染，单侧 wall 缺失显示「—」。
                     position_bar = ""
-                    if gex.get("put_wall") is not None and gex.get("call_wall") is not None and gex.get("spot") is not None:
-                        try:
-                            _pw = float(gex.get("put_wall"))
-                            _cw = float(gex.get("call_wall"))
+                    try:
+                        if gex.get("spot") is not None:
                             _spot = float(gex.get("spot"))
-                            if _cw > _pw > 0:
+                            _pw = float(gex["put_wall"]) if gex.get("put_wall") is not None else None
+                            _cw = float(gex["call_wall"]) if gex.get("call_wall") is not None else None
+                            pw_label = f"Put Wall ${_pw:g}" if _pw is not None else "Put Wall —"
+                            cw_label = f"Call Wall ${_cw:g}" if _cw is not None else "Call Wall —"
+                            if _pw is not None and _cw is not None and _cw > _pw > 0:
                                 _pct = max(0.0, min(100.0, (_spot - _pw) / (_cw - _pw) * 100.0))
-                                position_bar = (
-                                    '<div style="margin-top:6px">'
-                                    '<div style="display:flex;justify-content:space-between;font-size:11px;color:#86868b">'
-                                    '<span>Put Wall $' + str(_pw) + '</span><span>Call Wall $' + str(_cw) + '</span></div>'
-                                    '<div style="position:relative;height:6px;background:linear-gradient(90deg,#d70015,#f0a500,#00a651);border-radius:3px;margin:3px 0">'
-                                    '<div style="position:absolute;left:' + str(round(_pct, 1)) + '%;top:-4px;width:3px;height:14px;background:#1d1d1f;border-radius:1px"></div></div>'
-                                    '<div style="font-size:11px;color:#1d1d1f">当前价 $' + str(_spot) + ' · 位置 ' + str(round(_pct)) + '%</div></div>'
-                                )
-                        except (TypeError, ValueError):
-                            pass
+                            elif _pw is not None:
+                                _pct = 0.0 if _spot <= _pw else 100.0
+                            elif _cw is not None:
+                                _pct = 100.0 if _spot >= _cw else 0.0
+                            else:
+                                _pct = None
+                            marker = ('<div style="position:absolute;left:{0}%;top:-4px;width:3px;height:14px;background:#1d1d1f;border-radius:1px"></div>'.format(round(_pct, 1)) if _pct is not None else "")
+                            note = f"当前价 ${_spot:g}" + (f" · 位置 {round(_pct)}%" if _pct is not None else "")
+                            position_bar = (
+                                '<div style="margin-top:6px;flex-basis:100%">'
+                                '<div style="display:flex;justify-content:space-between;font-size:11px;color:#86868b">'
+                                f"<span>{pw_label}</span><span>{cw_label}</span></div>"
+                                '<div style="position:relative;height:6px;background:linear-gradient(90deg,#d70015,#f0a500,#00a651);border-radius:3px;margin:3px 0">'
+                                + marker + '</div>'
+                                f'<div style="font-size:11px;color:#1d1d1f">{note}</div></div>'
+                            )
+                    except (TypeError, ValueError):
+                        pass
                     gex_segment = (
-                        '<div style="margin:6px 0 0;padding:8px 10px;background:#f7f7fb;border-radius:8px;font-size:13px">'
-                        f'<b>GEX</b> {html.escape(regime_text)} {html.escape(wall_text)}'
-                        f'<button type="button" class="secondary" style="margin-left:8px;padding:3px 10px" data-gex="{html.escape(symbol)}">曲线</button>'
+                        '<div class="rec-gex">'
+                        '<div class="rec-gex-head">'
+                        f'<b>GEX</b><span class="muted">{html.escape(regime_text)}</span>'
+                        f'<button type="button" class="secondary gex-btn" data-gex="{html.escape(symbol)}">曲线</button>'
+                        '</div>'
+                        f'<div class="rec-walls">{"".join(wall_chips)}</div>'
                         + position_bar
                         + '</div>'
                     )
-                vol = item.get("vol") if isinstance(item.get("vol"), Mapping) else None
-                vol_segment = ""
-                if vol and (vol.get("atm_iv") is not None or vol.get("put_skew") is not None or vol.get("call_skew") is not None):
-                    parts = []
-                    if vol.get("atm_iv") is not None:
-                        parts.append(f"ATM IV {float(vol['atm_iv']):.0f}%")
-                    if vol.get("put_skew") is not None:
-                        parts.append(f"Put Skew {float(vol['put_skew']):+.1f}")
-                    if vol.get("call_skew") is not None:
-                        parts.append(f"Call Skew {float(vol['call_skew']):+.1f}")
-                    vol_segment = '<p style="margin:4px 0 0;font-size:12px" class="muted"><b>IV</b> ' + html.escape(" · ".join(parts)) + ' <span class="muted">（Put Skew 正=下跌保护贵，卖 Put 更划算）</span></p>'
+                grade_html = f'<span class="grade">{grade}级</span>' if grade != "-" else ""
+                raw_key = str(item.get("contract_key", ""))
+                key_parts = raw_key.split("|")
+                if len(key_parts) == 4:
+                    rec_sym = html.escape(key_parts[0].split(".")[-1] or key_parts[0])
+                    leg_type = "CALL" if str(key_parts[3]).upper() == "C" else "PUT"
+                    rec_leg = html.escape(f"{key_parts[1][5:].replace('-', '/')} · ${key_parts[2]} {leg_type}")
+                else:
+                    rec_sym, rec_leg = key, ""
                 return (
-                    '<section class="card">'
-                    f'<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap"><h2 style="margin:0;font-size:18px">{key}</h2><span class="muted" style="font-size:13px">交易量 {premium_text}</span>{badge}{source_badge}</div>'
-                    f'<div style="margin:8px 0 4px"><span style="font-size:24px;font-weight:700">{score_html}</span>'
-                    f'<span class="muted" style="margin-left:8px">{grade}级</span></div>'
-                    f'<p style="margin:2px 0" class="muted">{quote_line}</p>'
-                    f'{vote_segment}'
-                    f'<p style="margin:2px 0" class="muted">入场 {entry} · 止盈 {take_profit} · 止损 {stop_loss}</p>'
-                    f'{risk_segment}'
-                    f'{hint_segment}'
+                    '<section class="card rec">'
+                    '<div class="rec-top">'
+                    f'<div class="rec-contract" title="{key}"><span class="rec-sym">{rec_sym}</span>'
+                    + (f'<span class="rec-leg">{rec_leg}</span>' if rec_leg else '')
+                    + '</div>'
+                    f'<div class="rec-score"><span class="score-num">{score_html}</span>{grade_html}{info_html}</div>'
+                    '</div>'
+                    f'<div class="rec-meta">{badge}{source_badge}<span class="muted">交易量 {premium_text}</span>'
+                    f'<span class="muted">{html.escape(market_state)}</span>{state_badge}</div>'
+                    '<div class="rec-grid">'
+                    f'<div class="rec-kv bidask"><b>bid/ask</b><span>{bid} / {ask}</span></div>'
+                    f'<div class="rec-kv"><b>入场</b><span>{entry}</span></div>'
+                    f'<div class="rec-kv"><b>止盈</b><span>{take_profit}</span></div>'
+                    f'<div class="rec-kv"><b>止损</b><span>{stop_loss}</span></div>'
+                    '</div>'
+                    f'{strategy_block}'
                     f'{gex_segment}'
-                    f'{vol_segment}'
-                    f'<p style="margin:6px 0 0" class="muted">{html.escape(remaining) if remaining else ""}</p>'
                     '</section>'
                 )
             sections = []
-            sell_block = ('<div class="grid">' + "".join(render_card(item) for item in sell) + '</div>') if sell else '<div class="card"><p>暂无卖方推荐（等待 DTE 14~60 的信号确认）</p></div>'
-            sections.append('<h2 style="margin:20px 0 6px">卖方推荐（DTE 14~60，卖 ATM 期权）</h2>' + sell_block)
-            return market_banner + snapshot_note + "".join(sections) + '<details class="card" style="margin-top:16px"><summary>评分体系说明</summary><p>候选从 Discord 异常期权/分析师频道采集（解析成交额、持仓、分析师卡片），再叠加以下五维评分。每个维度都用<strong>可验证的数据</strong>计算，不是主观打分：</p><table><tr><th>维度</th><th>权重</th><th>依据</th></tr><tr><td>权利金质量</td><td>40%</td><td>卖方 alpha 核心：<strong>IV 溢价</strong>（ATM 隐含波动率 − 正股历史波动率 VRP，越高越值得卖）+ 买卖价差 + Open Interest + 成交量</td></tr><tr><td>信号质量</td><td>20%</td><td>分析师卡片是否给出方向、置信度、入场/止盈/止损、理由等字段的完整程度</td></tr><tr><td>组合适配</td><td>15%</td><td>标的是否已在持仓/自选、仓位集中度是否过高——对应风控的集中度限制</td></tr><tr><td>方向共识</td><td>15%</td><td>多分析家族方向投票（90 天回测显示方向正确率≈50%，故降权，仅作参考）</td></tr><tr><td>历史胜率</td><td>10%</td><td>分析师卖方策略回测胜率动态校准（弱化）</td></tr></table><p>评级：A≥80（飞书提醒）｜B 65-79（合格）｜C 50-64（观察榜）｜D&lt;50（过滤）。仅flow=异常期权事件但分析师尚未确认。休市/行情缺失只影响「可执行性」，不压低信号评分。</p><p class="muted">数据来源：Discord 频道文本（成交额/分析师观点）、富途 OpenD 实时行情（盘口/OI/IV/希腊字母）、Alpaca 历史行情（回测）、DeepSeek 仅做翻译与文字整理，不参与任何数值决策。</p></details>'
+            sell_block = ('<div class="grid">' + "".join(render_card(item) for item in sell) + '</div>') if sell else '<p class="muted">暂无卖方推荐（等待 DTE 14~60 的信号确认）</p>'
+            sections.append('<section class="card"><h2>卖方推荐（DTE 14~60，卖 ATM 期权）</h2>' + sell_block + '</section>')
+            return market_banner + snapshot_note + "".join(sections) + '<details class="card" style="margin-top:16px"><summary>评价标准说明</summary><p>候选从 Discord 异常期权/分析师频道采集（解析成交额、持仓、分析师卡片），再叠加以下五维评分。每个维度都用<strong>可验证的数据</strong>计算，不是主观打分：</p><table><tr><th>维度</th><th>权重</th><th>依据</th></tr><tr><td>权利金质量</td><td>40%</td><td>卖方 alpha 核心：<strong>IV 溢价</strong>（ATM 隐含波动率 − 正股历史波动率 VRP，越高越值得卖）+ 买卖价差 + Open Interest + 成交量</td></tr><tr><td>信号质量</td><td>20%</td><td>分析师卡片是否给出方向、置信度、入场/止盈/止损、理由等字段的完整程度</td></tr><tr><td>组合适配</td><td>15%</td><td>标的是否已在持仓/自选、仓位集中度是否过高——对应风控的集中度限制</td></tr><tr><td>方向共识</td><td>15%</td><td>多分析家族方向投票（90 天回测显示方向正确率≈50%，故降权，仅作参考）</td></tr><tr><td>历史胜率</td><td>10%</td><td>分析师卖方策略回测胜率动态校准（弱化）</td></tr></table><p>评级：A级≥80分（飞书提醒）｜B 65-79（合格）｜C 50-64（观察榜）｜D&lt;50（过滤）。仅flow=异常期权事件但分析师尚未确认。休市/行情缺失只影响「可执行性」，不压低信号评分。</p><p class="muted">数据来源：Discord 频道文本（成交额/分析师观点）、富途 OpenD 实时行情（盘口/OI/IV/希腊字母）、Alpaca 历史行情（回测）、DeepSeek 仅做翻译与文字整理，不参与任何数值决策。</p></details>'
         if path == "/signals" and isinstance(data, list):
             def format_premium(value: Any) -> str:
                 try:
@@ -1446,10 +1981,18 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                     str(item.get("symbol", "")).lower(), str(item.get("contract_key", "")).lower(),
                     direction_token, status_token,
                 ])
+                classification = item.get("classification") or {}
+                flow_type = str(classification.get("flow_type", "") or "")
+                type_names = {"Directional": "方向性", "Hedging": "对冲", "Spread": "价差", "Closing": "平仓", "Unknown": "未知"}
+                type_label = type_names.get(flow_type, flow_type or "—")
+                type_cls = {"Directional": "up", "Hedging": "watch", "Spread": "watch", "Closing": "down"}.get(flow_type, "watch")
+                type_html = f'<span class="badge {type_cls}">{html.escape(type_label)}</span>' if flow_type else '<span class="muted">—</span>'
+                strength = classification.get("flow_strength")
+                strength_html = f'{float(strength):.0f}' if isinstance(strength, (int, float)) else "—"
                 rows.append(
                     '<tr data-filter="{0}"><td>{1}</td><td>{2}</td><td class="muted">{3}</td><td class="muted">{4}</td>'
-                    '<td>{5}</td><td>{6}</td></tr>'
-                    '<tr class="signal-detail"><td colspan="6">{7}</td></tr>'.format(
+                    '<td>{5}</td><td>{6}</td><td>{7}</td><td>{8}</td></tr>'
+                    '<tr class="signal-detail"><td colspan="8">{9}</td></tr>'.format(
                         html.escape(filter_text),
                         html.escape(str(item.get("symbol", ""))),
                         html.escape(str(item.get("contract_key", ""))),
@@ -1457,29 +2000,33 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                         html.escape(str(item.get("observed_at", ""))),
                         direction_html,
                         badge,
+                        type_html,
+                        strength_html,
                         detail_html,
                     )
                 )
             return (
                 '<div class="card toolbar">'
-                '<input type="search" id="signal-search" placeholder="搜索标的或合约…" style="max-width:320px;display:inline-block">'
-                '<select id="signal-dir" style="width:auto;display:inline-block;margin-left:8px">'
+                '<input type="search" id="signal-search" placeholder="搜索标的或合约…" style="max-width:320px"'
+                + (f' value="{html.escape(str((params or {}).get("symbol", "")).strip())}"' if (params or {}).get("symbol") else '')
+                + '>'
+                '<select id="signal-dir" style="width:auto">'
                 '<option value="all">方向：全部</option><option value="bull">看多</option>'
                 '<option value="bear">看空</option><option value="neutral">中性</option></select>'
-                '<select id="signal-status" style="width:auto;display:inline-block;margin-left:8px">'
+                '<select id="signal-status" style="width:auto">'
                 '<option value="all">状态：全部</option><option value="has-analyst">分析师确认</option>'
                 '<option value="flow-only">仅flow</option></select>'
                 '<button type="button" class="secondary" id="signal-expand">全部展开</button>'
                 '<button type="button" class="secondary" id="signal-collapse">全部折叠</button>'
                 '</div>'
                 '<section class="card" id="signal-table"><div class="table-wrap"><table>'
-                '<tr><th>标的</th><th>合约</th><th>交易量</th><th>时间</th><th>方向</th><th>状态</th></tr>'
+                '<tr><th>标的</th><th>合约</th><th>交易量</th><th>时间</th><th>方向</th><th>分析师意见数</th><th>类型</th><th>强度</th></tr>'
                 + "".join(rows) + '</table></div></section>'
             )
         if path == "/portfolio" and isinstance(data, dict):
             def render_row(symbol, item):
                 if not isinstance(item, Mapping):
-                    return f'<tr><td>{html.escape(str(symbol))}</td><td colspan="8">{html.escape(str(item))}</td></tr>'
+                    return f'<tr><td>{html.escape(str(symbol))}</td><td colspan="11">{html.escape(str(item))}</td></tr>'
                 name = html.escape(str(item.get("company_name", "") or ""))
                 name_zh = html.escape(str(item.get("company_name_zh", "") or ""))
                 group = html.escape(str(item.get("group_name", "") or ""))
@@ -1499,6 +2046,19 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                 held_token = "held" if held else "no-hold"
                 iv_rank = item.get("iv_rank")
                 iv_rank_str = f"{float(iv_rank):.0f}" if iv_rank is not None else "-"
+                iv = item.get("iv")
+                hv = item.get("hv_30d")
+                hv_pct = (float(hv) * 100.0) if (hv is not None and float(hv) < 1.5) else hv
+                if iv is not None and hv_pct is not None:
+                    ivhv_str = f"{float(iv) - float(hv_pct):+.0f}"
+                    ivhv_title = f"IV {float(iv):.0f}% · HV {float(hv_pct):.0f}%"
+                else:
+                    ivhv_str = "-"
+                    ivhv_title = ""
+                ivhv_cell = (
+                    f'<td title="{html.escape(ivhv_title, quote=True)}">{html.escape(ivhv_str)}</td>'
+                    if ivhv_title else f"<td>{html.escape(ivhv_str)}</td>"
+                )
                 gex_regime = str(item.get("gex_regime") or "")
                 regime_map = {"positive": "正", "negative": "负", "mixed": "混合"}
                 gex_str = regime_map.get(gex_regime, "-")
@@ -1506,35 +2066,74 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                     str(symbol).lower(), str(item.get("company_name", "") or "").lower(),
                     str(item.get("group_name", "") or "").lower(), held_token,
                 ])
-                row = '<tr data-filter="{0}"><td>{1}{2}</td><td class="muted">{3}</td><td class="muted">{4}</td><td>{5}</td><td>{6}</td><td class="{7}">{8}</td><td>{9}</td><td>{10}</td><td>{11}</td><td>{12}</td></tr>'.format(
+                spark_cell = f'<td><span class="spark" data-spark="{html.escape(str(symbol))}"></span></td>'
+                gex_btn = f'<button type="button" class="secondary" style="padding:3px 10px;font-size:12px;margin:0" data-gex="{html.escape(str(symbol))}">GEX</button>'
+                flow_link = (
+                    f'<a class="button secondary" style="padding:3px 10px;font-size:12px;margin:0 0 0 6px" '
+                    f'href="/signals?symbol={quote(str(symbol))}">期权事件</a>'
+                    if item.get("has_flow") else ""
+                )
+                actions = gex_btn + flow_link
+                row = '<tr data-filter="{0}"><td>{1}{2}</td><td class="muted">{3}</td><td class="muted">{4}</td><td>{5}</td><td>{6}</td><td class="{7}">{8}</td><td>{9}</td><td>{10}</td><td>{11}</td><td>{12}</td><td>{13}</td><td>{14}</td><td>{15}</td></tr>'.format(
                     html.escape(filter_text),
                     html.escape(str(symbol)), flag, display_name, industry,
                     html.escape(str(item.get("held_quantity", 0))),
-                    price_str, change_cls, change_str, iv_rank_str, gex_str,
-                    float(item.get("concentration", 0) or 0), updated,
+                    price_str, change_cls, change_str, iv_rank_str, ivhv_cell, gex_str,
+                    float(item.get("concentration", 0) or 0), spark_cell, actions, updated,
                 )
                 contracts = item.get("flow_contracts") or []
                 if contracts:
                     detail = "".join(f'<li>{html.escape(str(c))}</li>' for c in contracts)
-                    row += f'<tr class="flow-detail"><td colspan="10"><details><summary>相关异常期权事件</summary><ul>{detail}</ul></details></td></tr>'
+                    row += f'<tr class="flow-detail"><td colspan="13"><details><summary>相关异常期权事件</summary><ul>{detail}</ul></details></td></tr>'
                 return row
             items = list(data.items())
-            flow_rows = [render_row(s, v) for s, v in items if isinstance(v, Mapping) and v.get("has_flow")]
-            other_rows = [render_row(s, v) for s, v in items if not (isinstance(v, Mapping) and v.get("has_flow"))]
+            sort_key = str((params or {}).get("sort", "") or "")
+            def pair_sort(pair):
+                _symbol, value = pair
+                if not isinstance(value, Mapping):
+                    return (0, 0.0)
+                if sort_key == "iv_rank":
+                    v = value.get("iv_rank")
+                    return (0 if v is not None else 1, -(float(v)) if v is not None else 0.0)
+                if sort_key == "iv_hv":
+                    iv_v = value.get("iv")
+                    hv_v = value.get("hv_30d")
+                    hv_pct_v = (float(hv_v) * 100.0) if (hv_v is not None and float(hv_v) < 1.5) else hv_v
+                    diff = (float(iv_v) - float(hv_pct_v)) if (iv_v is not None and hv_pct_v is not None) else None
+                    return (0 if diff is not None else 1, -diff if diff is not None else 0.0)
+                if sort_key == "change":
+                    v = value.get("change_pct")
+                    return (0 if v is not None else 1, -(float(v)) if v is not None else 0.0)
+                return (0, 0.0)
+            flow_pairs = sorted(
+                [p for p in items if isinstance(p[1], Mapping) and p[1].get("has_flow")], key=pair_sort,
+            )
+            other_pairs = sorted(
+                [p for p in items if not (isinstance(p[1], Mapping) and p[1].get("has_flow"))], key=pair_sort,
+            )
+            flow_rows = [render_row(s, v) for s, v in flow_pairs]
+            other_rows = [render_row(s, v) for s, v in other_pairs]
+            sort_options = [
+                ('<option value="">默认（标的）</option>'),
+                (f'<option value="iv_rank"{" selected" if sort_key == "iv_rank" else ""}>IV Rank 高→低</option>'),
+                (f'<option value="iv_hv"{" selected" if sort_key == "iv_hv" else ""}>IV-HV 高→低</option>'),
+                (f'<option value="change"{" selected" if sort_key == "change" else ""}>涨跌 高→低</option>'),
+            ]
             toolbar = (
                 '<div class="card toolbar">'
-                '<input type="search" id="portfolio-search" placeholder="搜索标的或公司名…" style="max-width:320px;display:inline-block">'
-                '<select id="portfolio-hold" style="width:auto;display:inline-block;margin-left:8px">'
-                '<option value="all">持仓：全部</option><option value="held">有持仓</option>'
-                '<option value="no-hold">无持仓</option></select>'
+                '<input type="search" id="portfolio-search" placeholder="搜索标的或公司名…" style="max-width:320px">'
+                '<select id="portfolio-hold" style="width:auto"><option value="all">持仓：全部</option>'
+                '<option value="held">有持仓</option><option value="no-hold">无持仓</option></select>'
+                f'<select id="portfolio-sort" data-goto="/portfolio?sort=" style="width:auto">{"".join(sort_options)}</select>'
                 '<button type="button" class="secondary" id="portfolio-expand">全部展开</button>'
                 '<button type="button" class="secondary" id="portfolio-collapse">全部折叠</button>'
                 '</div>'
             )
             sections = [toolbar]
+            header = '<tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>IV Rank</th><th>IV-HV</th><th>GEX</th><th>集中度</th><th>近30日</th><th>操作</th><th>更新</th></tr>'
             if flow_rows:
-                sections.append('<section class="card" id="portfolio-table"><h2>异常期权相关</h2><div class="table-wrap"><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>IV Rank</th><th>GEX</th><th>集中度</th><th>更新</th></tr>' + "".join(flow_rows) + '</table></div></section>')
-            sections.append('<section class="card" id="portfolio-table"><h2>全部自选</h2><div class="table-wrap"><table><tr><th>标的</th><th>公司名称</th><th>分组</th><th>持仓</th><th>最新价</th><th>涨跌</th><th>IV Rank</th><th>GEX</th><th>集中度</th><th>更新</th></tr>' + ("".join(other_rows) or '<tr><td colspan="10">暂无组合快照</td></tr>') + '</table></div></section>')
+                sections.append('<section class="card" id="portfolio-table"><h2>异常期权相关</h2><div class="table-wrap"><table>' + header + "".join(flow_rows) + '</table></div></section>')
+            sections.append('<section class="card" id="portfolio-table"><h2>全部自选</h2><div class="table-wrap"><table>' + header + ("".join(other_rows) or '<tr><td colspan="13">暂无组合快照</td></tr>') + '</table></div></section>')
             return "".join(sections)
         if path == "/backtest" and isinstance(data, dict):
             paper = data.get("paper") or {}
@@ -1580,10 +2179,10 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                 parts.append(
                     '<section class="card"><h2>分析师信号回测（TRADE 信号，双口径）</h2>'
                     f'<p class="muted">当前持有期：{html.escape(horizon_label)}。点击分析师行展开逐笔明细。</p>'
-                    '<form method="get" class="toolbar" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">'
+                    '<form method="get" class="card toolbar" style="margin-bottom:10px">'
                     '<label style="margin:0;font-weight:600;white-space:nowrap">持有期（交易日）</label>'
                     '<input type="number" name="horizon_days" value="' + horizon_value + '" min="0" max="365" '
-                    'placeholder="到期" style="width:110px;display:inline-block;margin:0">'
+                    'placeholder="到期" style="width:110px;margin:0">'
                     '<span class="muted">输入 0 = 持有到期前 3 天平仓</span>'
                     '<button type="submit">更新</button>'
                     '<button type="button" class="secondary" id="analyst-expand">全部展开</button>'
@@ -1703,22 +2302,72 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
             # -- 3. 模拟交易统计 --
             if paper:
                 parts.append(f'<section class="card"><h2>模拟交易统计</h2><p>平仓: {paper.get("closed",0)} 笔　胜率: {round(paper.get("win_rate",0)*100,1)}%　损益: ${paper.get("realized_pnl",0):,.2f}</p></section>')
+
+            # -- 4. 历史验证 Test D（文档 13.3）：HV 分层 + 评分分层 --
+            validation = data.get("validation") if isinstance(data.get("validation"), Mapping) else {}
+            hv_rows = validation.get("hv") if isinstance(validation.get("hv"), list) else []
+            score_rows = validation.get("score") if isinstance(validation.get("score"), list) else []
+            if hv_rows or score_rows:
+                def val_rows(items, premium):
+                    out = []
+                    for item in items:
+                        n = int(item.get("n", 0) or 0)
+                        win_rate = f"{float(item.get('win_rate', 0)) * 100:.0f}%" if n else "—"
+                        pnl = float(item.get("avg_pnl_pct", 0) or 0)
+                        cls = "up" if pnl >= 0 else "down"
+                        cells = '<td>{0}</td><td>{1}</td><td class="{2}">{3:+.2f}%</td>'.format(
+                            html.escape(str(item.get("bucket", ""))), n, cls, pnl * 100,
+                        )
+                        if premium:
+                            prem = item.get("avg_premium_pct")
+                            cells += '<td class="muted">{}</td>'.format(
+                                f"{float(prem) * 100:+.0f}%" if prem is not None else "—"
+                            )
+                        out.append("<tr>" + cells + "</tr>")
+                    return "".join(out)
+
+                hv_html = ""
+                if hv_rows:
+                    hv_html = (
+                        '<div class="table-wrap"><table><tr><th>信号日 HV 分层</th><th>样本数</th>'
+                        '<th>卖方平均盈亏</th><th>平均赚取权利金</th></tr>'
+                        + val_rows(hv_rows, premium=True) + '</table></div>'
+                    )
+                score_html = ""
+                if score_rows:
+                    score_html = (
+                        '<div class="table-wrap"><table><tr><th>推荐评分分层</th><th>样本数</th>'
+                        '<th>卖方平均盈亏</th></tr>'
+                        + val_rows(score_rows, premium=False) + '</table></div>'
+                    )
+                parts.append(
+                    '<details class="card"><summary>历史验证 Test D（文档 13.3：IV/HV 分层 + 评分区分度）</summary>'
+                    + hv_html + score_html
+                    + '<p class="muted">口径：卖方策略（BULL 卖平值 PUT / BEAR 卖平值 CALL，25% 保证金，持有到期）。'
+                    'HV 用信号日已存储的正股日线序列计算（年化 20 日 close-to-close），无额外行情请求；'
+                    '评分分层按推荐落库时的分数（权利金质量优先新评分），检验分数与卖方盈亏的区分度。</p></details>'
+                )
             return "".join(parts) if parts else '<section class="card"><p>暂无回测数据。等待系统积累足够交易日后再查看。</p></section>'
         if path == "/system" and isinstance(data, dict):
             from options_radar.timeutil import us_cash_session_label
             parts = []
             overall = str(data.get("status", "unknown"))
             session_label = us_cash_session_label()
+            portfolio = data.get("portfolio") or {}
+            def tile(label, value):
+                return f'<div class="tile"><b>{html.escape(label)}</b><span>{html.escape(value)}</span></div>'
             parts.append(
-                '<section class="card"><div class="status">'
-                f'<div>系统状态</div><div class="metric">{html.escape(overall)}</div>'
-                f'<div>美股时段</div><div class="metric">{html.escape(session_label)}</div>'
-                f'<div>最近采集</div><div>{html.escape(str((data.get("last_collection") or "从未采集")[:19]))}</div>'
-                f'<div>最近同步</div><div>{html.escape(str((data.get("last_sync") or "从未同步")[:19]))}</div>'
-                '</div></section>'
+                '<section class="card"><h2>总览</h2><div class="tiles">'
+                + tile("系统状态", overall)
+                + tile("美股时段", session_label)
+                + tile("最近采集", str((data.get("last_collection") or "从未采集")[:19]))
+                + tile("最近同步", str((data.get("last_sync") or "从未同步")[:19]))
+                + tile("持仓来源", str(portfolio.get("source", "无")))
+                + tile("持仓数", str(portfolio.get("positions", 0)))
+                + tile("自选数", str(data.get("watchlist_count", 0)))
+                + tile("净值可用", "是" if portfolio.get("nav_present") else "否")
+                + '</div></section>'
             )
-            if data.get("last_error"):
-                parts.append(f'<section class="card error"><h2>最近错误</h2><p>{html.escape(str(data["last_error"]))}</p></section>')
             def provider_card(name, label, value):
                 if not isinstance(value, dict):
                     state = "未知"
@@ -1731,22 +2380,29 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                         quality = str(value.get("quality", ""))
                         if quality and quality not in ("missing", "unknown"):
                             state = f"{state}（{quality}）"
-                return f'<section class="card"><h2>{label}</h2><div class="metric">{html.escape(state)}</div></section>'
+                return f'<section class="card"><h2>{label}</h2><div class="tile"><span>{html.escape(state)}</span></div></section>'
             grid = [provider_card("futu", "富途 OpenD", data.get("futu")),
                     provider_card("ibkr", "IBKR", data.get("ibkr")),
                     provider_card("discord", "Discord", data.get("discord")),
                     provider_card("ai", "DeepSeek", data.get("ai")),
                     provider_card("feishu", "飞书", data.get("feishu"))]
             parts.append('<section class="card"><h2>数据源</h2><div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">' + "".join(grid) + '</div></section>')
-            portfolio = data.get("portfolio") or {}
-            parts.append(
-                '<section class="card"><div class="status">'
-                f'<div>持仓来源</div><div>{html.escape(str(portfolio.get("source", "无"))) }</div>'
-                f'<div>持仓数</div><div>{portfolio.get("positions", 0)}</div>'
-                f'<div>自选数</div><div>{data.get("watchlist_count", 0)}</div>'
-                f'<div>净值可用</div><div>{"是" if portfolio.get("nav_present") else "否"}</div>'
-                '</div></section>'
+            gex_snap = data.get("gex_snapshots") or {}
+            bottom = []
+            if data.get("last_error"):
+                bottom.append(f'<section class="card error"><h2>最近错误</h2><p>{html.escape(str(data["last_error"]))}</p></section>')
+            bottom.append(
+                '<section class="card"><h2>GEX 前瞻验证</h2><div class="tiles">'
+                + tile("已记录交易日", f'{gex_snap.get("days", 0)} 天')
+                + tile("覆盖标的", f'{gex_snap.get("symbols", 0)} 个')
+                + tile("最近快照", str(gex_snap.get("latest_date") or "暂无"))
+                + tile("说明", "每日收盘后自动记录 flow 触达标的的 strike 级 GEX")
+                + '</div></section>'
             )
+            if len(bottom) == 2:
+                parts.append('<div class="grid">' + "".join(bottom) + '</div>')
+            else:
+                parts.append(bottom[0])
             return "".join(parts)
         return '<section class="card"><p>数据已加载。展开下方“查看原始数据”查看完整内容。</p></section>'
 
@@ -1777,17 +2433,24 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
         return '<div class="card"><b>自动选择主数据源，或逐个调整优先级</b></div><div class="grid">' + "".join(cards) + "</div>" + ibkr
 
     @staticmethod
-    def _action_forms(csrf: str, actions: Tuple[Tuple[str, str], ...]) -> str:
-        labels = {"/api/actions/collect":"立即采集并生成推荐","/api/actions/reevaluate":"刷新评分","/api/actions/report":"生成日报","/api/actions/backup":"创建备份","/api/actions/feishu-test":"测试飞书","/api/actions/discord-login":"打开Discord登录","/api/actions/deepseek-test":"测试DeepSeek","/api/ibkr/sync":"同步IBKR持仓","/api/providers/massive/test":"测试Massive","/futu/import-watchlist":"从富途导入自选"}
-        return '<div class="card"><b>快捷操作</b><div>' + "".join(f'<form data-ajax="1" style="display:inline" method="post" action="{path}"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button>{html.escape(labels.get(path, label))}</button></form>' for path, label in actions) + "</div></div>"
+    def _action_forms(csrf: str, actions: Tuple[Tuple[str, str], ...], reload_paths: Optional[set] = None) -> str:
+        labels = {"/api/actions/collect":"立即采集并生成推荐","/api/actions/reevaluate":"刷新评分","/api/actions/report":"生成日报","/api/actions/backup":"创建备份","/api/actions/gex-snapshot":"记录GEX快照","/api/actions/alerts-check":"检查GEX预警","/api/actions/flow-classify":"分类Flow类型","/api/actions/feishu-test":"测试飞书","/api/actions/discord-login":"打开Discord登录","/api/actions/deepseek-test":"测试DeepSeek","/api/ibkr/sync":"同步IBKR持仓","/api/providers/massive/test":"测试Massive","/futu/import-watchlist":"从富途导入自选","/api/portfolio/refresh":"手动刷新持仓"}
+        reload_paths = reload_paths or set()
+        forms = "".join(
+            '<form data-ajax="1"' + (' data-reload="1"' if path in reload_paths else '')
+            + f' method="post" action="{path}">'
+            f'<input type="hidden" name="csrf" value="{html.escape(csrf)}"><button>{html.escape(labels.get(path, label))}</button></form>'
+            for path, label in actions
+        )
+        return '<div class="card"><b>快捷操作</b><div>' + forms + "</div></div>"
 
     def _setup_page(self, csrf: str, message: str = "") -> str:
-        display_labels = {"timezone":"\u65f6\u533a","discord_server":"Discord\u670d\u52a1\u5668","flow_channel":"\u5f02\u5e38\u671f\u6743\u9891\u9053","pa_channel":"PA\u5206\u6790\u5e08\u9891\u9053","mr_channel":"MR\u5206\u6790\u5e08\u9891\u9053","qmr_channel":"QMR\u5206\u6790\u5e08\u9891\u9053","fpd_channel":"FPD\u5206\u6790\u5e08\u9891\u9053","feishu_app_id":"\u98de\u4e66 App ID","flash_model":"DeepSeek\u65e5\u5e38\u6a21\u578b","pro_model":"DeepSeek\u590d\u6838\u6a21\u578b","report_delay":"\u6536\u76d8\u540e\u65e5\u62a5\u5ef6\u8fdf\uff08\u5206\u949f\uff09"}
+        display_labels = {"timezone":"\u65f6\u533a","discord_server":"Discord\u670d\u52a1\u5668","flow_channel":"\u5f02\u5e38\u671f\u6743\u9891\u9053","pa_channel":"PA\u5206\u6790\u5e08\u9891\u9053","mr_channel":"MR\u5206\u6790\u5e08\u9891\u9053","qmr_channel":"QMR\u5206\u6790\u5e08\u9891\u9053","fpd_channel":"FPD\u5206\u6790\u5e08\u9891\u9053","feishu_app_id":"\u98de\u4e66 App ID","flash_model":"DeepSeek\u65e5\u5e38\u6a21\u578b","pro_model":"DeepSeek\u590d\u6838\u6a21\u578b","report_delay":"\u6536\u76d8\u540e\u65e5\u62a5\u5ef6\u8fdf\uff08\u5206\u949f\uff09","poll_minutes":"Discord\u91c7\u96c6\u95f4\u9694\uff08\u5206\u949f\uff09","session_start_hour":"\u91c7\u96c6\u5f00\u59cb\u5c0f\u65f6\uff08\u7f8e\u4e1c0-23\uff09","session_end_hour":"\u91c7\u96c6\u7ed3\u675f\u5c0f\u65f6\uff08\u7f8e\u4e1c0-23\uff09"}
         data = self.app.store.load()
         inputs = []
         for field in FIELDS:
             value = _get_path(data, field.config_path, "")
-            kind = "number" if field.form_name == "report_delay" else "text"
+            kind = "number" if field.form_name in {"report_delay", "poll_minutes", "session_start_hour", "session_end_hour"} else "text"
             inputs.append(
                 f'<label for="{field.form_name}">{html.escape(display_labels.get(field.form_name, field.label))}</label>'
                 f'<input id="{field.form_name}" name="{field.form_name}" type="{kind}" value="{html.escape(str(value))}" required>'
@@ -1844,8 +2507,10 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
             '<div id="action-result"></div>'
             f'{notice}<div class="card"><div class="status">{status_html}</div></div>'
             '<form method="post" action="/save"><input type="hidden" name="csrf" value="' + html.escape(csrf) + '">'
-            '<div class="grid"><section class="card"><h2>基础配置</h2>' + "".join(inputs) + '</section>'
-            '<section class="card"><h2>API配置</h2>' + "".join(secret_inputs) + '</section></div>'
+            '<div class="grid"><section class="card"><h2>基础配置</h2><div class="form-grid">'
+            + "".join(f'<div>{inp}</div>' for inp in inputs) + '</div></section>'
+            '<section class="card"><h2>API配置</h2><div class="form-grid">'
+            + "".join(f'<div>{inp}</div>' for inp in secret_inputs) + '</div></section></div>'
             '<button>保存并启用</button></form>'
             '<section class="card"><h2>Discord登录</h2><p>点击后会打开独立Discord浏览器窗口；登录资料保存在本机专用目录。</p>'
             + self._action_forms(csrf, (("/api/actions/discord-login", "打开Discord登录"),))
