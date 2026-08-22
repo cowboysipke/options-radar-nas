@@ -9,7 +9,7 @@
 
 $ErrorActionPreference = 'Continue'
 $OpencodeData = "$env:USERPROFILE\.local\share\opencode"
-$Project = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Project = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $Python = Join-Path $Project '.venv\Scripts\python.exe'
 
 Write-Host "`n=== 1/3 结束 opencode 桌面进程 ===" -ForegroundColor Cyan
