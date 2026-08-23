@@ -106,6 +106,15 @@ def _naive_utc(value: Optional[datetime]) -> Optional[datetime]:
     return value
 
 
+def _float_or_none(value: Any) -> Optional[float]:
+    try:
+        if value is None or value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 class DeepSeekTextRefiner:
     def __init__(self, provider: DeepSeekProvider):
         self.provider = provider
@@ -960,23 +969,115 @@ class OptionsRadarService:
             "failed": failed[:20],
         }
 
-    def check_alerts(self) -> Dict[str, Any]:
-        """Doc 12.2: Feishu alerts for wall/flip proximity, regime flips, rich IV.
+    def _alert_rules(self) -> Dict[str, Any]:
+        """Normalised alert rule map from config (``alerts.rules``), with defaults."""
+        defaults = {
+            "min_score": {"threshold": 65, "enabled": True},
+            "min_premium": {"threshold": 500000, "enabled": True},
+            "direction": {"direction": "", "enabled": False},
+            "watchlist_only": {"symbols": "", "enabled": False},
+            "dte_range": {"min_dte": 7, "max_dte": 60, "enabled": False},
+            "wall_proximity": {"threshold_pct": 1.0, "enabled": True},
+            "regime_flip": {"enabled": True},
+            "iv_rank": {"threshold": 80, "enabled": True},
+            "discord_down": {"max_failures": 3, "enabled": True},
+            "opend_down": {"max_failures": 3, "enabled": True},
+        }
+        rules: Dict[str, Any] = {}
+        for name, fallback in defaults.items():
+            rules[name] = dict(fallback)
+        config = getattr(self, "config", None)
+        if config is not None:
+            try:
+                raw = config.section("alerts").get("rules")
+            except Exception:
+                raw = None
+            if isinstance(raw, list):
+                for item in raw:
+                    if not isinstance(item, Mapping):
+                        continue
+                    rule_type = str(item.get("type", "")).strip()
+                    if rule_type in defaults:
+                        rules[rule_type].update({k: v for k, v in item.items() if k != "type"})
+        return rules
 
-        Each alert text is sent at most once per trading session. Uses the
-        process GEX cache; new symbols are fetched serially (Futu rate limit).
+    def check_alerts(self) -> Dict[str, Any]:
+        """Rule engine: Feishu alerts for recommendations, GEX conditions and
+        system health. Each alert text fires at most once per trading session.
+
+        Rules are configured under ``alerts.rules`` in config.yaml and edited
+        from the /setup panel; every rule can be toggled independently.
         """
+        rules = self._alert_rules()
         target = self._trade_date()
+        date_key = target.isoformat()
+        sent_keys = getattr(self, "_last_alert_keys", set())
+        if getattr(self, "_last_alert_date", None) != date_key:
+            sent_keys = set()
+            self._last_alert_date = date_key
+        failures = getattr(self, "_alert_failures", {})
+        alerts: List[str] = []
+
+        # ---- 推荐类规则（评分 / 权利金 / 方向 / 自选清单 / DTE）----
         try:
-            events = self.database.flow_events_for_date(target)
+            rows = self.database.recommendations_for_date(target)
+            views = [self._recommendation_view(json.loads(str(row["payload_json"]))) for row in rows]
+            premium_by_key = {
+                str(event.contract_key): event.premium
+                for event in self.database.flow_events_for_date(target)
+            }
+            for view in views:
+                key = str(view.get("contract_key", ""))
+                if key in premium_by_key and not view.get("premium"):
+                    view["premium"] = premium_by_key[key]
         except Exception:
-            events = []
+            views = []
+        try:
+            watchlist = {str(item.symbol).upper() for item in self.database.list_watchlist()}
+        except Exception:
+            watchlist = set()
+        extra_symbols = {
+            str(s).strip().upper() for s in str(rules["watchlist_only"].get("symbols", "")).replace("，", ",").split(",") if str(s).strip()
+        }
+        for view in views:
+            symbol = str(view.get("symbol") or str(view.get("contract_key", "")).split("|", 1)[0].split(".", 1)[-1]).upper()
+            score = _float_or_none(view.get("score"))
+            premium = _float_or_none(view.get("premium"))
+            direction = str(view.get("final_direction") or view.get("direction") or "").upper()
+            dte = _float_or_none(view.get("dte"))
+            if rules["watchlist_only"].get("enabled") and symbol not in watchlist and symbol not in extra_symbols:
+                continue
+            if rules["direction"].get("enabled") and rules["direction"].get("direction"):
+                want = str(rules["direction"].get("direction", "")).strip().upper()
+                if want and want not in (direction, "BOTH"):
+                    continue
+            if rules["dte_range"].get("enabled") and dte is not None:
+                low = float(rules["dte_range"].get("min_dte", 7) or 0)
+                high = float(rules["dte_range"].get("max_dte", 60) or 9999)
+                if not (low <= dte <= high):
+                    continue
+            hits = []
+            if rules["min_score"].get("enabled") and score is not None and score >= float(rules["min_score"].get("threshold", 65)):
+                hits.append(f"评分 {score:.1f}（≥{float(rules['min_score']['threshold']):g}）")
+            if rules["min_premium"].get("enabled") and premium is not None and premium >= float(rules["min_premium"].get("threshold", 500000)):
+                hits.append(f"权利金 ${premium:,.0f}（≥${float(rules['min_premium']['threshold']):,.0f}）")
+            if hits:
+                alerts.append(f"📢 {symbol} {direction or '观察'}｜{' / '.join(hits)}")
+
+        # ---- GEX 类规则（wall/flip 阈值化 + regime 翻转 + IV Rank）----
         symbols = []
-        for event in events:
-            symbol = str(event.symbol or "").strip().upper()
+        try:
+            for event in self.database.flow_events_for_date(target):
+                symbol = str(event.symbol or "").strip().upper()
+                if symbol and symbol not in symbols:
+                    symbols.append(symbol)
+        except Exception:
+            pass
+        for view in views:
+            symbol = str(view.get("symbol") or str(view.get("contract_key", "")).split("|", 1)[0].split(".", 1)[-1]).strip().upper()
             if symbol and symbol not in symbols:
                 symbols.append(symbol)
-        alerts = []
+        proximity = float(rules["wall_proximity"].get("threshold_pct", 1.0) or 1.0) / 100.0
         for symbol in symbols:
             try:
                 gex = self.get_gex(symbol)
@@ -985,36 +1086,65 @@ class OptionsRadarService:
             if gex is None or not gex.strikes or not gex.spot:
                 continue
             spot = float(gex.spot)
-            for name, wall in (("Put Wall", gex.put_wall), ("Call Wall", gex.call_wall), ("Flip", gex.gamma_flip)):
-                if wall and spot > 0 and abs(spot - float(wall)) / spot <= 0.01:
-                    alerts.append(f"⚠ {symbol} 现价 ${spot:g} 逼近 {name} ${float(wall):g}（±1%）")
-            try:
-                previous = self.database.latest_gex_regime_before(symbol, target)
-            except Exception:
-                previous = None
-            if previous and previous != gex.regime:
-                alerts.append(f"🔁 {symbol} Gamma Regime 翻转：{previous} → {gex.regime}")
-            try:
-                overview = self._underlying_overview(symbol)
-                iv_rank = overview.get("iv_rank")
-            except Exception:
-                iv_rank = None
-            if iv_rank is not None and float(iv_rank) >= 80:
-                alerts.append(f"💧 {symbol} IV Rank {float(iv_rank):.0f}（≥80，期权偏贵）")
-        date_key = target.isoformat()
-        sent_keys = getattr(self, "_last_alert_keys", set())
-        if getattr(self, "_last_alert_date", None) != date_key:
-            sent_keys = set()
-            self._last_alert_date = date_key
+            if rules["wall_proximity"].get("enabled"):
+                for name, wall in (("Put Wall", gex.put_wall), ("Call Wall", gex.call_wall), ("Flip", gex.gamma_flip)):
+                    if wall and spot > 0 and abs(spot - float(wall)) / spot <= proximity:
+                        alerts.append(f"⚠ {symbol} 现价 ${spot:g} 逼近 {name} ${float(wall):g}（±{float(rules['wall_proximity']['threshold_pct']):g}%）")
+            if rules["regime_flip"].get("enabled"):
+                try:
+                    previous = self.database.latest_gex_regime_before(symbol, target)
+                except Exception:
+                    previous = None
+                if previous and previous != gex.regime:
+                    alerts.append(f"🔁 {symbol} Gamma Regime 翻转：{previous} → {gex.regime}")
+            if rules["iv_rank"].get("enabled"):
+                try:
+                    overview = self._underlying_overview(symbol)
+                    iv_rank = overview.get("iv_rank")
+                except Exception:
+                    iv_rank = None
+                if iv_rank is not None and float(iv_rank) >= float(rules["iv_rank"].get("threshold", 80)):
+                    alerts.append(f"💧 {symbol} IV Rank {float(iv_rank):.0f}（≥{float(rules['iv_rank']['threshold']):g}，期权偏贵）")
+
+        # ---- 系统类规则（Discord 失效 / OpenD 掉线，连续失败计数）----
+        def _consecutive(name: str, broken: bool, max_failures: int) -> bool:
+            if not broken:
+                failures[name] = 0
+                return False
+            failures[name] = failures.get(name, 0) + 1
+            return failures[name] >= max_failures
+
+        try:
+            discord_state = str(self.source.health().get("status", "")).lower()
+            if rules["discord_down"].get("enabled") and _consecutive(
+                "discord", discord_state in {"error", "stopped", "login_required"},
+                int(rules["discord_down"].get("max_failures", 3)),
+            ):
+                alerts.append("🔌 Discord 采集会话失效（连续失败，需重新扫码）")
+        except Exception:
+            pass
+        try:
+            opend_ready = bool(getattr(self.futu.health(), "ready", False))
+            if rules["opend_down"].get("enabled") and _consecutive(
+                "opend", not opend_ready, int(rules["opend_down"].get("max_failures", 3)),
+            ):
+                alerts.append("📡 OpenD 掉线（行情/采集依赖的富途连接不可用）")
+        except Exception:
+            if rules["opend_down"].get("enabled") and _consecutive(
+                "opend", True, int(rules["opend_down"].get("max_failures", 3)),
+            ):
+                alerts.append("📡 OpenD 掉线（行情/采集依赖的富途连接不可用）")
+        self._alert_failures = failures
+
         new_alerts = [text for text in alerts if text not in sent_keys]
         if new_alerts:
             self.feishu.enqueue_card(
-                build_card("GEX 预警", "\n".join(new_alerts), "red"),
-                source_message_id="gex-alerts-" + date_key,
+                build_card("交易提醒", "\n".join(new_alerts), "red"),
+                source_message_id="alerts-" + date_key,
             )
             sent_keys.update(new_alerts)
             self._last_alert_keys = sent_keys
-        return {"status": "ok", "alerts": len(new_alerts), "checked": len(symbols)}
+        return {"status": "ok", "alerts": len(new_alerts), "checked": len(symbols), "rules": {k: v.get("enabled", False) for k, v in rules.items()}}
 
     @staticmethod
     def _deterministic_flow_type(text: str) -> str:

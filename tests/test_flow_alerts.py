@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Phase 4: GEX alerts and Flow Type classification."""
+import json
 import tempfile
 import unittest
 from datetime import date, datetime, timedelta
@@ -92,6 +93,46 @@ class CheckAlertsTests(unittest.TestCase):
     def test_skips_empty_gex(self):
         service = self.make_db(None, iv_rank=None)
         self.assertEqual(service.check_alerts()["alerts"], 0)
+
+    def test_recommendation_score_rule_fires_once_per_session(self):
+        service = self.make_db(fake_gex(), iv_rank=None)
+        service.database.recommendations_for_date = lambda d: [{"payload_json": json.dumps({
+            "contract_key": "US.AAPL|2026-09-18|200|C", "symbol": "AAPL",
+            "score": 72.5, "premium": 520000.0, "final_direction": "BULL", "dte": 30,
+        })}]
+        service.database.list_watchlist = lambda: []
+        result = service.check_alerts()
+        self.assertGreaterEqual(result["alerts"], 1)
+        text = service.feishu.cards[0][0]["elements"][0]["content"]
+        self.assertIn("AAPL", text)
+        self.assertIn("评分 72.5", text)
+        self.assertIn("权利金 $520,000", text)
+        # 同会话去重
+        self.assertEqual(service.check_alerts()["alerts"], 0)
+
+    def test_direction_and_dte_filters_skip_non_matching(self):
+        service = self.make_db(fake_gex(), iv_rank=None)
+        service.config = SimpleNamespace(section=lambda name: {} if name == "alerts" else {"alerts": {}})
+        service.database.recommendations_for_date = lambda d: [{"payload_json": json.dumps({
+            "contract_key": "US.NVDA|2026-09-18|200|C", "symbol": "NVDA",
+            "score": 72.5, "premium": 520000.0, "final_direction": "BEAR", "dte": 3,
+        })}]
+        service.database.list_watchlist = lambda: []
+        service.database.flow_events_for_date = lambda d: []
+        service._alert_rules = lambda: {
+            "min_score": {"threshold": 65, "enabled": True},
+            "min_premium": {"threshold": 500000, "enabled": True},
+            "direction": {"direction": "BULL", "enabled": True},
+            "watchlist_only": {"symbols": "", "enabled": False},
+            "dte_range": {"min_dte": 7, "max_dte": 60, "enabled": True},
+            "wall_proximity": {"threshold_pct": 1.0, "enabled": False},
+            "regime_flip": {"enabled": False},
+            "iv_rank": {"threshold": 80, "enabled": False},
+            "discord_down": {"max_failures": 3, "enabled": False},
+            "opend_down": {"max_failures": 3, "enabled": False},
+        }
+        result = service.check_alerts()
+        self.assertEqual(result["alerts"], 0)
 
 
 class DeterministicFlowTypeTests(unittest.TestCase):

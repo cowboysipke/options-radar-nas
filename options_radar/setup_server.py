@@ -99,6 +99,18 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "backtest": {"use_synthetic_when_unavailable": True},
     "schedule": {"report_delay_minutes": 75, "discord_poll_minutes": 6,
                  "session_start_hour": 9, "session_end_hour": 16},
+    "alerts": {"rules": [
+        {"type": "min_score", "threshold": 65, "enabled": True},
+        {"type": "min_premium", "threshold": 500000, "enabled": True},
+        {"type": "direction", "direction": "", "enabled": False},
+        {"type": "watchlist_only", "symbols": "", "enabled": False},
+        {"type": "dte_range", "min_dte": 7, "max_dte": 60, "enabled": False},
+        {"type": "wall_proximity", "threshold_pct": 1.0, "enabled": True},
+        {"type": "regime_flip", "enabled": True},
+        {"type": "iv_rank", "threshold": 80, "enabled": True},
+        {"type": "discord_down", "max_failures": 3, "enabled": True},
+        {"type": "opend_down", "max_failures": 3, "enabled": True},
+    ]},
     "secret_refs": {
         "deepseek_api_key": "/data/secrets/deepseek_api_key",
         "feishu_app_secret": "/data/secrets/feishu_app_secret",
@@ -227,6 +239,47 @@ FIELDS = (
     Field("session_start_hour", "schedule.session_start_hour", "采集开始小时（美东0-23）", _hour),
     Field("session_end_hour", "schedule.session_end_hour", "采集结束小时（美东0-23）", _hour),
 )
+
+
+def _alerts_from_form(values: Mapping[str, str]) -> List[Dict[str, Any]]:
+    """Build the ``alerts.rules`` list from the /setup 提醒设置 form."""
+    def _flag(name: str) -> bool:
+        return str(values.get(name, "")).strip() in {"1", "on", "true", "yes"}
+
+    def _num(name: str, default: float, minimum: float = 0.0) -> float:
+        raw = str(values.get(name, "")).strip()
+        if not raw:
+            return default
+        try:
+            value = float(raw)
+        except ValueError:
+            raise ValueError(f"{name} 必须是数字")
+        if value < minimum:
+            raise ValueError(f"{name} 不能小于 {minimum:g}")
+        return value
+
+    def _int(name: str, default: int, minimum: int = 1) -> int:
+        return int(round(_num(name, float(default), float(minimum))))
+
+    direction = str(values.get("alerts_direction_value", "")).strip().upper()
+    if direction not in {"", "BULL", "BEAR", "BOTH"}:
+        raise ValueError("方向只能是 BULL / BEAR / BOTH 或留空")
+    dte_min = _int("alerts_dte_min", 7)
+    dte_max = _int("alerts_dte_max", 60)
+    if dte_min > dte_max:
+        raise ValueError("DTE 最小值不能大于最大值")
+    return [
+        {"type": "min_score", "threshold": _num("alerts_min_score_threshold", 65), "enabled": _flag("alerts_min_score_enabled")},
+        {"type": "min_premium", "threshold": _num("alerts_min_premium_threshold", 500000), "enabled": _flag("alerts_min_premium_enabled")},
+        {"type": "direction", "direction": direction, "enabled": _flag("alerts_direction_enabled")},
+        {"type": "watchlist_only", "symbols": str(values.get("alerts_watchlist_symbols", "")).strip()[:2000], "enabled": _flag("alerts_watchlist_only_enabled")},
+        {"type": "dte_range", "min_dte": dte_min, "max_dte": dte_max, "enabled": _flag("alerts_dte_range_enabled")},
+        {"type": "wall_proximity", "threshold_pct": _num("alerts_wall_proximity_pct", 1.0), "enabled": _flag("alerts_wall_proximity_enabled")},
+        {"type": "regime_flip", "enabled": _flag("alerts_regime_flip_enabled")},
+        {"type": "iv_rank", "threshold": _num("alerts_iv_rank_threshold", 80), "enabled": _flag("alerts_iv_rank_enabled")},
+        {"type": "discord_down", "max_failures": _int("alerts_discord_max_failures", 3), "enabled": _flag("alerts_discord_down_enabled")},
+        {"type": "opend_down", "max_failures": _int("alerts_opend_max_failures", 3), "enabled": _flag("alerts_opend_down_enabled")},
+    ]
 
 
 class SetupConfigStore:
@@ -834,6 +887,18 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
                 return
             self._callback("reload_service", {})
             self._json(HTTPStatus.OK, result)
+            return
+        if path == "/save-alerts":
+            try:
+                rules = _alerts_from_form(values)
+            except ValueError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"status": "error", "message": str(exc)})
+                return
+            data = self.app.store.load()
+            data["alerts"] = {"rules": rules}
+            self.app.store.save(data)
+            self._callback("reload_service", {})
+            self._json(HTTPStatus.OK, {"status": "ok", "message": "提醒设置已保存"})
             return
         if path == "/save":
             try:
@@ -2547,6 +2612,53 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
         )
         return '<div class="card"><b>快捷操作</b><div>' + forms + "</div></div>"
 
+    @staticmethod
+    def _alerts_setup_html(data: Mapping[str, Any], csrf: str) -> str:
+        rules: Dict[str, Dict[str, Any]] = {}
+        for item in (data.get("alerts") or {}).get("rules") or []:
+            if isinstance(item, Mapping):
+                rules[str(item.get("type", ""))] = dict(item)
+        checked = lambda value: "checked" if value else ""
+        num_field = lambda field, value: f'<input type="number" step="any" name="{field}" value="{html.escape(str(value))}" style="width:120px">'
+        text_field = lambda field, value, placeholder="": f'<input type="text" name="{field}" value="{html.escape(str(value))}" placeholder="{html.escape(placeholder)}" style="width:240px">'
+        parts = []
+
+        def block(rtype: str, label: str, body: str, default_enabled: bool = True) -> None:
+            r = rules.get(rtype, {})
+            parts.append(
+                '<div style="margin:10px 0;border-top:1px solid var(--line);padding-top:8px">'
+                f'<label style="display:flex;align-items:center;gap:8px;font-weight:600">'
+                f'<input type="checkbox" name="alerts_{rtype}_enabled" {checked(bool(r.get("enabled", default_enabled)))}> {label}</label>'
+                f'<div class="muted" style="margin:4px 0 0 26px">{body}</div></div>'
+            )
+
+        block("min_score", "评分 ≥ 阈值", num_field("alerts_min_score_threshold", rules.get("min_score", {}).get("threshold", 65)))
+        block("min_premium", "权利金 ≥ 阈值（美元）", num_field("alerts_min_premium_threshold", rules.get("min_premium", {}).get("threshold", 500000)))
+        direction = str(rules.get("direction", {}).get("direction", ""))
+        direction_options = "".join(
+            f'<option value="{d}"{" selected" if direction == d else ""}>{lbl}</option>'
+            for d, lbl in (("", "全部方向"), ("BULL", "仅看多 BULL"), ("BEAR", "仅看空 BEAR"), ("BOTH", "双向"))
+        )
+        block("direction", "仅特定方向", f'<select name="alerts_direction_value">{direction_options}</select>')
+        block("watchlist_only", "仅自选/持仓标的（可加自定义代码，逗号分隔）",
+              text_field("alerts_watchlist_symbols", rules.get("watchlist_only", {}).get("symbols", ""), "AAPL,TSLA"),
+              default_enabled=False)
+        block("dte_range", "DTE 区间",
+              num_field("alerts_dte_min", rules.get("dte_range", {}).get("min_dte", 7))
+              + " – " + num_field("alerts_dte_max", rules.get("dte_range", {}).get("max_dte", 60)))
+        block("wall_proximity", "现价逼近 Wall/Flip ±%（默认 1）", num_field("alerts_wall_proximity_pct", rules.get("wall_proximity", {}).get("threshold_pct", 1.0)))
+        block("regime_flip", "Gamma Regime 翻转", '<span class="muted">（开关）</span>')
+        block("iv_rank", "IV Rank ≥ 阈值（期权偏贵）", num_field("alerts_iv_rank_threshold", rules.get("iv_rank", {}).get("threshold", 80)))
+        block("discord_down", "Discord 登录失效提醒（连续失败次数）", num_field("alerts_discord_max_failures", rules.get("discord_down", {}).get("max_failures", 3)))
+        block("opend_down", "OpenD 掉线提醒（连续失败次数）", num_field("alerts_opend_max_failures", rules.get("opend_down", {}).get("max_failures", 3)))
+        return (
+            '<section class="card"><h2>提醒设置</h2>'
+            '<p>按规则触发后通过飞书推送，每条规则可独立开关；同一条提醒每个交易日只发一次。评分 ≥65 为 B 级线。</p>'
+            '<form method="post" action="/save-alerts"><input type="hidden" name="csrf" value="' + html.escape(csrf) + '">'
+            + "".join(parts)
+            + '<button>保存提醒设置</button></form></section>'
+        )
+
     def _setup_page(self, csrf: str, message: str = "") -> str:
         display_labels = {"timezone":"\u65f6\u533a","discord_server":"Discord\u670d\u52a1\u5668","flow_channel":"\u5f02\u5e38\u671f\u6743\u9891\u9053","pa_channel":"PA\u5206\u6790\u5e08\u9891\u9053","mr_channel":"MR\u5206\u6790\u5e08\u9891\u9053","qmr_channel":"QMR\u5206\u6790\u5e08\u9891\u9053","fpd_channel":"FPD\u5206\u6790\u5e08\u9891\u9053","feishu_app_id":"\u98de\u4e66 App ID","flash_model":"DeepSeek\u65e5\u5e38\u6a21\u578b","pro_model":"DeepSeek\u590d\u6838\u6a21\u578b","report_delay":"\u6536\u76d8\u540e\u65e5\u62a5\u5ef6\u8fdf\uff08\u5206\u949f\uff09","poll_minutes":"Discord\u91c7\u96c6\u95f4\u9694\uff08\u5206\u949f\uff09","session_start_hour":"\u91c7\u96c6\u5f00\u59cb\u5c0f\u65f6\uff08\u7f8e\u4e1c0-23\uff09","session_end_hour":"\u91c7\u96c6\u7ed3\u675f\u5c0f\u65f6\uff08\u7f8e\u4e1c0-23\uff09"}
         data = self.app.store.load()
@@ -2681,6 +2793,7 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
               '  if(out.status==="ok")setTimeout(function(){location.reload();},800);'
               '}'
               '</script></section>'
+            + self._alerts_setup_html(data, csrf)
             + f'<form method="post" action="/logout"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button class="secondary">退出登录</button></form>'
         )
         return self._shell("本地配置" if local else "本地配置 / NAS部署", content, "/setup")
