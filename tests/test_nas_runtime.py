@@ -130,7 +130,8 @@ class SetupHttpTests(unittest.TestCase):
         self.assertIn('"configured":false', body)
         status, _, body = self.request("GET", "/")
         self.assertEqual(status, 200)
-        self.assertIn("管理口令", body)
+        # 未配置管理员时显示创建表单；不暴露任何配置字段
+        self.assertIn("创建管理员账户", body)
         self.assertNotIn("DeepSeek日常模型", body)
 
     def test_login_sets_http_only_session_cookie(self):

@@ -477,6 +477,40 @@ class SetupApplication:
         candidate = hashlib.sha256(token.encode("utf-8")).digest()
         return hmac.compare_digest(candidate, self._token_digest)
 
+    # ---- 管理员账户（用户名 + 密码，管理口令降级为备用）----
+    def admin_configured(self) -> bool:
+        data = self.store.load()
+        admin = data.get("admin") if isinstance(data.get("admin"), Mapping) else {}
+        return bool(str(admin.get("username", "")).strip() and str(admin.get("password_hash", "")).strip())
+
+    def admin_username(self) -> str:
+        data = self.store.load()
+        admin = data.get("admin") if isinstance(data.get("admin"), Mapping) else {}
+        return str(admin.get("username", "")).strip()
+
+    def set_admin(self, username: str, password: str) -> None:
+        username = str(username).strip()
+        password = str(password)
+        if not username or len(username) > 64 or not SYMBOLIC_NAME.fullmatch(username):
+            raise ValueError("用户名需为字母数字/中文，长度不超过64")
+        if len(password) < 8:
+            raise ValueError("密码至少8位")
+        salt = secrets.token_hex(16)
+        digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("ascii"), 200_000).hex()
+        data = self.store.load()
+        data["admin"] = {"username": username, "password_hash": digest, "salt": salt, "configured": True}
+        self.store.save(data)
+
+    def authenticate_admin(self, username: str, password: str) -> bool:
+        data = self.store.load()
+        admin = data.get("admin") if isinstance(data.get("admin"), Mapping) else {}
+        if str(admin.get("username", "")).strip() != str(username).strip():
+            return False
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", str(password).encode("utf-8"), str(admin.get("salt", "")).encode("ascii"), 200_000,
+        ).hex()
+        return hmac.compare_digest(digest, str(admin.get("password_hash", "")))
+
     def new_session(self) -> Tuple[str, str]:
         session_id = secrets.token_urlsafe(32)
         csrf = secrets.token_urlsafe(24)
@@ -849,15 +883,38 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
             self._send(HTTPStatus.BAD_REQUEST, html.escape(str(exc)), "text/plain; charset=utf-8")
             return
+        if path == "/admin-init":
+            if self.app.admin_configured():
+                self._send(HTTPStatus.FORBIDDEN, "管理员账户已存在，请直接登录", "text/plain; charset=utf-8")
+                return
+            if str(values.get("password", "")) != str(values.get("confirm", "")):
+                self._send(HTTPStatus.BAD_REQUEST, self._login_page("两次输入的密码不一致"))
+                return
+            try:
+                self.app.set_admin(str(values.get("username", "")), str(values.get("password", "")))
+            except ValueError as exc:
+                self._send(HTTPStatus.BAD_REQUEST, self._login_page(str(exc)))
+                return
+            session_id, _ = self.app.new_session()
+            cookie = f"{SESSION_COOKIE}={session_id}; Path=/; HttpOnly; SameSite=Strict; Max-Age={self.app.session_ttl}"
+            self._redirect("/", {"Set-Cookie": cookie})
+            return
         if path == "/login":
             if self.app.local_mode:
                 # Compatibility with an old cached login page.  Local mode
                 # does not validate or persist a management token.
                 self._redirect("/")
                 return
-            if not self.app.authenticate_token(str(values.get("token", ""))):
+            authenticated = False
+            username = str(values.get("username", "")).strip()
+            password = str(values.get("password", ""))
+            if username and password:
+                authenticated = self.app.authenticate_admin(username, password)
+            if not authenticated and str(values.get("token", "")).strip():
+                authenticated = self.app.authenticate_token(str(values.get("token", "")).strip())
+            if not authenticated:
                 time.sleep(0.2)
-                self._send(HTTPStatus.UNAUTHORIZED, self._login_page("管理口令不正确"))
+                self._send(HTTPStatus.UNAUTHORIZED, self._login_page("用户名或密码不正确"))
                 return
             session_id, _ = self.app.new_session()
             cookie = f"{SESSION_COOKIE}={session_id}; Path=/; HttpOnly; SameSite=Strict; Max-Age={self.app.session_ttl}"
@@ -887,6 +944,24 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
                 return
             self._callback("reload_service", {})
             self._json(HTTPStatus.OK, result)
+            return
+        if path == "/admin-password":
+            old_password = str(values.get("old_password", ""))
+            new_password = str(values.get("new_password", ""))
+            confirm = str(values.get("confirm_password", ""))
+            admin_user = self.app.admin_username()
+            if not admin_user or not self.app.authenticate_admin(admin_user, old_password):
+                self._json(HTTPStatus.FORBIDDEN, {"status": "error", "message": "原密码不正确"})
+                return
+            if new_password != confirm:
+                self._json(HTTPStatus.BAD_REQUEST, {"status": "error", "message": "两次输入的新密码不一致"})
+                return
+            try:
+                self.app.set_admin(admin_user, new_password)
+            except ValueError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"status": "error", "message": str(exc)})
+                return
+            self._json(HTTPStatus.OK, {"status": "ok", "message": "管理员密码已更新"})
             return
         if path == "/save-alerts":
             try:
@@ -1684,17 +1759,26 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
 
     def _login_page(self, message: str = "") -> str:
         notice = f'<p class="error">{html.escape(message)}</p>' if message else ""
-        local = os.getenv("OPTIONS_RADAR_LOCAL") == "1"
-        hint = (
-            "管理口令显示在启动窗口，也保存在 <code>data-local/setup-token</code>。"
-            if local else
-            "输入容器日志中的 <code>SETUP CODE</code>，也可在 <code>/data/setup-token</code> 查看。"
-        )
-        content = (
-            f"<h1>异常期权助手</h1><p class=\"sub\">{hint}</p>"
-            f'{notice}<div class="card"><form method="post" action="/login"><label>管理口令</label>'
-            '<input name="token" type="password" required autofocus><button>进入管理面板</button></form></div>'
-        )
+        if self.app.admin_configured():
+            content = (
+                "<h1>异常期权助手</h1><p class=\"sub\">使用管理员账户登录（管理口令仍可备用）。</p>"
+                f'{notice}<div class="card"><form method="post" action="/login">'
+                '<label>用户名</label><input name="username" type="text" required autofocus>'
+                '<label>密码</label><input name="password" type="password" required>'
+                '<button>进入管理面板</button></form>'
+                '<details class="card" style="margin-top:12px"><summary>使用管理口令登录（备用）</summary>'
+                '<form method="post" action="/login"><label>管理口令</label>'
+                '<input name="token" type="password"><button>进入</button></form></details></div>'
+            )
+        else:
+            content = (
+                "<h1>异常期权助手</h1><p class=\"sub\">首次使用：先创建管理员账户，之后用它登录。</p>"
+                f'{notice}<div class="card"><form method="post" action="/admin-init">'
+                '<label>管理员用户名</label><input name="username" type="text" required autofocus>'
+                '<label>密码（至少8位）</label><input name="password" type="password" required>'
+                '<label>确认密码</label><input name="confirm" type="password" required>'
+                '<button>创建管理员账户</button></form></div>'
+            )
         return self._shell("Options Radar 登录", content)
 
     def _dashboard_page(self, path: str, csrf: str, query: Optional[Mapping[str, str]] = None) -> str:
@@ -2793,6 +2877,12 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
               '  if(out.status==="ok")setTimeout(function(){location.reload();},800);'
               '}'
               '</script></section>'
+            + '<section class="card"><h2>管理员账户</h2>'
+              '<form data-ajax="1" method="post" action="/admin-password"><input type="hidden" name="csrf" value="' + html.escape(csrf) + '">'
+              '<label>原密码</label><input name="old_password" type="password" autocomplete="current-password">'
+              '<label>新密码（至少8位）</label><input name="new_password" type="password" autocomplete="new-password">'
+              '<label>确认新密码</label><input name="confirm_password" type="password" autocomplete="new-password">'
+              '<button>修改管理员密码</button></form></section>'
             + self._alerts_setup_html(data, csrf)
             + f'<form method="post" action="/logout"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button class="secondary">退出登录</button></form>'
         )

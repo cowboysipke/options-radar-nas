@@ -88,6 +88,40 @@ class DashboardHttpTests(unittest.TestCase):
         csrf = re.search(r'name="csrf" value="([^"]+)"', page).group(1)
         return cookie, csrf
 
+    def test_admin_init_login_and_password_change_flow(self):
+        # 未配置管理员时，登录页显示创建表单
+        status, _, page = self.request("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertIn("创建管理员账户", page)
+        # 创建管理员
+        body = urlencode({"username": "admin", "password": "secret123", "confirm": "secret123"})
+        status, headers, _ = self.request("POST", "/admin-init", body, {"Content-Type": "application/x-www-form-urlencoded", "Content-Length": str(len(body))})
+        self.assertEqual(status, 303)
+        cookie = headers["Set-Cookie"].split(";", 1)[0]
+        # 配置里已有 admin（密码为哈希）
+        data = self.store.load()
+        self.assertEqual(data["admin"]["username"], "admin")
+        self.assertNotEqual(data["admin"]["password_hash"], "secret123")
+        self.assertIn("salt", data["admin"])
+        # 错误密码 → 401
+        bad = urlencode({"username": "admin", "password": "wrongpass"})
+        status, _, _ = self.request("POST", "/login", bad, {"Content-Type": "application/x-www-form-urlencoded", "Content-Length": str(len(bad))})
+        self.assertEqual(status, 401)
+        # 正确用户名密码 → 303 + session
+        good = urlencode({"username": "admin", "password": "secret123"})
+        status, headers, _ = self.request("POST", "/login", good, {"Content-Type": "application/x-www-form-urlencoded", "Content-Length": str(len(good))})
+        self.assertEqual(status, 303)
+        self.assertIn("radar_setup_session", headers["Set-Cookie"])
+        # 改密后旧密码失效
+        page2 = self.request("GET", "/", headers={"Cookie": cookie})[2]
+        csrf = re.search(r'name="csrf" value="([^"]+)"', page2).group(1)
+        change = urlencode({"old_password": "secret123", "new_password": "newsecret456", "confirm_password": "newsecret456"})
+        status, _, _ = self.request("POST", "/admin-password", change, {"Cookie": cookie, "X-CSRF-Token": csrf, "Content-Type": "application/x-www-form-urlencoded", "Content-Length": str(len(change))})
+        self.assertEqual(status, 200)
+        old = urlencode({"username": "admin", "password": "secret123"})
+        status, _, _ = self.request("POST", "/login", old, {"Content-Type": "application/x-www-form-urlencoded", "Content-Length": str(len(old))})
+        self.assertEqual(status, 401)
+
     def test_all_chinese_pages_are_authenticated_and_utf8(self):
         pages = {
             "/": "今日推荐",
