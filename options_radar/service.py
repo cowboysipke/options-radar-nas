@@ -429,9 +429,14 @@ class OptionsRadarService:
         return [item.symbol for item in self.database.list_watchlist()]
 
     def sync_broker(self, force: bool = False) -> BrokerSnapshot:
-        """Synchronise IBKR read-only portfolio; Futu is imported on demand only."""
+        """Synchronise the read-only portfolio from the configured market provider.
+
+        Futu OpenD is the primary source when ``market.provider == "futu"``;
+        otherwise the IBKR read-only feed is used (``ib_insync`` optional).
+        """
         del force
-        if self._futu_injected:
+        market_provider = str(self.config.section("market").get("provider", "")).strip().lower()
+        if self._futu_injected or market_provider == "futu":
             return self._sync_futu_compat()
         positions = self.ibkr.sync_positions()
         payload_positions: Dict[str, Dict[str, float]] = {}
@@ -2336,17 +2341,19 @@ class OptionsRadarService:
             if not force and self._health_cache is not None and time.monotonic() - self._health_cache_at < 30:
                 return dict(self._health_cache)
         broker = self.database.latest_broker_snapshot()
+        market_provider = str(self.config.section("market").get("provider", "")).strip().lower() or "futu"
         portfolio_section = {
-            "source": broker.source if broker else "ibkr", "as_of": broker.as_of.isoformat() if broker else None,
+            "source": broker.source if broker else market_provider, "as_of": broker.as_of.isoformat() if broker else None,
             "nav_present": bool(broker and broker.nav is not None),
             "positions": len(broker.positions) if broker else 0,
         }
+        futu_status = self.providers.status("futu")
         result = {
             "status": "degraded" if self._last_error else ("ok" if self._started else "stopped"),
             "last_collection": self._last_collection, "last_sync": self._last_sync,
             "last_error": self._last_error, "discord": self.source.health(),
-            "opend": {"status": "migration_only", "enabled": False},
-            "futu": self.providers.status("futu"),
+            "opend": futu_status,
+            "futu": futu_status,
             "ibkr": {
                 "provider": "ibkr", "configured": True, "connected": bool(broker),
                 "status": "ready" if (broker and broker.nav is not None) else ("synced" if broker else "no_snapshot"),
