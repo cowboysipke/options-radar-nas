@@ -1016,7 +1016,7 @@ function renderCandleChart(container, data) {{
   const W = 800, H = 320, padL = 58, padR = 78, padT = 16, padB = 30;
   function eventTime(iso) {{
     let text = String(iso || '');
-    if (text && !/[zZ]|[+-]\d\d:?\d\d$/.test(text)) text += 'Z';  // DB stores naive UTC
+    if (text && !/[zZ]|[+-]\\d\\d:?\\d\\d$/.test(text)) text += 'Z';  // DB stores naive UTC
     try {{ return new Date(text).getTime(); }} catch(_) {{ return null; }}
   }}
   const events = (data.flow_events || []).map(function(ev) {{ return {{ev: ev, t: eventTime(ev.observed_at)}}; }})
