@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from urllib.parse import urlencode
 
-from options_radar.setup_server import SetupConfigStore, create_setup_server
+from options_radar.setup_server import SetupApplication, SetupConfigStore, create_setup_server
 
 
 class DashboardHttpTests(unittest.TestCase):
@@ -121,6 +121,38 @@ class DashboardHttpTests(unittest.TestCase):
         old = urlencode({"username": "admin", "password": "secret123"})
         status, _, _ = self.request("POST", "/login", old, {"Content-Type": "application/x-www-form-urlencoded", "Content-Length": str(len(old))})
         self.assertEqual(status, 401)
+
+    def test_forgot_password_resets_via_management_token(self):
+        # 先创建管理员
+        body = urlencode({"username": "admin", "password": "secret123", "confirm": "secret123"})
+        self.request("POST", "/admin-init", body, {"Content-Type": "application/x-www-form-urlencoded", "Content-Length": str(len(body))})
+        # 用管理口令重置密码
+        reset = urlencode({"token": self.TOKEN, "new_password": "resetpw123", "confirm": "resetpw123"})
+        status, _, page = self.request("POST", "/admin-reset", reset, {"Content-Type": "application/x-www-form-urlencoded", "Content-Length": str(len(reset))})
+        self.assertEqual(status, 200)
+        self.assertIn("密码已重置", page)
+        # 旧密码失效，新密码可登录
+        old = urlencode({"username": "admin", "password": "secret123"})
+        status, _, _ = self.request("POST", "/login", old, {"Content-Type": "application/x-www-form-urlencoded", "Content-Length": str(len(old))})
+        self.assertEqual(status, 401)
+        new = urlencode({"username": "admin", "password": "resetpw123"})
+        status, headers, _ = self.request("POST", "/login", new, {"Content-Type": "application/x-www-form-urlencoded", "Content-Length": str(len(new))})
+        self.assertEqual(status, 303)
+        self.assertIn("radar_setup_session", headers["Set-Cookie"])
+
+    def test_env_admin_username_password_bootstrap(self):
+        os.environ["ADMIN_USERNAME"] = "env_admin"
+        os.environ["ADMIN_PASSWORD"] = "envpass123"
+        try:
+            with tempfile.TemporaryDirectory() as directory:
+                store = SetupConfigStore(Path(directory) / "config.yaml")
+                store.initialize()
+                app = SetupApplication(store, self.TOKEN, health=lambda: {"status": "ok"})
+                self.assertEqual(store.load()["admin"]["username"], "env_admin")
+                self.assertTrue(app.authenticate_admin("env_admin", "envpass123"))
+        finally:
+            os.environ.pop("ADMIN_USERNAME", None)
+            os.environ.pop("ADMIN_PASSWORD", None)
 
     def test_all_chinese_pages_are_authenticated_and_utf8(self):
         pages = {

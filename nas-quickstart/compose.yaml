@@ -15,6 +15,9 @@ services:
       SETUP_HOST: 0.0.0.0
       SETUP_PORT: "8787"
       CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium
+      # 管理员账户（用户名+密码）：设置后作为登录凭据，忘记密码也可在登录页用管理口令重置
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       # 代理透传：容器内 OpenD 下载与 Discord REST 采集自动读取（见 .env.example）
       HTTP_PROXY: ${HTTP_PROXY:-}
       HTTPS_PROXY: ${HTTPS_PROXY:-}

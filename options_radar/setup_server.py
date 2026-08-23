@@ -452,6 +452,22 @@ class SetupApplication:
         self._sessions: Dict[str, Tuple[float, str]] = {}
         self._lock = threading.Lock()
         self._local_session: Optional[Tuple[str, str]] = self.new_session() if self.local_mode else None
+        self._apply_env_admin()
+
+    def _apply_env_admin(self) -> None:
+        """Bootstrap/override the admin account from environment variables.
+
+        ``ADMIN_USERNAME`` + ``ADMIN_PASSWORD`` are authoritative when both are
+        set: on startup the stored account is (re)created to match them, so the
+        operator always has a known credential even if the panel password was
+        lost.  Panel changes persist until the next restart when env is absent.
+        """
+        username = os.getenv("ADMIN_USERNAME", "").strip()
+        password = os.getenv("ADMIN_PASSWORD", "")
+        if not username or not password:
+            return
+        if not self.admin_configured() or self.admin_username() != username or not self.authenticate_admin(username, password):
+            self.set_admin(username, password)
 
     def build_info(self) -> Dict[str, str]:
         return {"version": BUILD_VERSION, "git_sha": BUILD_SHA,
@@ -510,6 +526,14 @@ class SetupApplication:
             "sha256", str(password).encode("utf-8"), str(admin.get("salt", "")).encode("ascii"), 200_000,
         ).hex()
         return hmac.compare_digest(digest, str(admin.get("password_hash", "")))
+
+    def reset_admin_via_token(self, token: str, new_password: str) -> bool:
+        """Reset the admin password using the management token (forgot-password)."""
+        if not self.authenticate_token(token):
+            return False
+        username = self.admin_username() or "admin"
+        self.set_admin(username, new_password)
+        return True
 
     def new_session(self) -> Tuple[str, str]:
         session_id = secrets.token_urlsafe(32)
@@ -882,6 +906,19 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
             values = self._body()
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
             self._send(HTTPStatus.BAD_REQUEST, html.escape(str(exc)), "text/plain; charset=utf-8")
+            return
+        if path == "/admin-reset":
+            if not self.app.admin_configured():
+                self._send(HTTPStatus.BAD_REQUEST, self._login_page("尚未创建管理员账户，请先创建", success=False))
+                return
+            if str(values.get("new_password", "")) != str(values.get("confirm", "")):
+                self._send(HTTPStatus.BAD_REQUEST, self._login_page("两次输入的新密码不一致"))
+                return
+            if not self.app.reset_admin_via_token(str(values.get("token", "")), str(values.get("new_password", ""))):
+                time.sleep(0.2)
+                self._send(HTTPStatus.UNAUTHORIZED, self._login_page("管理口令不正确，无法重置"))
+                return
+            self._send(HTTPStatus.OK, self._login_page("密码已重置，请用新密码登录", success=True))
             return
         if path == "/admin-init":
             if self.app.admin_configured():
@@ -1757,18 +1794,25 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
 }})();
 </script></body></html>'''
 
-    def _login_page(self, message: str = "") -> str:
-        notice = f'<p class="error">{html.escape(message)}</p>' if message else ""
+    def _login_page(self, message: str = "", success: bool = False) -> str:
+        cls = "ok" if success else "error"
+        notice = f'<p class="{cls}">{html.escape(message)}</p>' if message else ""
         if self.app.admin_configured():
             content = (
-                "<h1>异常期权助手</h1><p class=\"sub\">使用管理员账户登录（管理口令仍可备用）。</p>"
+                "<h1>异常期权助手</h1><p class=\"sub\">使用管理员账户登录。</p>"
                 f'{notice}<div class="card"><form method="post" action="/login">'
                 '<label>用户名</label><input name="username" type="text" required autofocus>'
                 '<label>密码</label><input name="password" type="password" required>'
                 '<button>进入管理面板</button></form>'
                 '<details class="card" style="margin-top:12px"><summary>使用管理口令登录（备用）</summary>'
                 '<form method="post" action="/login"><label>管理口令</label>'
-                '<input name="token" type="password"><button>进入</button></form></details></div>'
+                '<input name="token" type="password"><button>进入</button></form></details>'
+                '<details class="card" style="margin-top:12px"><summary>忘记密码？用管理口令重置</summary>'
+                '<form method="post" action="/admin-reset">'
+                '<label>管理口令（容器日志 SETUP CODE）</label><input name="token" type="password" required>'
+                '<label>新密码（至少8位）</label><input name="new_password" type="password" required>'
+                '<label>确认新密码</label><input name="confirm" type="password" required>'
+                '<button class="secondary">重置密码</button></form></details></div>'
             )
         else:
             content = (
