@@ -9,14 +9,18 @@ services:
     init: true
     shm_size: "1gb"
     environment:
-      TZ: Asia/Shanghai
+      TZ: ${TZ:-Asia/Shanghai}
       DATA_DIR: /data
       CONFIG_PATH: /data/config.yaml
       SETUP_HOST: 0.0.0.0
       SETUP_PORT: "8787"
       CHROMIUM_EXECUTABLE_PATH: /usr/bin/chromium
+      # 代理透传：容器内 OpenD 下载与 Discord REST 采集自动读取（见 .env.example）
+      HTTP_PROXY: ${HTTP_PROXY:-}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+      NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
     ports:
-      - "8787:8787"
+      - "${HOST_PORT:-8787}:8787"
     volumes:
       - options-radar-data:/data
     security_opt:

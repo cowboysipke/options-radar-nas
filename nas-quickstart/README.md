@@ -2,6 +2,21 @@
 
 这个目录只需要使用 [`compose.yaml`](compose.yaml)。它会运行一个容器，并创建一个名为 `options-radar-data` 的持久卷。
 
+## 方式一：一键脚本（SSH/终端，推荐）
+
+在 NAS 上通过 SSH 或终端执行：
+
+```bash
+cd nas-quickstart
+cp .env.example .env    # 可选：改时区 / 端口 / 代理
+./deploy.sh             # 首次部署，自动拉镜像、起容器、打印 SETUP CODE
+./deploy.sh --update    # 以后更新到最新镜像（数据卷保留）
+```
+
+脚本会打印面板地址与 `SETUP CODE`。`deploy.sh` 支持通过 `.env` 配置 `HTTP_PROXY`/`HTTPS_PROXY`（中国大陆访问 Discord / OpenD 下载时使用）。
+
+## 方式二：图形界面导入（飞牛 Docker 应用）
+
 ## 第一步：拉取镜像
 
 在飞牛 NAS 打开Docker应用，进入镜像页面，拉取：
