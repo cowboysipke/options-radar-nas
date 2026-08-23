@@ -216,6 +216,7 @@ FIELDS = (
     Field("qmr_channel", "discord.channel_names.qmr", "QMR分析师频道", _plain),
     Field("fpd_channel", "discord.channel_names.fpd", "FPD分析师频道", _plain),
     Field("feishu_app_id", "notifications.feishu_app_id", "飞书 App ID", _plain),
+    Field("futu_user_id", "futu.user_id", "富途账号（手机号/邮箱/ID）", _plain),
     Field("flash_model", "ai.flash_model", "DeepSeek日常模型", _model),
     Field("pro_model", "ai.pro_model", "DeepSeek复核模型", _model),
     Field("report_delay", "schedule.report_delay_minutes", "收盘后日报延迟（分钟）", _delay),
@@ -625,6 +626,46 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
             message = str(exc) or type(exc).__name__
             return {"status": "error", "message": message}
 
+    def _read_raw_body(self, max_bytes: int) -> bytes:
+        try:
+            size = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            size = 0
+        if size <= 0 or size > max_bytes:
+            raise ValueError("文件大小无效或超出上限")
+        return self.rfile.read(size)
+
+    def _export_bundle(self) -> Dict[str, Any]:
+        config = self.app.store.load()
+        refs = config.get("secret_refs", {}) if isinstance(config.get("secret_refs"), Mapping) else {}
+        secrets: Dict[str, str] = {}
+        for name, path in refs.items():
+            try:
+                value = Path(str(path)).read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeDecodeError):
+                value = ""
+            secrets[str(name)] = value
+        return {"config": config, "secrets": secrets}
+
+    def _import_bundle(self, bundle: Mapping[str, Any]) -> Dict[str, Any]:
+        config = bundle.get("config")
+        if not isinstance(config, dict):
+            raise ValueError("配置包缺少 config 对象")
+        data_dir = Path(os.getenv("DATA_DIR", "/data"))
+        config["database_path"] = str(data_dir / "options_radar.db")
+        config["evidence_dir"] = str(data_dir / "evidence")
+        refs = self.app.store.fixed_secret_refs()
+        config["secret_refs"] = refs
+        self.app.store.save(config)
+        secrets = bundle.get("secrets")
+        if isinstance(secrets, dict):
+            for name, value in secrets.items():
+                target = refs.get(str(name))
+                if target and isinstance(value, str) and value:
+                    Path(target).parent.mkdir(parents=True, exist_ok=True)
+                    Path(target).write_text(value, encoding="utf-8")
+        return {"status": "ok", "message": "配置已导入"}
+
     @staticmethod
     def _contract_key(path: str, prefix: str) -> Optional[str]:
         """Return one decoded contract identifier without accepting sub-paths."""
@@ -651,6 +692,26 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, data)
             return
         session = self._session()
+        if path == "/api/config/export":
+            if not session:
+                self._json(HTTPStatus.UNAUTHORIZED, {"status": "unauthorized"})
+                return
+            self._json(HTTPStatus.OK, self._export_bundle())
+            return
+        if path == "/api/data/export":
+            if not session:
+                self._json(HTTPStatus.UNAUTHORIZED, {"status": "unauthorized"})
+                return
+            db_path = Path(os.getenv("DATA_DIR", "/data")) / "options_radar.db"
+            if not db_path.is_file():
+                self._json(HTTPStatus.NOT_FOUND, {"status": "error", "message": "数据文件不存在"})
+                return
+            payload = db_path.read_bytes()
+            self._headers(HTTPStatus.OK, "application/octet-stream", len(payload), {
+                "Content-Disposition": 'attachment; filename="options_radar.db"',
+            })
+            self.wfile.write(payload)
+            return
         if path in {"/discord-login.png", "/futu-captcha.png"}:
             if not session:
                 self._send(HTTPStatus.UNAUTHORIZED, "Login required", "text/plain; charset=utf-8")
@@ -705,6 +766,27 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urlsplit(self.path).path
+        if path == "/api/data/import":
+            session = self._session()
+            if not session:
+                self._json(HTTPStatus.UNAUTHORIZED, {"status": "unauthorized"})
+                return
+            _, csrf = session
+            if not hmac.compare_digest(str(self.headers.get("X-CSRF-Token", "")), csrf):
+                self._json(HTTPStatus.FORBIDDEN, {"status": "forbidden", "message": "CSRF validation failed"})
+                return
+            try:
+                raw = self._read_raw_body(512 * 1024 * 1024)
+            except ValueError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"status": "error", "message": str(exc)})
+                return
+            data_dir = Path(os.getenv("DATA_DIR", "/data"))
+            db_path = data_dir / "options_radar.db"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            db_path.write_bytes(raw)
+            self._callback("reload_service", {})
+            self._json(HTTPStatus.OK, {"status": "ok", "message": "数据已导入，服务已重启"})
+            return
         try:
             values = self._body()
         except (UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
@@ -739,6 +821,15 @@ class SetupRequestHandler(BaseHTTPRequestHandler):
                 self._json(HTTPStatus.FORBIDDEN, {"status": "forbidden", "message": "CSRF validation failed"})
             else:
                 self._send(HTTPStatus.FORBIDDEN, "CSRF validation failed", "text/plain; charset=utf-8")
+            return
+        if path == "/api/config/import":
+            try:
+                result = self._import_bundle(values)
+            except ValueError as exc:
+                self._json(HTTPStatus.BAD_REQUEST, {"status": "error", "message": str(exc)})
+                return
+            self._callback("reload_service", {})
+            self._json(HTTPStatus.OK, result)
             return
         if path == "/save":
             try:
@@ -2463,6 +2554,12 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                 f'<label for="{form_name}">{html.escape(label)}</label><input id="{form_name}" name="{form_name}" '
                 f'type="password" autocomplete="new-password" placeholder="{placeholder}">'
             )
+        # 富途登录密码：由 _save_secrets 特殊处理（仅持久化 OpenD 协议的 MD5 形式）。
+        futu_pwd_placeholder = "已保存，留空保持原值" if statuses.get("富途登录凭据") else "粘贴到这里"
+        secret_inputs.append(
+            f'<label for="futu_login_password">富途登录密码</label><input id="futu_login_password" name="futu_login_password" '
+            f'type="password" autocomplete="new-password" placeholder="{futu_pwd_placeholder}">'
+        )
         status_html = "".join(
             f'<span>{html.escape(label)}</span><strong>{"已保存" if present else "待配置"}</strong>'
             for label, present in statuses.items()
@@ -2512,13 +2609,59 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
             '<section class="card"><h2>API配置</h2><div class="form-grid">'
             + "".join(f'<div>{inp}</div>' for inp in secret_inputs) + '</div></section></div>'
             '<button>保存并启用</button></form>'
-            '<section class="card"><h2>Discord登录</h2><p>点击后会打开独立Discord浏览器窗口；登录资料保存在本机专用目录。</p>'
+            '<section class="card"><h2>Discord登录</h2><p>采集使用浏览器模拟（能读取 REST API 读不到的订阅帖）。下方「Discord 用户 Token」字段当前仅作预留，采集不依赖它。</p>'
             + self._action_forms(csrf, (("/api/actions/discord-login", "打开Discord登录"),))
             + qr_html + '</section>'
-            '<section class="card"><h2>\u5bcc\u9014\u81ea\u9009\u8fc1\u79fb</h2><p>V2\u65e5\u5e38\u884c\u60c5\u4e0e\u6301\u4ed3\u4f7f\u7528IBKR\u3002\u5bcc\u9014OpenD\u4ec5\u5728\u9700\u8981\u65f6\u5bfc\u5165\u4e00\u6b21\u81ea\u9009\uff0c\u4e0d\u5728\u6b64\u9875\u9762\u4fdd\u5b58\u767b\u5f55\u5bc6\u7801\u6216\u9a8c\u8bc1\u7801\u3002</p>'
-            + self._action_forms(csrf, (("/futu/import-watchlist", "\u4ece\u5bcc\u9014\u5bfc\u5165\u81ea\u9009"),))
-            + '<p class="muted">\u8bf7\u5148\u5728\u672c\u673a\u542f\u52a8\u5e76\u767b\u5f55\u5bcc\u9014OpenD\uff0c\u5bfc\u5165\u5b8c\u6210\u540e\u5373\u53ef\u5173\u95edOpenD\u3002</p></section>'
-            f'<form method="post" action="/logout"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button class="secondary">退出登录</button></form>'
+            + ('<section class="card"><h2>富途 OpenD 登录</h2>'
+               '<p>富途 OpenD 为主数据源。在上方填写富途账号与登录密码并保存后，容器会后台下载约 467MB 的 OpenD 并自动启动；状态显示「就绪」后即可拉取行情与持仓。</p>'
+               '<div id="opend-status" class="muted">正在读取 OpenD 状态…</div>'
+               '<script>async function refreshOpend(){try{const r=await fetch("/api/futu/status");const d=await r.json();'
+               'const el=document.getElementById("opend-status");const s=(d&&d.state)||"unknown";const run=(d&&d.running)?"运行中":"未运行";'
+               'el.innerHTML="状态：<b>"+s+"</b>（"+run+"）"+((d&&d.message)?("<br>"+d.message):"");}'
+               'catch(e){document.getElementById("opend-status").textContent="状态读取失败";}}refreshOpend();</script>'
+               + self._action_forms(csrf, (("/futu/send-code", "发送验证码"), ("/futu/relogin", "重新登录"), ("/futu/sync", "立即同步"), ("/futu/import-watchlist", "从富途导入自选")))
+               + '<form data-ajax="1" method="post" action="/futu/submit-code"><input type="hidden" name="csrf" value="' + html.escape(csrf) + '">'
+               '<label>手机验证码</label><input name="verification_code" inputmode="numeric" autocomplete="one-time-code">'
+               '<label>图形验证码（出现时填写）</label><input name="captcha_code" autocomplete="off"><button>提交验证码</button></form>'
+               + captcha_html + '</section>'
+               if not local else
+               '<section class="card"><h2>富途 OpenD</h2>'
+               '<p>桌面版请在本机启动并登录富途 OpenD（OpenD 应用），本面板连接 127.0.0.1:11111；在上方填写富途账号后可一键导入自选。</p>'
+               + self._action_forms(csrf, (("/futu/import-watchlist", "从富途导入自选"),))
+               + '</section>')
+            + '<section class="card"><h2>配置与数据迁移</h2>'
+              '<p>导出当前配置与密钥，或导入从桌面版/另一台机器导出的配置；也可导出、导入历史数据库（迁移时使用）。</p>'
+              '<div class="toolbar">'
+              '<button type="button" onclick="exportConfig()">导出配置</button>'
+              '<label>导入配置 <input type="file" id="config-file" accept=".json,application/json"></label>'
+              '<button type="button" onclick="importConfig()">导入配置</button>'
+              '<button type="button" onclick="downloadData()">导出数据</button>'
+              '<label>导入数据 <input type="file" id="data-file" accept=".db"></label>'
+              '<button type="button" onclick="importData()">导入数据</button>'
+              '</div>'
+              '<script>'
+              'const _csrf=' + json.dumps(str(csrf)) + ';'
+              'async function exportConfig(){'
+              '  const r=await fetch("/api/config/export");const d=await r.json();'
+              '  const blob=new Blob([JSON.stringify(d,null,2)],{type:"application/json"});'
+              '  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="options-radar-config.json";a.click();'
+              '}'
+              'async function importConfig(){'
+              '  const f=document.getElementById("config-file").files[0];if(!f){alert("请选择配置文件");return;}'
+              '  let d;try{d=JSON.parse(await f.text())}catch(e){alert("JSON 解析失败");return;}'
+              '  const r=await fetch("/api/config/import",{method:"POST",headers:{"Content-Type":"application/json","X-CSRF-Token":_csrf},body:JSON.stringify(d)});'
+              '  const out=await r.json();alert(out.message||out.status);'
+              '  if(out.status==="ok")setTimeout(function(){location.reload();},800);'
+              '}'
+              'function downloadData(){location.href="/api/data/export";}'
+              'async function importData(){'
+              '  const f=document.getElementById("data-file").files[0];if(!f){alert("请选择数据库文件");return;}'
+              '  const r=await fetch("/api/data/import",{method:"POST",headers:{"X-CSRF-Token":_csrf},body:f});'
+              '  const out=await r.json();alert(out.message||out.status);'
+              '  if(out.status==="ok")setTimeout(function(){location.reload();},800);'
+              '}'
+              '</script></section>'
+            + f'<form method="post" action="/logout"><input type="hidden" name="csrf" value="{html.escape(csrf)}"><button class="secondary">退出登录</button></form>'
         )
         return self._shell("本地配置" if local else "本地配置 / NAS部署", content, "/setup")
 

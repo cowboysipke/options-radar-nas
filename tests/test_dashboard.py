@@ -1,5 +1,6 @@
 import http.client
 import json
+import os
 import re
 import tempfile
 import threading
@@ -149,14 +150,16 @@ class DashboardHttpTests(unittest.TestCase):
         self.assertEqual(status, 403)
         self.assertEqual(json.loads(body)["status"], "forbidden")
 
-    def test_setup_page_only_exposes_one_time_futu_watchlist_import(self):
+    def test_setup_page_exposes_futu_opend_login_and_verification(self):
         status, _, page = self.request("GET", "/setup", headers={"Cookie": self.cookie})
         self.assertEqual(status, 200)
-        self.assertIn("富途自选迁移", page)
+        self.assertIn("富途 OpenD", page)
+        self.assertIn('name="futu_user_id"', page)
+        self.assertIn('name="futu_login_password"', page)
+        self.assertIn('/futu/send-code', page)
+        self.assertIn('/futu/submit-code', page)
+        self.assertIn('手机验证码', page)
         self.assertIn('/futu/import-watchlist', page)
-        self.assertNotIn('/futu/send-code', page)
-        self.assertNotIn('/futu/submit-code', page)
-        self.assertNotIn('手机验证码', page)
         self.assertIn("API配置", page)
         self.assertIn("DeepSeek API Key", page)
         self.assertIn("飞书 App Secret", page)
@@ -169,6 +172,51 @@ class DashboardHttpTests(unittest.TestCase):
         self.assertIn('name="poll_minutes"', page)
         self.assertIn('name="session_start_hour"', page)
         self.assertIn('name="session_end_hour"', page)
+
+    def test_config_export_import_rewrites_paths_and_writes_secrets(self):
+        os.environ["DATA_DIR"] = self.temp.name
+        try:
+            # 导出当前配置（含 config 与 secrets 两个字段）
+            status, _, body = self.request("GET", "/api/config/export", headers={"Cookie": self.cookie})
+            self.assertEqual(status, 200)
+            bundle = json.loads(body)
+            self.assertIn("config", bundle)
+            self.assertIn("secrets", bundle)
+
+            # 构造一个带桌面路径 + 密钥的配置包，模拟桌面版 → NAS 迁移
+            import_bundle = {
+                "config": {
+                    "timezone": "Asia/Shanghai",
+                    "database_path": "data-local/options_radar.db",
+                    "evidence_dir": "data-local/evidence",
+                    "discord": {"source_server": "Alpha夜航社", "channel_names": {"flow": "异常期权"}},
+                    "futu": {"user_id": "13548899395", "host": "127.0.0.1", "port": 11111},
+                    "providers": {"market_priority": ["futu"]},
+                    "secret_refs": {"deepseek_api_key": "E:\\data-local\\secrets\\deepseek_api_key"},
+                    "setup_completed": True,
+                },
+                "secrets": {"deepseek_api_key": "sk-test-123"},
+            }
+            status, _, body = self.request(
+                "POST", "/api/config/import",
+                body=json.dumps(import_bundle),
+                headers={"Cookie": self.cookie, "X-CSRF-Token": self.csrf, "Content-Type": "application/json"},
+            )
+            self.assertEqual(status, 200)
+            self.assertEqual(json.loads(body)["status"], "ok")
+
+            # 路径被重写到容器布局
+            data = self.store.load()
+            self.assertEqual(data["database_path"], str(Path(self.temp.name) / "options_radar.db"))
+            self.assertEqual(data["evidence_dir"], str(Path(self.temp.name) / "evidence"))
+            self.assertEqual(data["futu"]["user_id"], "13548899395")
+            ref = data["secret_refs"]["deepseek_api_key"]
+            self.assertEqual(ref, str(Path(self.temp.name) / "secrets" / "deepseek_api_key"))
+            # 密钥文件被写入
+            self.assertTrue(Path(ref).is_file())
+            self.assertEqual(Path(ref).read_text(encoding="utf-8").strip(), "sk-test-123")
+        finally:
+            os.environ.pop("DATA_DIR", None)
 
     def test_poll_schedule_parsers_validate(self):
         from options_radar.setup_server import _hour, _minutes
