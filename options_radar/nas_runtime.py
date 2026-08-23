@@ -289,6 +289,18 @@ class NasRuntime:
                 result["api"] = {"status": "degraded", "error": type(exc).__name__}
         return result
 
+    def _discord_status_callback(self, _payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Expose the Discord browser session state for the setup panel."""
+        self._ensure_component()
+        component = self.component
+        if component is None:
+            return {"status": "pending", "message": "服务尚未启动"}
+        try:
+            discord = dict(component.health().get("discord", {}))
+        except Exception as exc:
+            return {"status": "error", "message": f"{type(exc).__name__}: {str(exc)[:120]}"}
+        return discord
+
     def _opend_send_verification(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         if not self._ensure_opend(wait=False):
             return {
@@ -409,6 +421,7 @@ class NasRuntime:
             "status": lambda _payload: self.health(),
             "system": lambda _payload: self.health(),
             "futu_status": self._opend_status_callback,
+            "discord_status": self._discord_status_callback,
             "futu_send_verification": self._opend_send_verification,
             "futu_submit_verification": self._opend_submit_verification,
             "futu_relogin": self._opend_relogin,

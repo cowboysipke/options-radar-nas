@@ -108,6 +108,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "alpaca_api_key": "/data/secrets/alpaca_api_key",
         "alpaca_api_secret": "/data/secrets/alpaca_api_secret",
         "discord_user_token": "/data/secrets/discord_user_token",
+        "ibkr_flex_token": "/data/secrets/ibkr_flex_token",
     },
     "setup_completed": False,
 }
@@ -130,6 +131,7 @@ SECRET_FORM_FIELDS = {
     "alpaca_api_key": ("Alpaca API Key", "alpaca_api_key"),
     "alpaca_api_secret": ("Alpaca API Secret", "alpaca_api_secret"),
     "discord_user_token": ("Discord 用户 Token", "discord_user_token"),
+    "ibkr_flex_token": ("IBKR Flex Token", "ibkr_flex_token"),
 }
 
 
@@ -217,6 +219,7 @@ FIELDS = (
     Field("fpd_channel", "discord.channel_names.fpd", "FPD分析师频道", _plain),
     Field("feishu_app_id", "notifications.feishu_app_id", "飞书 App ID", _plain),
     Field("futu_user_id", "futu.user_id", "富途账号（手机号/邮箱/ID）", _plain),
+    Field("flex_query_id", "ibkr.flex_query_id", "IBKR Flex Query ID（持仓同步）", _plain),
     Field("flash_model", "ai.flash_model", "DeepSeek日常模型", _model),
     Field("pro_model", "ai.pro_model", "DeepSeek复核模型", _model),
     Field("report_delay", "schedule.report_delay_minutes", "收盘后日报延迟（分钟）", _delay),
@@ -501,6 +504,7 @@ PAGE_INFO = {
 GET_APIS = {
     "/api/status": "status",
     "/api/futu/status": "futu_status",
+    "/api/discord-status": "discord_status",
     "/api/recommendations": "recommendations",
     "/api/portfolio": "portfolio",
     "/api/contracts": "contracts",
@@ -1652,9 +1656,14 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
             action_cards = self._action_forms(csrf, (("/api/actions/flow-classify", "分类Flow类型"),), reload_paths={"/api/actions/flow-classify"})
         elif path == "/system":
             action_cards = self._action_forms(csrf, (
+                ("/api/actions/collect", "手动采集"),
+                ("/api/actions/reevaluate", "刷新评分"),
+                ("/futu/sync", "富途同步"),
+                ("/api/ibkr/sync", "同步IBKR持仓"),
                 ("/api/providers/massive/test", "测试Massive"),
                 ("/api/actions/deepseek-test", "测试DeepSeek"),
                 ("/api/actions/feishu-test", "测试飞书"),
+                ("/api/actions/discord-login", "Discord扫码登录"),
                 ("/api/actions/backup", "创建备份"),
                 ("/api/actions/gex-snapshot", "记录GEX快照"),
                 ("/api/actions/alerts-check", "检查GEX预警"),
@@ -2444,18 +2453,21 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
             parts = []
             overall = str(data.get("status", "unknown"))
             session_label = us_cash_session_label()
-            portfolio = data.get("portfolio") or {}
+            # NasRuntime.health() 把 service.health() 放在 core 字段下；数据源卡片
+            # 与采集/同步时间戳都在 core 里，顶层只有 status/scheduler/opend。
+            core = data.get("core") if isinstance(data.get("core"), Mapping) else {}
+            portfolio = core.get("portfolio") or {}
             def tile(label, value):
                 return f'<div class="tile"><b>{html.escape(label)}</b><span>{html.escape(value)}</span></div>'
             parts.append(
                 '<section class="card"><h2>总览</h2><div class="tiles">'
                 + tile("系统状态", overall)
                 + tile("美股时段", session_label)
-                + tile("最近采集", str((data.get("last_collection") or "从未采集")[:19]))
-                + tile("最近同步", str((data.get("last_sync") or "从未同步")[:19]))
+                + tile("最近采集", str((core.get("last_collection") or data.get("last_collection") or "从未采集")[:19]))
+                + tile("最近同步", str((core.get("last_sync") or data.get("last_sync") or "从未同步")[:19]))
                 + tile("持仓来源", str(portfolio.get("source", "无")))
                 + tile("持仓数", str(portfolio.get("positions", 0)))
-                + tile("自选数", str(data.get("watchlist_count", 0)))
+                + tile("自选数", str(core.get("watchlist_count", 0)))
                 + tile("净值可用", "是" if portfolio.get("nav_present") else "否")
                 + '</div></section>'
             )
@@ -2472,11 +2484,11 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
                         if quality and quality not in ("missing", "unknown"):
                             state = f"{state}（{quality}）"
                 return f'<section class="card"><h2>{label}</h2><div class="tile"><span>{html.escape(state)}</span></div></section>'
-            grid = [provider_card("futu", "富途 OpenD", data.get("futu")),
-                    provider_card("ibkr", "IBKR", data.get("ibkr")),
-                    provider_card("discord", "Discord", data.get("discord")),
-                    provider_card("ai", "DeepSeek", data.get("ai")),
-                    provider_card("feishu", "飞书", data.get("feishu"))]
+            grid = [provider_card("futu", "富途 OpenD", core.get("futu")),
+                    provider_card("ibkr", "IBKR", core.get("ibkr")),
+                    provider_card("discord", "Discord", core.get("discord")),
+                    provider_card("ai", "DeepSeek", core.get("ai")),
+                    provider_card("feishu", "飞书", core.get("feishu"))]
             parts.append('<section class="card"><h2>数据源</h2><div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">' + "".join(grid) + '</div></section>')
             gex_snap = data.get("gex_snapshots") or {}
             bottom = []
@@ -2609,7 +2621,15 @@ document.querySelectorAll('button[data-gex]').forEach(function(btn) {{
             '<section class="card"><h2>API配置</h2><div class="form-grid">'
             + "".join(f'<div>{inp}</div>' for inp in secret_inputs) + '</div></section></div>'
             '<button>保存并启用</button></form>'
-            '<section class="card"><h2>Discord登录</h2><p>采集使用浏览器模拟（能读取 REST API 读不到的订阅帖）。下方「Discord 用户 Token」字段当前仅作预留，采集不依赖它。</p>'
+            '<section class="card"><h2>Discord登录</h2>'
+            '<p>采集使用浏览器模拟（能读取 REST API 读不到的订阅帖）。点「打开Discord登录」生成二维码，用手机 App 扫一次即可；登录态持久保存，之后全自动采集。下方「Discord 用户 Token」字段仅作预留。</p>'
+            '<div id="discord-status" class="muted">正在读取 Discord 状态…</div>'
+            '<script>async function refreshDiscordStatus(){try{const r=await fetch("/api/discord-status");const d=await r.json();'
+            'const el=document.getElementById("discord-status");const s=(d&&d.status)||"";'
+            'const label={ready:"已登录（采集就绪）",login_required:"等待扫码登录",login_pending:"登录处理中",starting:"浏览器启动中",stopped:"未启动",error:"出错"}[s]||s||"未知";'
+            'el.innerHTML="采集状态：<b>"+label+"</b>"+(d.last_success?("<br>最近成功采集："+d.last_success):"")+(d.last_error?("<br><span class=\'error\'>最近错误："+d.last_error+"</span>"):"");'
+            '}catch(e){document.getElementById("discord-status").textContent="状态读取失败";}}'
+            'refreshDiscordStatus();setInterval(refreshDiscordStatus,15000);</script>'
             + self._action_forms(csrf, (("/api/actions/discord-login", "打开Discord登录"),))
             + qr_html + '</section>'
             + ('<section class="card"><h2>富途 OpenD 登录</h2>'

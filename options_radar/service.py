@@ -124,6 +124,7 @@ def _secret_environment(config: AppConfig) -> None:
         "feishu_app_secret": "FEISHU_APP_SECRET_FILE",
         "feishu_webhook": "FEISHU_WEBHOOK_URL_FILE",
         "discord_user_token": "DISCORD_USER_TOKEN_FILE",
+        "ibkr_flex_token": "IBKR_FLEX_TOKEN_FILE",
         "massive_api_key": "MASSIVE_API_KEY_FILE",
         "alpaca_api_key": "ALPACA_API_KEY_FILE",
         "alpaca_api_secret": "ALPACA_API_SECRET_FILE",
@@ -433,11 +434,23 @@ class OptionsRadarService:
 
         Futu OpenD is the primary source when ``market.provider == "futu"``;
         otherwise the IBKR read-only feed is used (``ib_insync`` optional).
+        When Futu has no active trading account (quote-only setup) and an IBKR
+        Flex query is configured, positions fall back to the Flex Web Service
+        which runs fully headless (no Gateway/TWS required).
         """
         del force
         market_provider = str(self.config.section("market").get("provider", "")).strip().lower()
         if self._futu_injected or market_provider == "futu":
-            return self._sync_futu_compat()
+            try:
+                return self._sync_futu_compat()
+            except Exception as exc:
+                snapshot = self._sync_flex_if_configured()
+                if snapshot is not None:
+                    return snapshot
+                raise
+        flex_snapshot = self._sync_flex_if_configured()
+        if flex_snapshot is not None:
+            return flex_snapshot
         positions = self.ibkr.sync_positions()
         payload_positions: Dict[str, Dict[str, float]] = {}
         for contract_key, item in positions.positions.items():
@@ -497,6 +510,54 @@ class OptionsRadarService:
             held_quantity=float(payload_positions.get(symbol, {}).get("quantity", 0)),
             concentration=abs(float(payload_positions.get(symbol, {}).get("market_value", 0))) / gross if gross else 0,
             nav=snapshot.nav, snapshot_at=snapshot.as_of) for symbol in (watched | set(payload_positions))}
+        self._last_sync = datetime.utcnow().isoformat()
+        return snapshot
+
+    def _sync_flex_if_configured(self) -> Optional[BrokerSnapshot]:
+        """Fall back to the IBKR Flex Web Service when it is fully configured.
+
+        Returns ``None`` (caller keeps its original error path) when either the
+        Flex query id or the token is missing, so quote-only Futu setups still
+        surface their real configuration error instead of a silent fallback.
+        """
+        query_id = str(self.config.section("ibkr").get("flex_query_id", "")).strip()
+        token = os.getenv("IBKR_FLEX_TOKEN_FILE", "").strip() or os.getenv("IBKR_FLEX_TOKEN", "").strip()
+        token_path = Path(token) if token and Path(token).is_file() else None
+        if not query_id or not (token_path or token):
+            return None
+        client = IBKRFlexClient(
+            token=(token_path.read_text(encoding="utf-8").strip() if token_path else token),
+            query_id=query_id,
+        )
+        snapshot = client.fetch()
+        if snapshot.quality == "missing":
+            raise RuntimeError("IBKR Flex 未返回数据（请检查 Token 与 Query ID）")
+        self.database.save_broker_snapshot(snapshot)
+        gross = max(sum(abs(float(item.get("market_value", 0) or 0)) for item in snapshot.positions.values()), 0.0)
+        watched = {item.symbol for item in self.database.list_watchlist()}
+        payload_positions = {
+            symbol: {"quantity": float(item.get("quantity", 0) or 0),
+                     "market_value": float(item.get("market_value", 0) or 0),
+                     "cost_price": float(item.get("cost_basis", 0) or 0),
+                     "nominal_price": 0.0}
+            for symbol, item in snapshot.positions.items()
+        }
+        open_counts: Dict[str, int] = {}
+        for trade in self.database.open_trades():
+            open_counts[str(trade["contract_key"]).split("|", 1)[0].split(".", 1)[-1]] = \
+                open_counts.get(str(trade["contract_key"]).split("|", 1)[0].split(".", 1)[-1], 0) + 1
+        self._portfolio = {}
+        for symbol in (watched | set(payload_positions)):
+            row = payload_positions.get(symbol, {})
+            context = PortfolioContext(
+                symbol=symbol, in_watchlist=symbol in watched,
+                held_quantity=float(row.get("quantity", 0)),
+                concentration=abs(float(row.get("market_value", 0))) / gross if gross else 0.0,
+                open_paper_positions=open_counts.get(symbol, 0), nav=snapshot.nav,
+                snapshot_at=snapshot.as_of,
+            )
+            self._portfolio[symbol] = context
+            self.database.save_portfolio_snapshot(symbol, snapshot.as_of, _as_jsonable(context))
         self._last_sync = datetime.utcnow().isoformat()
         return snapshot
 
