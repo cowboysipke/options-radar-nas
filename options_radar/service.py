@@ -2348,11 +2348,24 @@ class OptionsRadarService:
             "positions": len(broker.positions) if broker else 0,
         }
         futu_status = self.providers.status("futu")
+        opend_status = dict(futu_status)
+        try:
+            raw = self.futu.health()
+            opend_status.update({
+                "ready": bool(getattr(raw, "ready", False)),
+                "qot_logged_in": bool(getattr(raw, "qot_logged_in", False)),
+                "trade_logged_in": bool(getattr(raw, "trade_logged_in", False)),
+                "server_version": getattr(raw, "server_version", None),
+                "market_us": getattr(raw, "market_us", None),
+            })
+        except Exception:
+            opend_status.setdefault("ready", False)
+            opend_status.setdefault("qot_logged_in", False)
         result = {
             "status": "degraded" if self._last_error else ("ok" if self._started else "stopped"),
             "last_collection": self._last_collection, "last_sync": self._last_sync,
             "last_error": self._last_error, "discord": self.source.health(),
-            "opend": futu_status,
+            "opend": opend_status,
             "futu": futu_status,
             "ibkr": {
                 "provider": "ibkr", "configured": True, "connected": bool(broker),
