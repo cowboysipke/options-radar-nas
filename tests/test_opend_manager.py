@@ -192,6 +192,20 @@ class OpenDManagerTests(unittest.TestCase):
             self.assertNotIn("a" * 32, " ".join(captured["args"]))
             self.assertEqual(captured["kwargs"]["env"]["HOME"], str(manager.profile_dir))
 
+    def test_install_does_not_clobber_live_process_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manager = self.make_manager(directory)
+            # Mark the release as already installed so install() takes the early return.
+            (manager.release_dir / ".release-sha256").write_text("1" * 64, encoding="ascii")
+            manager.write_config("user@example.com", "a" * 32)
+            manager.start(monitor=False)
+            manager.ingest_output("Please input phone verification code")
+            self.assertEqual(manager.status().state, OpenDState.WAITING_PHONE)
+            # install() must not reset a running process's live state to STOPPED.
+            manager.install()
+            self.assertEqual(manager.status().state, OpenDState.WAITING_PHONE)
+            self.assertTrue(manager.status().running)
+
     def test_status_parser_covers_verification_ready_and_auth_error(self):
         with tempfile.TemporaryDirectory() as directory:
             manager = self.make_manager(directory)

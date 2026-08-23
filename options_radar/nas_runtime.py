@@ -352,6 +352,21 @@ class NasRuntime:
             "backtest": ("dashboard_backtest", "backtest_summary", "run_backtests"),
             "system": ("system_status", "health"),
             "providers": ("dashboard_providers", "providers", "provider_statuses"),
+            "signals": ("dashboard_signals", "signals"),
+            "gex": ("gex_view", "gex"),
+            "dealer": ("dealer_view", "dealer"),
+            "spark": ("spark_view", "spark"),
+            "gex_snapshot": ("snapshot_gex", "gex_snapshot"),
+            "alerts_check": ("check_alerts", "alerts_check"),
+            "flow_classify": ("classify_flow_events", "flow_classify"),
+            "reevaluate": ("reevaluate_today", "reevaluate"),
+            "futu_import_watchlist": ("import_futu_watchlist", "futu_import_watchlist"),
+            "dashboard_dates": ("dashboard_dates",),
+            "backtest_replay": ("replay_backtest", "backtest_replay"),
+            "analyst_backtest_detail": ("analyst_backtest_detail",),
+            "audit_sample": ("audit_sample",),
+            "audit_review": ("audit_review",),
+            "portfolio_refresh": ("refresh_portfolio", "portfolio_refresh"),
             "provider_status": ("provider_status", "get_provider_status"),
             "provider_test": ("test_provider", "provider_test"),
             "provider_enable": ("enable_provider", "provider_enable"),
@@ -392,21 +407,44 @@ class NasRuntime:
     def dashboard_callbacks(self) -> Mapping[str, Any]:
         callbacks: Dict[str, Any] = {
             "status": lambda _payload: self.health(),
+            "system": lambda _payload: self.health(),
             "futu_status": self._opend_status_callback,
             "futu_send_verification": self._opend_send_verification,
             "futu_submit_verification": self._opend_submit_verification,
             "futu_relogin": self._opend_relogin,
             "backup": self._backup_callback,
-            "system": lambda _payload: self.health(),
             "provider_action": self._provider_action,
         }
         for name in (
             "futu_sync", "collect", "report", "recommendations", "portfolio",
             "contracts", "rules", "analysts", "backtest", "providers",
-            "provider_status", "market_provenance", "market_compare",
+            "provider_status", "provider_test", "provider_enable", "provider_disable",
+            "provider_priority", "market_provenance", "market_compare",
             "ibkr_discover", "ibkr_sync",
+            "signals", "gex", "dealer", "spark", "gex_snapshot", "alerts_check",
+            "flow_classify", "reevaluate", "futu_import_watchlist", "dashboard_dates",
+            "backtest_replay", "analyst_backtest_detail", "audit_sample", "audit_review",
+            "portfolio_refresh",
         ):
             callbacks[name] = lambda payload, callback_name=name: self._component_action(callback_name, payload)
+
+        # Sub-object lambdas on the service (feishu / discord browser / ai) are not
+        # plain component methods; delegate them through the service dashboard map.
+        def _delegate(name: str):
+            def invoke(payload: Mapping[str, Any]) -> Any:
+                self._ensure_component()
+                component = self.component
+                if component is None:
+                    return {"status": "pending", "component": name}
+                factory = getattr(component, "dashboard_callbacks", None)
+                callback = factory().get(name) if factory is not None else None
+                if callback is None:
+                    return {"status": "not_supported", "component": name}
+                return callback(payload)
+            return invoke
+
+        for name in ("feishu_test", "discord_login", "discord_refresh_qr", "deepseek_test"):
+            callbacks[name] = _delegate(name)
         return callbacks
 
     def _backup_callback(self, _payload: Mapping[str, Any]) -> Mapping[str, Any]:

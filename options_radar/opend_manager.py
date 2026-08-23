@@ -326,7 +326,11 @@ class OpenDManager:
         marker = self.release_dir / ".release-sha256"
         if not force and self.executable_path.exists() and marker.exists():
             if marker.read_text(encoding="ascii").strip() == self.release.sha256:
-                self._state = OpenDState.STOPPED
+                # Already installed: do not clobber the live process state
+                # (STARTING / WAITING_PHONE / READY) that the reader thread
+                # maintains.  A running process must not flip back to STOPPED.
+                if self._process is None or self._process.poll() is not None:
+                    self._state = OpenDState.STOPPED
                 return self.executable_path
 
         self.install_root.mkdir(parents=True, exist_ok=True)

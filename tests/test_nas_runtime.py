@@ -280,6 +280,21 @@ class RuntimeOpenDIntegrationTests(unittest.TestCase):
             self.assertIn(("submit_phone", "123456"), runtime.opend_manager.calls)
             self.assertIn(("submit_captcha", "AB12"), runtime.opend_manager.calls)
 
+    def test_dashboard_callbacks_include_full_service_surface(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = NasRuntime(runtime_paths(Path(directory)), opend_manager_factory=FakeOpenDManager)
+            self.configure(runtime)
+            callbacks = runtime.dashboard_callbacks()
+            for name in (
+                "gex", "signals", "dealer", "spark", "gex_snapshot", "alerts_check",
+                "flow_classify", "reevaluate", "futu_import_watchlist", "dashboard_dates",
+                "audit_sample", "audit_review", "backtest_replay", "analyst_backtest_detail",
+                "portfolio_refresh", "feishu_test", "discord_login", "discord_refresh_qr",
+                "deepseek_test", "provider_test", "provider_enable", "provider_disable",
+                "provider_priority",
+            ):
+                self.assertIn(name, callbacks)
+
     def test_component_callbacks_are_generic_and_service_independent(self):
         class Component:
             def __init__(self, **_kwargs):
