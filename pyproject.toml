@@ -14,7 +14,7 @@ dependencies = [
   "pywinauto>=0.6.8; platform_system == 'Windows'",
   "pystray>=0.19; platform_system == 'Windows'",
   "rapidocr-onnxruntime>=1.4,<2",
-  "pydantic>=1.10,<2",
+  "pydantic>=1.10,<3",
   "playwright>=1.40,<2",
 ]
 
@@ -22,7 +22,7 @@ dependencies = [
 bot = ["discord.py>=2.4,<3"]
 futu = ["futu-api>=9,<11"]
 ibkr = ["ib-insync>=0.9.86,<1"]
-dev = ["pytest>=7,<9"]
+dev = ["pytest>=7,<10"]
 nas = ["APScheduler>=3.10,<4", "playwright>=1.49,<2", "lark-oapi>=1.4,<2", "futu-api>=10,<11"]
 
 [project.scripts]
