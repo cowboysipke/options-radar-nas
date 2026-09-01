@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-FROM python:3.12-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 ARG TARGETARCH
 ENV PYTHONDONTWRITEBYTECODE=1 \
